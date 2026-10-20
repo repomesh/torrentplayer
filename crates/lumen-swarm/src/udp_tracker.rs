@@ -56,7 +56,7 @@ pub struct AnnounceRequest {
 pub struct Announced {
     /// Peers, public addresses only.
     pub peers: Vec<SocketAddr>,
-    /// When to announce again, clamped to [`MIN_INTERVAL`]..=[`MAX_INTERVAL`].
+    /// When to announce again, clamped to `MIN_INTERVAL..=MAX_INTERVAL`.
     pub interval: Duration,
 }
 

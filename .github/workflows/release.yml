@@ -54,6 +54,9 @@ jobs:
           build-frontend: 'false'
 
       - name: Add Rust target
+        # bash on every runner: PowerShell (the Windows default) would read $TARGET as its own
+        # variable, which is empty.
+        shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: rustup target add "$TARGET"
