@@ -49,6 +49,7 @@ Every problem is logged and shown at the top of the Settings page. Older files a
 `lumen_settings::migrate`, which gains one step per schema change. Version 2 removed
 `network.killSwitch` (the kill switch is always on in protected modes, see [Network](#network));
 a version 1 file loads normally and the field is dropped the next time settings are saved.
+Version 3 added the optional seeding time target; older files keep ratio-only seeding.
 
 ## Settings
 
@@ -103,15 +104,22 @@ starts, before the engine runs.
 
 ### Bandwidth and seeding
 
-| Setting                       | Default | Valid values                     | Applies |
-| ----------------------------- | ------- | -------------------------------- | ------- |
-| `bandwidth.downloadLimitKib`  | `0`     | 0 (unlimited) to 1 048 576 KiB/s | later   |
-| `bandwidth.uploadLimitKib`    | `0`     | 0 (unlimited) to 1 048 576 KiB/s | later   |
-| `bandwidth.seedAfterWatching` | `true`  | on / off                         | later   |
-| `bandwidth.seedRatioTarget`   | `2.0`   | 0–100 (0 keeps seeding)          | later   |
-| `bandwidth.peerLimit`         | `40`    | 5–500                            | later   |
+| Setting                          | Default | Valid values                        | Applies    |
+| -------------------------------- | ------- | ----------------------------------- | ---------- |
+| `bandwidth.downloadLimitKib`     | `0`     | 0 (unlimited) to 1 048 576 KiB/s    | now        |
+| `bandwidth.uploadLimitKib`       | `0`     | 0 (unlimited) to 1 048 576 KiB/s    | now        |
+| `bandwidth.seedAfterWatching`    | `true`  | on / off                            | now        |
+| `bandwidth.seedRatioTarget`      | `2.0`   | 0–100 (0 has no ratio limit)        | now        |
+| `bandwidth.seedTimeLimitMinutes` | `0`     | 0–525 600 (0 has no time limit)     | now        |
+| `bandwidth.peerLimit`            | `40`    | 5–500                               | next start |
+| `bandwidth.maxDownloads`         | `0`     | 0–100 (0 downloads the whole queue) | now        |
 
 The page shows limits in KB/s or MB/s; they are stored in KiB/s.
+Both engines upload while a torrent is active. After playback finishes, **Keep sharing after
+watching** leaves it seeding until the first configured target is reached. The ratio is uploaded
+piece bytes divided by verified downloaded bytes; setting either target to 0 disables only that
+target. The upload limit covers both engines together. The peer cap needs a restart because the
+librqbit session fixes it when it starts.
 
 ### Search
 

@@ -33,6 +33,8 @@ describe('validate', () => {
     expect(validate('bandwidth.peerLimit', 40.5)).not.toBeNull();
     expect(validate('bandwidth.maxDownloads', 0)).toBeNull();
     expect(validate('bandwidth.maxDownloads', 101)).toMatch(/0 for no limit/);
+    expect(validate('bandwidth.seedTimeLimitMinutes', 0)).toBeNull();
+    expect(validate('bandwidth.seedTimeLimitMinutes', 525_601)).toMatch(/one year/);
     expect(validate('playback.defaultSpeed', 1.25)).toBeNull();
     expect(validate('playback.defaultSpeed', 3.5)).not.toBeNull();
     expect(validate('playback.defaultSpeed', Number.NaN)).not.toBeNull();
@@ -112,7 +114,10 @@ describe('availability', () => {
     expect(availability('advanced.logLevel')).toBe('live');
     expect(availability('advanced.engine')).toBe('restart');
     expect(availability('storage.downloadDir')).toBe('restart');
-    expect(availability('bandwidth.peerLimit')).toBe('later');
+    expect(availability('bandwidth.peerLimit')).toBe('restart');
+    expect(availability('bandwidth.seedAfterWatching')).toBe('live');
+    expect(availability('bandwidth.seedRatioTarget')).toBe('live');
+    expect(availability('bandwidth.seedTimeLimitMinutes')).toBe('live');
     expect(availability('search.sources.internetArchive')).toBe('later');
     expect(availability('playback.defaultSpeed')).toBe('live');
     expect(availability('search.hideAdult')).toBe('live');

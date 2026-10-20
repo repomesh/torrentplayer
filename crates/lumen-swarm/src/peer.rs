@@ -2,18 +2,22 @@
 
 //! One task per peer connection: handshake, then read messages and write requests.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Arc, PoisonError};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use bytes::{Buf as _, BytesMut};
+use bytes::{Buf as _, Bytes, BytesMut};
 use lumen_net::{Lease, NetError};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace};
 
+use crate::metainfo::BLOCK_LEN;
 use crate::sched::PeerKey;
 use crate::torrent::{PeerEnd, Shared, Verdict};
 use crate::wire::{self, HANDSHAKE_LEN, MAX_FRAME, Message, Outgoing, UT_PEX_ID, WireError};
@@ -25,6 +29,105 @@ const KEEPALIVE: Duration = Duration::from_secs(60);
 /// Peer-exchange messages closer together than this are ignored (BEP 11 asks for one a
 /// minute).
 const PEX_INTERVAL: Duration = Duration::from_secs(30);
+/// Most disk reads a peer may queue for upload. Extra requests are ignored until a slot frees.
+const MAX_UPLOAD_REQUESTS: usize = 128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct UploadKey {
+    piece: u32,
+    begin: u32,
+    len: u32,
+}
+
+/// Cancellable upload reads for one connection.
+struct Uploads {
+    slots: Arc<Semaphore>,
+    pending: Mutex<HashMap<UploadKey, Arc<CancellationToken>>>,
+}
+
+impl Uploads {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            slots: Arc::new(Semaphore::new(MAX_UPLOAD_REQUESTS)),
+            pending: Mutex::new(HashMap::new()),
+        })
+    }
+
+    fn request(self: &Arc<Self>, shared: Arc<Shared>, peer: PeerKey, key: UploadKey) {
+        let Ok(permit) = Arc::clone(&self.slots).try_acquire_owned() else {
+            return;
+        };
+        let Ok(global_permit) = Arc::clone(&shared.upload_slots).try_acquire_owned() else {
+            return;
+        };
+        let cancel = Arc::new(CancellationToken::new());
+        if let Some(old) = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, Arc::clone(&cancel))
+        {
+            old.cancel();
+        }
+        let uploads = Arc::clone(self);
+        tokio::spawn(async move {
+            let read_from = Arc::clone(&shared);
+            let data = tokio::task::spawn_blocking(move || {
+                let mut data = vec![0_u8; key.len as usize];
+                read_from
+                    .store
+                    .read(key.piece, key.begin, &mut data)
+                    .map(|()| Bytes::from(data))
+            })
+            .await;
+            match data {
+                Ok(Ok(data)) if shared.throttle_upload(data.len(), cancel.as_ref()).await => {
+                    shared.send_upload(
+                        peer,
+                        Outgoing::Piece {
+                            piece: key.piece,
+                            begin: key.begin,
+                            data,
+                        },
+                    );
+                }
+                Ok(Err(error)) => trace!(peer, %error, "could not read an upload block"),
+                Err(error) => debug!(peer, %error, "upload read task failed"),
+                _ => {}
+            }
+            let mut pending = uploads
+                .pending
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if pending
+                .get(&key)
+                .is_some_and(|current| Arc::ptr_eq(current, &cancel))
+            {
+                pending.remove(&key);
+            }
+            drop(permit);
+            drop(global_permit);
+        });
+    }
+
+    fn cancel(&self, key: UploadKey) {
+        if let Some(cancel) = self
+            .pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&key)
+        {
+            cancel.cancel();
+        }
+    }
+
+    fn cancel_all(&self) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        for (_, cancel) in pending.drain() {
+            cancel.cancel();
+        }
+    }
+}
 
 /// Per-connection state the message handler keeps.
 struct Conn {
@@ -32,6 +135,14 @@ struct Conn {
     /// Piece data received, in bytes.
     delivered: u64,
     last_pex: Option<Instant>,
+    interested: bool,
+    uploads: Arc<Uploads>,
+}
+
+impl Drop for Conn {
+    fn drop(&mut self) {
+        self.uploads.cancel_all();
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -83,21 +194,43 @@ pub(crate) async fn run(shared: Arc<Shared>, addr: SocketAddr, key: PeerKey, tim
 
     let (tx, rx) = mpsc::channel(SEND_QUEUE);
     shared.sched().add_peer(key);
-    shared
-        .peers
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .insert(key, tx);
-    if extensions {
-        shared.send(key, [Outgoing::ExtendedHandshake, Outgoing::Interested]);
-    } else {
-        shared.send(key, [Outgoing::Interested]);
+    // Publish the sender only after its initial messages are queued. Holding the peer map while
+    // taking the bitfield snapshot makes a concurrent piece completion either appear in the
+    // bitfield or send a later `have`, never slip between them or precede the bitfield.
+    let published = {
+        let mut peers = shared.peers.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut hello = vec![Outgoing::Bitfield(shared.bitfield())];
+        if extensions {
+            hello.push(Outgoing::ExtendedHandshake);
+        }
+        hello.push(Outgoing::Interested);
+        hello.push(if shared.upload_enabled.load(Ordering::Relaxed) {
+            Outgoing::Unchoke
+        } else {
+            Outgoing::Choke
+        });
+        if hello
+            .into_iter()
+            .any(|message| tx.try_send(message).is_err())
+        {
+            false
+        } else {
+            peers.insert(key, tx);
+            true
+        }
+    };
+    if !published {
+        shared.sched().remove_peer(key);
+        shared.peer_finished(addr, PeerEnd::Closed { worked: false });
+        return;
     }
 
     let mut conn = Conn {
         addr,
         delivered: 0,
         last_pex: None,
+        interested: false,
+        uploads: Uploads::new(),
     };
     let (read, write) = tcp.into_split();
     let result = tokio::select! {
@@ -110,7 +243,7 @@ pub(crate) async fn run(shared: Arc<Shared>, addr: SocketAddr, key: PeerKey, tim
             }
         } => Ok(()),
         r = read_loop(&shared, key, read, &mut conn) => r,
-        r = write_loop(write, rx) => r,
+        r = write_loop(&shared, write, rx) => r,
     };
     if let Err(error) = result {
         debug!(%addr, peer = key, %error, "peer disconnected");
@@ -182,6 +315,7 @@ async fn handshake(
 }
 
 async fn write_loop(
+    shared: &Shared,
     mut write: OwnedWriteHalf,
     mut rx: mpsc::Receiver<Outgoing>,
 ) -> Result<(), PeerError> {
@@ -194,15 +328,22 @@ async fn write_loop(
             Err(_) => Outgoing::KeepAlive,
         };
         out.clear();
+        let mut uploaded = first.uploaded_len();
         first.encode(&mut out);
         // Batch whatever else is queued into one write.
         while out.len() < 64 * 1024 {
             match rx.try_recv() {
-                Ok(m) => m.encode(&mut out),
+                Ok(m) => {
+                    uploaded += m.uploaded_len();
+                    m.encode(&mut out);
+                }
                 Err(_) => break,
             }
         }
         write.write_all(&out).await?;
+        shared
+            .uploaded
+            .fetch_add(uploaded as u64, Ordering::Relaxed);
     }
 }
 
@@ -285,15 +426,31 @@ fn handle(
                 }
             }
         }
-        // TorrentStream does not upload yet (peers stay choked), so requests are ignored. The extended
-        // handshake needs no answer: TorrentStream only receives peer exchange.
-        Message::Request { .. }
-        | Message::Cancel { .. }
-        | Message::Interested
-        | Message::NotInterested
-        | Message::KeepAlive
-        | Message::Extended { .. }
-        | Message::Ignored(_) => {}
+        Message::Interested => conn.interested = true,
+        Message::NotInterested => {
+            conn.interested = false;
+            conn.uploads.cancel_all();
+        }
+        Message::Request { piece, begin, len } => {
+            let request = UploadKey { piece, begin, len };
+            let valid = len > 0
+                && len <= BLOCK_LEN
+                && begin
+                    .checked_add(len)
+                    .is_some_and(|end| end <= shared.meta.piece_size(piece));
+            if !valid {
+                return Err(PeerError::Invalid("request"));
+            }
+            let have = shared.sched().have(piece);
+            if conn.interested && have && shared.upload_enabled.load(Ordering::Relaxed) {
+                conn.uploads.request(Arc::clone(shared), key, request);
+            }
+        }
+        Message::Cancel { piece, begin, len } => {
+            conn.uploads.cancel(UploadKey { piece, begin, len });
+        }
+        // The extended handshake needs no answer: TorrentStream only receives peer exchange.
+        Message::KeepAlive | Message::Extended { .. } | Message::Ignored(_) => {}
     }
     if refill {
         let requests = shared.sched().fill(key, now);

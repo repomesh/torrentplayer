@@ -19,7 +19,8 @@ use librqbit::{
     create_torrent,
 };
 use lumen_swarm::{Metainfo, Swarm, SwarmConfig, Torrent};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 const PIECE: u32 = 256 * 1024;
 const LEN: usize = 24 * 1024 * 1024;
@@ -45,6 +46,13 @@ struct Fixture {
 }
 
 async fn fixture(upload_limit: Option<NonZeroU32>) -> Fixture {
+    fixture_with_peer(upload_limit, None).await
+}
+
+async fn fixture_with_peer(
+    upload_limit: Option<NonZeroU32>,
+    extra_peer: Option<SocketAddr>,
+) -> Fixture {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_test_writer()
@@ -107,7 +115,9 @@ async fn fixture(upload_limit: Option<NonZeroU32>) -> Fixture {
     cfg.enable_trackers = false;
     let swarm = Swarm::start(cfg).await.unwrap();
     let meta = Metainfo::from_bytes(&torrent_bytes).unwrap();
-    let torrent = swarm.add(meta, vec![seeder_addr]).unwrap();
+    let mut peers = vec![seeder_addr];
+    peers.extend(extra_peer);
+    let torrent = swarm.add(meta, peers).unwrap();
     Fixture {
         _seeder: seeder,
         _dirs: (seed_dir, leech_dir),
@@ -115,6 +125,72 @@ async fn fixture(upload_limit: Option<NonZeroU32>) -> Fixture {
         swarm,
         torrent,
     }
+}
+
+fn frame(id: u8, body: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(body.len() + 1).unwrap();
+    [&len.to_be_bytes()[..], &[id], body].concat()
+}
+
+async fn read_frame(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let len = stream.read_u32().await.unwrap() as usize;
+    let mut frame = vec![0_u8; len];
+    stream.read_exact(&mut frame).await.unwrap();
+    frame
+}
+
+/// Acts as a downloader on a connection lumen-swarm opened: waits until piece zero is verified,
+/// requests all of it, and returns its bytes and how long the upload took.
+async fn request_first_piece(listener: TcpListener) -> (Vec<u8>, Duration) {
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let mut handshake = [0_u8; 68];
+    stream.read_exact(&mut handshake).await.unwrap();
+    handshake[48..].copy_from_slice(b"-TS0001-requester001");
+    stream.write_all(&handshake).await.unwrap();
+
+    // This peer has no pieces, but wants anything lumen-swarm can serve.
+    stream
+        .write_all(&frame(5, &vec![0_u8; (LEN / PIECE as usize).div_ceil(8)]))
+        .await
+        .unwrap();
+    stream.write_all(&frame(2, &[])).await.unwrap();
+
+    let initial = read_frame(&mut stream).await;
+    assert_eq!(initial.first(), Some(&5), "the bitfield must be first");
+    loop {
+        let incoming = read_frame(&mut stream).await;
+        if incoming.first() == Some(&4)
+            && incoming.get(1..5) == Some(0_u32.to_be_bytes().as_slice())
+        {
+            break;
+        }
+    }
+
+    let started = Instant::now();
+    for begin in (0..PIECE).step_by(16 * 1024) {
+        let body = [
+            &0_u32.to_be_bytes()[..],
+            &begin.to_be_bytes(),
+            &(16_u32 * 1024).to_be_bytes(),
+        ]
+        .concat();
+        stream.write_all(&frame(6, &body)).await.unwrap();
+    }
+    let mut piece = vec![0_u8; PIECE as usize];
+    let mut received = 0;
+    while received < piece.len() {
+        let incoming = read_frame(&mut stream).await;
+        if incoming.first() != Some(&7) || incoming.len() < 9 {
+            continue;
+        }
+        let index = u32::from_be_bytes(incoming[1..5].try_into().unwrap());
+        let begin = u32::from_be_bytes(incoming[5..9].try_into().unwrap()) as usize;
+        let data = &incoming[9..];
+        assert_eq!(index, 0);
+        piece[begin..begin + data.len()].copy_from_slice(data);
+        received += data.len();
+    }
+    (piece, started.elapsed())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -167,6 +243,32 @@ async fn downloads_a_whole_selected_file_correctly() {
         "downloaded bytes differ from the seeded file"
     );
     assert!(f.torrent.have_pieces().iter().all(|h| *h));
+    f.swarm.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn uploads_verified_pieces_and_obeys_the_global_limit() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let requester = tokio::spawn(request_first_piece(listener));
+    let f = fixture_with_peer(None, Some(addr)).await;
+    // A 64 KiB burst is immediate; the remaining 192 KiB takes about three seconds.
+    f.swarm.set_upload_limit(NonZeroU32::new(64 * 1024));
+    f.torrent.select_file(0).unwrap();
+
+    let (piece, elapsed) = tokio::time::timeout(Duration::from_secs(20), requester)
+        .await
+        .expect("timed out waiting for the upload")
+        .unwrap();
+    assert_eq!(piece, f.data[..PIECE as usize]);
+    assert!(
+        elapsed >= Duration::from_secs(2),
+        "the upload limit should be visible, finished in {elapsed:?}"
+    );
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    let stats = f.torrent.stats();
+    assert_eq!(stats.uploaded_bytes, u64::from(PIECE));
+    assert!(stats.upload_bps > 0.0, "{stats:?}");
     f.swarm.shutdown();
 }
 

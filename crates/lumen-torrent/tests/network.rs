@@ -211,6 +211,7 @@ async fn magnets_through_librqbit_use_only_the_proxy() {
             public_discovery: true,
             download_limit_bps: None,
             upload_limit_bps: None,
+            peer_limit: 40,
         },
         Some(net.clone()),
     )
@@ -273,6 +274,7 @@ async fn magnets_without_usable_trackers_are_refused_in_protected_modes() {
             public_discovery: true,
             download_limit_bps: None,
             upload_limit_bps: None,
+            peer_limit: 40,
         },
         Some(net.clone()),
     )
@@ -309,6 +311,7 @@ async fn turning_protection_on_replaces_the_librqbit_session() {
             public_discovery: false,
             download_limit_bps: None,
             upload_limit_bps: None,
+            peer_limit: 40,
         },
         Some(net.clone()),
     )

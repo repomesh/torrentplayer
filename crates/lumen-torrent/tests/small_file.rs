@@ -99,6 +99,7 @@ async fn reads_a_subtitle_file_through_either_engine() {
             public_discovery: false,
             download_limit_bps: None,
             upload_limit_bps: None,
+            peer_limit: 40,
         })
         .await
         .unwrap();

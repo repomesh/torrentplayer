@@ -23,8 +23,8 @@ pub use model::{
     AdvancedSettings, BandwidthSettings, CACHE_LIMIT_RANGE_GB, CLEANUP_RANGE_DAYS, EncryptionMode,
     EngineSetting, FieldError, HardwareDecoding, Ipv6Policy, LogLevel, MAX_DOWNLOADS, MAX_RATE_KIB,
     MAX_TEXT, NetworkMode, NetworkSettings, PEER_LIMIT_RANGE, PlaybackSettings, RESULTS_RANGE,
-    SCHEMA_VERSION, SEED_RATIO_RANGE, SPEED_RANGE, SearchSettings, SearchSources, Settings,
-    Socks5Settings, StorageSettings, WireGuardSettings,
+    SCHEMA_VERSION, SEED_RATIO_RANGE, SEED_TIME_RANGE_MINUTES, SPEED_RANGE, SearchSettings,
+    SearchSources, Settings, Socks5Settings, StorageSettings, WireGuardSettings,
 };
 pub use patch::{MAX_PATCH_BYTES, PatchError, apply_patch};
 pub use secrets::{

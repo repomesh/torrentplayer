@@ -6,7 +6,7 @@
 //! instant (see [`StreamEngine::preload`](crate::StreamEngine::preload)): the magnet link's
 //! metadata is fetched (librqbit, metadata only), the torrent is added to lumen-swarm, and the
 //! first minutes of the best video file plus its last 2 MiB (where MP4 and MKV indexes often
-//! live) are downloaded. Nothing is uploaded: lumen-swarm does not upload, and librqbit only
+//! live) are downloaded. Nothing is uploaded: preload torrents stay choked, and librqbit only
 //! exchanges metadata.
 //!
 //! Limits: one preload at a time (a new one evicts the old one unless the user added it), at

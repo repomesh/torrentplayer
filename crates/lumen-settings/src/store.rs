@@ -168,6 +168,14 @@ pub fn migrate(mut doc: Map<String, Value>) -> Map<String, Value> {
                 network.remove("killSwitch");
             }
         }
+        if version < 3
+            && let Some(Value::Object(bandwidth)) = doc.get_mut("bandwidth")
+        {
+            // Older files predate the optional time target: keep their ratio-only behavior.
+            bandwidth
+                .entry("seedTimeLimitMinutes")
+                .or_insert_with(|| Value::from(0));
+        }
         tracing::info!(from = version, to = SCHEMA_VERSION, "migrating settings");
     }
     doc.insert("version".to_owned(), Value::from(SCHEMA_VERSION));
@@ -382,6 +390,22 @@ mod tests {
         let saved = fs::read_to_string(store.path()).unwrap();
         assert!(!saved.contains("killSwitch"));
         assert!(saved.contains(&format!("\"version\": {SCHEMA_VERSION}")));
+    }
+
+    #[test]
+    fn version_2_files_keep_ratio_only_seeding() {
+        let (_dir, store) = store();
+        fs::create_dir_all(store.dir()).unwrap();
+        fs::write(
+            store.path(),
+            r#"{"version":2,"bandwidth":{"seedAfterWatching":true,"seedRatioTarget":3.5}}"#,
+        )
+        .unwrap();
+        let loaded = store.load();
+        assert!((loaded.settings.bandwidth.seed_ratio_target - 3.5).abs() < f64::EPSILON);
+        assert_eq!(loaded.settings.bandwidth.seed_time_limit_minutes, 0);
+        assert_eq!(loaded.settings.version, SCHEMA_VERSION);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
     }
 
     #[test]

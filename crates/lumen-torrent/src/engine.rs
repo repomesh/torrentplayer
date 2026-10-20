@@ -202,6 +202,8 @@ pub struct TorrentStats {
     pub download_bps: u64,
     /// Upload rate in bytes per second.
     pub upload_bps: u64,
+    /// Piece payload bytes uploaded since the torrent was added.
+    pub uploaded_bytes: u64,
     /// Peers with an established connection.
     pub peers_live: u32,
     /// Peers being connected to.
@@ -688,6 +690,7 @@ impl Engine {
             },
             download_bps,
             upload_bps,
+            uploaded_bytes: stats.uploaded_bytes,
             peers_live: peers.map_or(0, |p| p.live),
             peers_connecting: peers.map_or(0, |p| p.connecting),
             peers_seen: peers.map_or(0, |p| p.seen),

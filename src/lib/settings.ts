@@ -24,6 +24,7 @@ export const LIMITS = {
   speed: [0.5, 3],
   rateKib: [0, 1024 * 1024],
   seedRatio: [0, 100],
+  seedTimeMinutes: [0, 525_600],
   peerLimit: [5, 500],
   maxDownloads: [0, 100],
   cacheLimitGb: [1, 100_000],
@@ -115,6 +116,10 @@ const RULES: Record<string, Check> = {
     LIMITS.seedRatio,
     'Choose a ratio between 0 and 100 (0 keeps seeding).',
     false,
+  ),
+  'bandwidth.seedTimeLimitMinutes': range(
+    LIMITS.seedTimeMinutes,
+    'Choose up to 525600 minutes (one year), or 0 for no time limit.',
   ),
   'bandwidth.peerLimit': range(LIMITS.peerLimit, 'Choose between 5 and 500 peers.'),
   'bandwidth.maxDownloads': range(
@@ -222,7 +227,7 @@ export function describeRate(kib: number): string {
  */
 export type Availability = 'live' | 'restart' | 'later';
 
-const RESTART = new Set(['storage.downloadDir', 'advanced.engine']);
+const RESTART = new Set(['storage.downloadDir', 'advanced.engine', 'bandwidth.peerLimit']);
 
 const LATER = new Set([
   // Player features not built yet (the default speed, the debug overlay key, and the queue's
@@ -232,11 +237,6 @@ const LATER = new Set([
   // Storage housekeeping.
   'storage.cacheLimitGb',
   'storage.cleanupAfterDays',
-  // The engines take seeding policy once it is passed through (the download and upload
-  // limits apply now).
-  'bandwidth.seedAfterWatching',
-  'bandwidth.seedRatioTarget',
-  'bandwidth.peerLimit',
   // Search sources and filters not built yet (the adult filter and preloading apply now).
   'search.sources.emberglow',
   'search.sources.internetArchive',
