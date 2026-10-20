@@ -25,7 +25,7 @@ pub const QUEUE_FILE_NAME: &str = "queue.json";
 pub const QUEUE_INVALID_FILE_NAME: &str = "queue.invalid.json";
 /// Version of the file format. Bump it, and add a migration to [`QueueStore::load`], when the
 /// format changes.
-pub const QUEUE_VERSION: u32 = 1;
+pub const QUEUE_VERSION: u32 = 2;
 /// The most items a queue holds.
 pub const MAX_QUEUE_ITEMS: usize = 500;
 /// Longest title or torrent name, in characters.
@@ -66,6 +66,10 @@ pub struct QueueItem {
     /// background (unticked in the queue). Playing it directly still works.
     #[serde(default)]
     pub skipped: bool,
+    /// The video reached its end during playback. Kept separately from the cursor so jumping
+    /// ahead does not make every item before it look watched.
+    #[serde(default)]
+    pub played: bool,
 }
 
 /// The queue: items in play order and a cursor.
@@ -469,6 +473,7 @@ mod tests {
             size_bytes: Some(1_234_567_890),
             paused: false,
             skipped: false,
+            played: false,
         }
     }
 
@@ -503,25 +508,29 @@ mod tests {
     }
 
     #[test]
-    fn keeps_pauses_and_the_download_order() {
+    fn keeps_item_state_and_the_download_order() {
         let dir = tempfile::tempdir().unwrap();
         let store = QueueStore::new(dir.path());
         let mut saved = queue(&["a", "b"], None);
         saved.items[1].paused = true;
+        saved.items[0].played = true;
         saved.order = DownloadOrder::Fastest;
         store.save(&saved).unwrap();
         assert_eq!(store.load().queue, saved);
         let json: Value = serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
         assert_eq!(json["order"], "fastest");
         assert_eq!(json["items"][1]["paused"], true);
+        assert_eq!(json["items"][0]["played"], true);
 
         // Files from before these existed: nothing paused, in queue order.
         let mut old = json;
         old["items"][1].as_object_mut().unwrap().remove("paused");
+        old["items"][0].as_object_mut().unwrap().remove("played");
         old.as_object_mut().unwrap().remove("order");
         fs::write(store.path(), old.to_string()).unwrap();
         let loaded = store.load().queue;
         assert!(!loaded.items[1].paused);
+        assert!(!loaded.items[0].played);
         assert_eq!(loaded.order, DownloadOrder::InOrder);
     }
 

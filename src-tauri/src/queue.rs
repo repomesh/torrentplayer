@@ -261,6 +261,7 @@ mod tests {
                 size_bytes: None,
                 paused: true,
                 skipped: true,
+                played: false,
             }],
             current: Some("a".into()),
             order: lumen_library::DownloadOrder::Fastest,

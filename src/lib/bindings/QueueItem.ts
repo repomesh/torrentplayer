@@ -40,4 +40,9 @@ paused: boolean,
  * Kept in the queue but skipped: not played automatically and not downloaded in the
  * background (unticked in the queue). Playing it directly still works.
  */
-skipped: boolean, };
+skipped: boolean, 
+/**
+ * The video reached its end during playback. Kept separately from the cursor so jumping
+ * ahead does not make every item before it look watched.
+ */
+played: boolean, };

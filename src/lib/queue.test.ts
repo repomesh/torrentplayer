@@ -15,6 +15,7 @@ import {
   groupQueue,
   groupTree,
   keepGroupsTogether,
+  markPlayed,
   moveGroup,
   optimizeQueue,
   putFirst,
@@ -53,6 +54,7 @@ function item(
     sizeBytes: 1000,
     paused: false,
     skipped: false,
+    played: false,
   };
 }
 
@@ -111,7 +113,7 @@ describe('the cursor', () => {
     q = setCurrent(q, 'b');
     expect(nextItem(q)?.id).toBe('c');
     expect(upcomingCount(q)).toBe(1);
-    expect(isPlayed(q, 'a')).toBe(true);
+    expect(isPlayed(q, 'a')).toBe(false);
     expect(isPlayed(q, 'b')).toBe(false);
     q = setCurrent(q, 'c');
     expect(nextItem(q)).toBeNull();
@@ -129,10 +131,28 @@ describe('the cursor', () => {
     expect(remove(q, 'missing')).toBe(q);
   });
 
-  it('clears the played items before the cursor', () => {
-    const q = setCurrent(queueOf('a', 'b', 'c'), 'b');
+  it('records watched items separately and clears only those, retaining skipped items', () => {
+    let q = setCurrent(queueOf('a', 'b', 'c'), 'c');
+    expect(q.items.map((i) => i.skipped)).toEqual([true, true, false]);
+    q = markPlayed(q, 'a');
+    expect(isPlayed(q, 'a')).toBe(true);
+    expect(q.items[0]?.skipped).toBe(false);
     expect(ids(clearPlayed(q))).toEqual(['b', 'c']);
+    expect(clearPlayed(q).items[0]?.skipped).toBe(true);
     expect(clearPlayed(queueOf('a'))).toEqual(queueOf('a'));
+  });
+
+  it('marks only entries passed over when the cursor jumps ahead', () => {
+    let q = setCurrent(queueOf('a', 'b', 'c', 'd'), 'a');
+    q = setCurrent(q, 'd');
+    expect(q.items.map((i) => [i.id, i.skipped])).toEqual([
+      ['a', false],
+      ['b', true],
+      ['c', true],
+      ['d', false],
+    ]);
+    expect(setCurrent(q, 'b').items[1]?.skipped).toBe(false);
+    expect(markPlayed(q, 'missing')).toBe(q);
   });
 });
 
@@ -166,8 +186,9 @@ describe('skipping', () => {
     const saved = setSkipped(queueFrom([item('a', 1), item('b', 2)]), ['b'], true);
     const back = sanitizeQueue(JSON.parse(JSON.stringify(saved)));
     expect(back.items.map((i) => i.skipped)).toEqual([false, true]);
-    const old = { items: [{ ...item('a'), skipped: undefined }], current: null };
+    const old = { items: [{ ...item('a'), skipped: undefined, played: undefined }], current: null };
     expect(sanitizeQueue(JSON.parse(JSON.stringify(old))).items[0]?.skipped).toBe(false);
+    expect(sanitizeQueue(JSON.parse(JSON.stringify(old))).items[0]?.played).toBe(false);
   });
 });
 

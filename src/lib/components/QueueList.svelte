@@ -231,7 +231,7 @@
       }
       return isReady(item) ? 'Up next · Ready' : 'Up next';
     }
-    if (index <= cursor) {
+    if (item.played) {
       return 'Played';
     }
     return isReady(item) ? 'Ready' : null;

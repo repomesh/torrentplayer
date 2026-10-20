@@ -73,6 +73,7 @@
     enqueue,
     findEntry,
     groupKey,
+    markPlayed,
     moveGroup,
     newItemId,
     nextItem,
@@ -904,6 +905,7 @@
           sizeBytes: result.sizeBytes,
           paused: false,
           skipped: false,
+          played: false,
         },
       ],
       clipTitle(result.title),
@@ -922,6 +924,7 @@
       sizeBytes: file.length,
       paused: false,
       skipped: false,
+      played: false,
     }));
   }
 
@@ -1018,6 +1021,10 @@
   // --- Up next --------------------------------------------------------------------------
 
   function onEnded(): void {
+    const finished = nowPlaying?.queueId;
+    if (finished !== null && finished !== undefined) {
+      queue = markPlayed(queue, finished);
+    }
     const item = nextItem(queue);
     const stream = nowPlaying?.stream.streamId;
     if (!item || stream === undefined) {
