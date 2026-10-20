@@ -7,6 +7,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Search results now show when their video is playing, up next, or elsewhere in the queue, and
+  disable the Queue button for entries that are already queued.
+
 ## [0.1.0] - 2026-10-20
 
 The first public preview: stream any torrent, video or audio, and skip to any moment.

@@ -150,6 +150,25 @@ export function findEntry(
   return queue.items.find((i) => sameEntry(i, entry)) ?? null;
 }
 
+/** How an entry already in the queue relates to playback. */
+export type QueueEntryState = 'playing' | 'upNext' | 'queued';
+
+/** The visible queue state for an entry, or `null` when it is not queued. */
+export function queueEntryState(
+  queue: Queue,
+  entry: Pick<QueueItem, 'source' | 'infoHash' | 'fileIndex'>,
+  playingId: string | null,
+): QueueEntryState | null {
+  const item = findEntry(queue, entry);
+  if (item === null) {
+    return null;
+  }
+  if (item.id === playingId) {
+    return 'playing';
+  }
+  return nextItem(queue)?.id === item.id ? 'upNext' : 'queued';
+}
+
 /**
  * Puts the entry for `item`'s file first in the queue, adding `item` if that file is not queued:
  * its torrent's other items follow it, then everything else in order. Returns the entry's id,

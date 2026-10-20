@@ -18,6 +18,7 @@ import {
   moveGroup,
   optimizeQueue,
   putFirst,
+  queueEntryState,
   restoreOrder,
   isPlayed,
   move,
@@ -83,6 +84,14 @@ describe('adding', () => {
       sameEntry(item('a', null, null), { ...item('b', null, null), source: 'https://x/y' }),
     ).toBe(false);
     expect(findEntry(queueOf('a', 'b'), item('z', 1))?.id).toBe('b');
+  });
+
+  it('describes whether a matching entry is playing, up next, queued, or absent', () => {
+    const q = setCurrent(queueOf('a', 'b', 'c'), 'a');
+    expect(queueEntryState(q, item('x', 0), 'a')).toBe('playing');
+    expect(queueEntryState(q, item('x', 1), 'a')).toBe('upNext');
+    expect(queueEntryState(q, item('x', 2), 'a')).toBe('queued');
+    expect(queueEntryState(q, item('x', 9), 'a')).toBeNull();
   });
 
   it('stops at the item limit', () => {
