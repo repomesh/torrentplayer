@@ -174,7 +174,14 @@ jobs:
         run: |
           cargo cyclonedx --manifest-path src-tauri/Cargo.toml --format json --spec-version 1.5 \
             --override-filename torrentstream
-          cp src-tauri/torrentstream.cdx.json release-assets/torrentstream.cdx.json
+          # cargo-cyclonedx versions differ in the extension they add (.json or .cdx.json).
+          sbom=$(find src-tauri -maxdepth 1 -name 'torrentstream*.json' | head -n 1)
+          if [ -z "$sbom" ]; then
+            echo "::error::cargo cyclonedx wrote no torrentstream*.json in src-tauri"
+            ls -la src-tauri
+            exit 1
+          fi
+          cp "$sbom" release-assets/torrentstream.cdx.json
 
       - name: Generate checksums
         working-directory: release-assets
