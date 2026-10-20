@@ -11,6 +11,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Search results now show when their video is playing, up next, or elsewhere in the queue, and
   disable the Queue button for entries that are already queued.
+- Removing every queued file in a torrent now uses a distinct trash-and-count control and asks
+  for confirmation, so it cannot be mistaken for removing one video row.
 
 ## [0.1.0] - 2026-10-20
 

@@ -276,6 +276,22 @@
     return group.items.every((i) => i.paused);
   }
 
+  /** Bulk removal is deliberately different from a row's × and needs confirmation. */
+  function removeWholeGroup(group: QueueGroup): void {
+    if (!onRemoveGroup) {
+      return;
+    }
+    const count = group.items.length;
+    const noun = count === 1 ? 'file' : 'files';
+    if (
+      globalThis.confirm(
+        `Remove all ${String(count)} ${noun} of “${groupName(group)}” from the queue?`,
+      )
+    ) {
+      onRemoveGroup(group.key);
+    }
+  }
+
   function rowTitle(row: TreeRow): string {
     return row.file ? fileName(row.file.path) : (row.item?.title ?? '');
   }
@@ -408,7 +424,7 @@
       case 'Delete':
         handled();
         if (node.kind === 'group') {
-          onRemoveGroup?.(node.group.key);
+          removeWholeGroup(node.group);
         } else if (node.row.item) {
           onRemove(node.row.item.id);
         }
@@ -722,15 +738,18 @@
             {#if onRemoveGroup}
               <button
                 type="button"
-                class="icon"
+                class="icon group-remove"
                 tabindex="-1"
                 aria-label={`Remove all files of ${groupName(group)} from the queue`}
-                title="Remove its files from the queue"
+                title={`Remove all ${String(group.items.length)} queued files`}
                 onclick={() => {
-                  onRemoveGroup(group.key);
+                  removeWholeGroup(group);
                 }}
               >
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7L7 17" /></svg>
+                <svg viewBox="0 0 24 24" aria-hidden="true"
+                  ><path d="M5 7h14M9 7V5h6v2M8 10v8M12 10v8M16 10v8M7 7l1 13h8l1-13" /></svg
+                >
+                <span class="remove-count" aria-hidden="true">{group.items.length}</span>
               </button>
             {/if}
           </span>
@@ -1087,6 +1106,7 @@
   .actions {
     display: flex;
     align-items: center;
+    gap: 0.1rem;
   }
 
   .icon {
@@ -1094,6 +1114,28 @@
     padding: 0.28rem;
     border-radius: 0.35rem;
     color: var(--text-muted);
+  }
+
+  .group-remove {
+    margin-left: 0.2rem;
+    padding-left: 0.45rem;
+    border-left: 1px solid rgb(255 255 255 / 12%);
+  }
+
+  .group-remove:hover:not(:disabled) {
+    color: #e8907a;
+  }
+
+  .remove-count {
+    min-width: 1.1rem;
+    margin-left: 0.15rem;
+    padding: 0 0.2rem;
+    border-radius: 0.55rem;
+    background: rgb(255 255 255 / 8%);
+    font-size: 0.65rem;
+    line-height: 1.1rem;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
   }
 
   .text {
