@@ -7,6 +7,33 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-20
+
+The first public preview: stream any torrent, video or audio, and skip to any moment.
+
+### Highlights
+
+- Streaming built for skipping: TorrentStream's own engine fetches the playhead first and, on a
+  skip, the exact spot you jump to, from the fastest peers.
+- Paste a magnet link, drop a `.torrent` file, or search public torrent indexers with a "Best
+  pick" that preloads so it starts at once.
+- A queue that downloads ahead while you watch, with live speed, peers, progress, and time left
+  per item; what plays always comes first. Playing a search result puts it first in the queue.
+- Video, music, podcasts, and audiobooks in one player, with subtitles and keyboard controls.
+- Private by design: no telemetry or accounts; direct, VPN adapter, built-in WireGuard, or
+  SOCKS5 modes with a kill switch.
+- Windows (x64), macOS (Apple silicon and Intel), and Linux (AppImage, `.deb`, `.rpm`).
+
+### Known limitations
+
+- Installers are not code-signed yet: Windows SmartScreen and macOS Gatekeeper warn the first
+  time you open the app.
+- Magnet links use the embedded librqbit engine by default (Settings → Advanced → Engine switches
+  them to TorrentStream's engine); `.torrent` files use TorrentStream's engine.
+- The built-in player uses the system web engine, which cannot decode Dolby (AC-3, E-AC-3,
+  TrueHD) or DTS audio; the app warns instead of playing silently.
+- Desktop only; no seeding controls yet.
+
 ### VPN connections
 
 - Separate VPN and WireGuard choices in Network & VPN. VPN uses an existing VPN app's tunnel
@@ -193,4 +220,5 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   never unmuted. It now mutes only when the autoplay policy refuses sound, then shows a "click
   to unmute" button. Interruptions are retried with the sound unchanged.
 
-[Unreleased]: https://github.com/torrent-stream/torrentstream/commits/main
+[Unreleased]: https://github.com/torrent-stream/torrentstream/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/torrent-stream/torrentstream/releases/tag/v0.1.0
