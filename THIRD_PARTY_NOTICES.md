@@ -2072,7 +2072,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 Used by:
 
-- [webpki-root-certs 1.0.9](https://github.com/rustls/webpki-roots)
+- [webpki-root-certs 1.0.10](https://github.com/rustls/webpki-roots)
 
 ```text
 # Community Data License Agreement - Permissive - Version 2.0
@@ -2719,7 +2719,7 @@ CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 Used by:
 
-- [rustls-webpki 0.103.15](https://github.com/rustls/webpki)
+- [rustls-webpki 0.103.16](https://github.com/rustls/webpki)
 
 ```text
 Except as otherwise noted, this project is licensed under the following
@@ -3028,7 +3028,6 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [sha1 0.10.7](https://github.com/RustCrypto/hashes)
 - [sha2 0.10.9](https://github.com/RustCrypto/hashes)
 
 ```text
@@ -4768,6 +4767,7 @@ THE SOFTWARE.
 
 Used by:
 
+- [sha1 0.11.0](https://github.com/RustCrypto/hashes)
 - [sha2 0.11.1](https://github.com/RustCrypto/hashes)
 
 ```text

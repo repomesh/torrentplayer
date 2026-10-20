@@ -23,6 +23,11 @@ updates:
       interval: weekly
     cooldown:
       default-days: 14
+    ignore:
+      # svelte-check (and the Svelte language tools) support TypeScript 5 and 6 only; a major
+      # bump fails `npm ci`. Lift this when they support the next major.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
     groups:
       tauri:
         patterns: ['@tauri-apps/*']
