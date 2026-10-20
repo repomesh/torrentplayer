@@ -50,6 +50,35 @@
     />
   </Field>
   <Field
+    id="bandwidth-seed-time"
+    label="Stop seeding after"
+    path="bandwidth.seedTimeLimitMinutes"
+    help="Minutes after watching finishes. 0 has no time limit; the ratio target can still stop it."
+    error={errors['bandwidth.seedTimeLimitMinutes']}
+  >
+    <div class="with-unit">
+      <input
+        id="bandwidth-seed-time"
+        class="number"
+        type="number"
+        min="0"
+        max="525600"
+        step="1"
+        value={b.seedTimeLimitMinutes}
+        disabled={!b.seedAfterWatching}
+        aria-describedby="bandwidth-seed-time-help"
+        aria-invalid={errors['bandwidth.seedTimeLimitMinutes'] !== undefined}
+        oninput={(e: Event) => {
+          update(
+            'bandwidth.seedTimeLimitMinutes',
+            (e.currentTarget as HTMLInputElement).valueAsNumber,
+          );
+        }}
+      />
+      <span>minutes</span>
+    </div>
+  </Field>
+  <Field
     id="bandwidth-ratio"
     label="Stop seeding at ratio"
     path="bandwidth.seedRatioTarget"
@@ -117,3 +146,13 @@
     />
   </Field>
 </section>
+
+<style>
+  .with-unit {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.8rem;
+  }
+</style>

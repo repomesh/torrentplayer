@@ -6,6 +6,8 @@
 //! it is used, frames have a hard size limit, and unknown messages are skipped rather than
 //! guessed at.
 
+use bytes::Bytes;
+
 /// Length of the handshake.
 pub(crate) const HANDSHAKE_LEN: usize = 68;
 const PROTOCOL: &[u8; 19] = b"BitTorrent protocol";
@@ -187,12 +189,15 @@ fn be32(b: &[u8], at: usize) -> u32 {
 }
 
 /// Messages TorrentStream sends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outgoing {
     KeepAlive,
+    Choke,
+    Unchoke,
     /// TorrentStream's extended handshake (BEP 10), sent only to peers that support extensions.
     ExtendedHandshake,
     Interested,
+    Bitfield(Bytes),
     Have(u32),
     Request {
         piece: u32,
@@ -204,11 +209,16 @@ pub(crate) enum Outgoing {
         begin: u32,
         len: u32,
     },
+    Piece {
+        piece: u32,
+        begin: u32,
+        data: Bytes,
+    },
 }
 
 impl Outgoing {
     /// Appends the encoded message to `out`.
-    pub(crate) fn encode(self, out: &mut Vec<u8>) {
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
         let mut put = |id: Option<u8>, ints: &[u32]| {
             let len = u32::from(id.is_some()) + 4 * u32::try_from(ints.len()).unwrap_or(0);
             out.extend_from_slice(&len.to_be_bytes());
@@ -227,10 +237,34 @@ impl Outgoing {
                 out.extend_from_slice(EXTENDED_HANDSHAKE);
             }
             Self::KeepAlive => put(None, &[]),
+            Self::Choke => put(Some(0), &[]),
+            Self::Unchoke => put(Some(1), &[]),
             Self::Interested => put(Some(2), &[]),
-            Self::Have(piece) => put(Some(4), &[piece]),
-            Self::Request { piece, begin, len } => put(Some(6), &[piece, begin, len]),
-            Self::Cancel { piece, begin, len } => put(Some(8), &[piece, begin, len]),
+            Self::Bitfield(bits) => {
+                let len = u32::try_from(bits.len() + 1).unwrap_or(0);
+                out.extend_from_slice(&len.to_be_bytes());
+                out.push(5);
+                out.extend_from_slice(bits);
+            }
+            Self::Have(piece) => put(Some(4), &[*piece]),
+            Self::Request { piece, begin, len } => put(Some(6), &[*piece, *begin, *len]),
+            Self::Cancel { piece, begin, len } => put(Some(8), &[*piece, *begin, *len]),
+            Self::Piece { piece, begin, data } => {
+                let len = u32::try_from(data.len() + 9).unwrap_or(0);
+                out.extend_from_slice(&len.to_be_bytes());
+                out.push(7);
+                out.extend_from_slice(&piece.to_be_bytes());
+                out.extend_from_slice(&begin.to_be_bytes());
+                out.extend_from_slice(data);
+            }
+        }
+    }
+
+    /// Payload bytes uploaded by this message.
+    pub(crate) fn uploaded_len(&self) -> usize {
+        match self {
+            Self::Piece { data, .. } => data.len(),
+            _ => 0,
         }
     }
 }
@@ -280,6 +314,37 @@ mod tests {
         assert_eq!(parse(frame), Ok(Message::KeepAlive));
         let (frame, _) = split_frame(&rest[used2..], MAX_FRAME).unwrap().unwrap();
         assert_eq!(parse(frame), Ok(Message::Have(9)));
+    }
+
+    #[test]
+    fn upload_messages_round_trip() {
+        let mut out = Vec::new();
+        Outgoing::Choke.encode(&mut out);
+        Outgoing::Unchoke.encode(&mut out);
+        Outgoing::Bitfield(Bytes::from_static(&[0xa0])).encode(&mut out);
+        Outgoing::Piece {
+            piece: 4,
+            begin: 16_384,
+            data: Bytes::from_static(b"piece data"),
+        }
+        .encode(&mut out);
+
+        let mut rest = out.as_slice();
+        for expected in [Message::Choke, Message::Unchoke, Message::Bitfield(&[0xa0])] {
+            let (frame, used) = split_frame(rest, MAX_FRAME).unwrap().unwrap();
+            assert_eq!(parse(frame), Ok(expected));
+            rest = &rest[used..];
+        }
+        let (frame, used) = split_frame(rest, MAX_FRAME).unwrap().unwrap();
+        assert_eq!(used, rest.len());
+        assert_eq!(
+            parse(frame),
+            Ok(Message::Piece {
+                piece: 4,
+                begin: 16_384,
+                data: b"piece data",
+            })
+        );
     }
 
     #[test]

@@ -796,7 +796,10 @@
         onTime?.(video.currentTime, video.duration);
       }
     }}
-    onended={() => onEnded?.()}
+    onended={() => {
+      report();
+      onEnded?.();
+    }}
     onratechange={() => {
       if (video) {
         rate = video.playbackRate;

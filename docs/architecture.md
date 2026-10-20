@@ -183,9 +183,10 @@ time. Every view stays reachable from the rail.
   added four at a time so a long queue does not fetch all of its metadata at once. Items keep
   paused, skipped, and completed state independently (`QueueItem.paused`, `.skipped`, `.played`),
   so jumping ahead does not make bypassed videos look watched. Items can be paused;
-  paused, finished, and waiting items' files are deselected and torrents nothing needs are
-  paused. The settings' download limit covers everything together (both engines, playback
-  included) and caps the planner's estimate; the upload limit applies to librqbit. Queue rows
+  paused, finished, and waiting items' files are deselected. A torrent nothing needs is paused
+  unless it is still seeding after playback: the queue stops it at the first configured ratio or
+  time target. The settings' download limit covers everything together (both engines, playback
+  included) and caps the planner's estimate; one upload limit covers both engines. Queue rows
   show speed, peers, progress, and time left, coloured green (playable), yellow (downloading
   from peers), or grey (waiting).
 - **Preloading the next item** starts only once the playing file is fully downloaded, or

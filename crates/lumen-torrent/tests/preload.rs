@@ -127,6 +127,7 @@ async fn fixture() -> Fixture {
         public_discovery: false,
         download_limit_bps: None,
         upload_limit_bps: None,
+        peer_limit: 40,
     })
     .await
     .unwrap();
@@ -333,6 +334,7 @@ async fn stale_preload_caches_are_removed_at_start() {
         public_discovery: false,
         download_limit_bps: None,
         upload_limit_bps: None,
+        peer_limit: 40,
     })
     .await
     .unwrap();

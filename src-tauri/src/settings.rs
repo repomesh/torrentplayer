@@ -125,6 +125,7 @@ impl SettingsState {
             };
         }
         (config.download_limit_bps, config.upload_limit_bps) = rate_limits(&self.startup.bandwidth);
+        config.peer_limit = usize::try_from(self.startup.bandwidth.peer_limit).unwrap_or(40);
         config
     }
 
@@ -190,6 +191,9 @@ impl SettingsState {
         }
         if engine_override().is_none() && now.advanced.engine != self.startup.advanced.engine {
             fields.push("advanced.engine".to_owned());
+        }
+        if now.bandwidth.peer_limit != self.startup.bandwidth.peer_limit {
+            fields.push("bandwidth.peerLimit".to_owned());
         }
         fields
     }
@@ -582,6 +586,7 @@ mod tests {
         let state = state(dir.path());
         let config = state.engine_config();
         assert_eq!(config.download_dir, dir.path().join("downloads"));
+        assert_eq!(config.peer_limit, 40);
         if engine_override().is_none() {
             assert_eq!(config.choice, EngineChoice::Auto);
         }
@@ -593,12 +598,15 @@ mod tests {
         let state = state(dir.path());
         let mut next = state.current();
         next.bandwidth.peer_limit = 80;
-        assert!(state.restart_required(&next).is_empty());
+        assert_eq!(state.restart_required(&next), ["bandwidth.peerLimit"]);
         next.storage.download_dir = Some(dir.path().join("elsewhere").display().to_string());
-        assert_eq!(state.restart_required(&next), ["storage.downloadDir"]);
+        assert_eq!(
+            state.restart_required(&next),
+            ["storage.downloadDir", "bandwidth.peerLimit"]
+        );
         // Choosing the default folder explicitly is not a change.
         next.storage.download_dir = Some(dir.path().join("downloads").display().to_string());
-        assert!(state.restart_required(&next).is_empty());
+        assert_eq!(state.restart_required(&next), ["bandwidth.peerLimit"]);
     }
 
     #[test]

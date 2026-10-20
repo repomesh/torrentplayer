@@ -124,6 +124,9 @@ sources, details, and where other tools are the better fit.
   time left, with a bar
   that is green when it is ready to play, yellow while it downloads, and grey while it
   waits for peers. A "Fastest" badge points out the video that would play smoothest now.
+- **Gives back to the swarm.** The built-in engine uploads every verified piece it has while a
+  torrent is active. After playback, keep sharing until a ratio or time target is reached, with
+  one upload limit across both engines.
 - **In order or fastest first.** Series, albums, and courses download in sequence, or the fastest
   torrents go first while each course keeps its lecture order. Pause any video, or a whole
   torrent, with one click.
@@ -163,6 +166,8 @@ sources, details, and where other tools are the better fit.
   upload speed of every torrent, and your public IPv4 and IPv6 addresses as the
   internet sees them, through the current mode (optional; see [Privacy](#privacy)).
 - **Bandwidth limits** for download and upload, applied to the whole app instantly.
+- **Seeding controls** for sharing after playback, ratio and time targets, and a peer cap per
+  torrent.
 
 ## Performance
 
@@ -284,7 +289,7 @@ Working today: the streaming engine (for `.torrent` files and magnet links), pla
 queue with background downloads, VPN, WireGuard, and proxy modes with a kill switch, and
 bandwidth limits. Next:
 
-- [ ] Seeding controls: keep sharing after watching, ratio targets, peer limits
+- [x] Seeding controls: keep sharing after watching, ratio and time targets, peer limits
 - [ ] Cache size limit and automatic clean-up of old downloads
 - [ ] Resume where you left off
 - [ ] More search sources: Internet Archive, Academic Torrents, and your own
@@ -302,9 +307,9 @@ what you play.
 peers can only be as fast as they are; the queue shows each video's peers and speed so you can
 pick one that plays smoothly, or switch the queue to "Fastest first".
 
-**Does TorrentStream upload?** The optional librqbit engine shares pieces while it downloads.
-Uploading from TorrentStream's default streaming engine and fuller seeding controls are on the
-roadmap.
+**Does TorrentStream upload?** Yes. Both torrent engines share verified pieces while a torrent is
+active, under the global upload limit. Settings can keep sharing after playback until either a
+ratio or time target is reached.
 
 **What happens if my VPN drops?** The kill switch stops all traffic and closes connections until
 the tunnel is back; nothing falls back to a direct connection. See

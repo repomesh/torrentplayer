@@ -322,6 +322,12 @@ struct TorrentRun {
     /// What the downloader last set.
     paused: bool,
     limit: Option<u64>,
+    /// A playback of this torrent was active on the previous tick.
+    was_watching: bool,
+    /// When the most recent playback ended; starts the optional seeding timer.
+    seed_since: Option<Instant>,
+    /// The lumen-swarm upload switch last requested.
+    upload_enabled: Option<bool>,
 }
 
 /// Measurements of one torrent this tick.
@@ -337,6 +343,28 @@ fn group_of(item: &QueueItem) -> String {
         || format!("link:{}", item.source),
         |h| h.to_ascii_lowercase(),
     )
+}
+
+/// Whether a torrent may keep uploading after its playback ended. Ratio zero and time zero
+/// independently mean no limit; whichever configured target is reached first stops seeding.
+fn post_playback_seeding(
+    since: Option<Instant>,
+    bandwidth: &lumen_settings::BandwidthSettings,
+    downloaded: u64,
+    uploaded: u64,
+    now: Instant,
+) -> bool {
+    let Some(since) = since.filter(|_| bandwidth.seed_after_watching) else {
+        return false;
+    };
+    let within_time = bandwidth.seed_time_limit_minutes == 0
+        || now.saturating_duration_since(since)
+            < Duration::from_secs(u64::from(bandwidth.seed_time_limit_minutes) * 60);
+    #[allow(clippy::cast_precision_loss)]
+    let below_ratio = bandwidth.seed_ratio_target == 0.0
+        || downloaded == 0
+        || uploaded as f64 / (downloaded as f64) < bandwidth.seed_ratio_target;
+    within_time && below_ratio
 }
 
 impl Runtime {
@@ -373,8 +401,32 @@ impl Runtime {
             }
         }
         let groups: HashSet<String> = queue.items.iter().map(group_of).collect();
-        self.torrents
-            .retain(|g, run| groups.contains(g) || run.adding.is_some());
+        let open_torrents: HashSet<TorrentId> = core
+            .streams
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|stream| stream.torrent)
+            .collect();
+        let removed: Vec<TorrentId> = self
+            .torrents
+            .iter()
+            .filter(|(group, run)| {
+                !groups.contains(*group)
+                    && run.adding.is_none()
+                    && run.id.is_none_or(|id| !open_torrents.contains(&id))
+            })
+            .filter_map(|(_, run)| run.id)
+            .collect();
+        for id in removed {
+            let _ = engine.set_upload_enabled(id, false);
+            let _ = engine.set_paused(id, true).await;
+        }
+        self.torrents.retain(|g, run| {
+            groups.contains(g)
+                || run.adding.is_some()
+                || run.id.is_some_and(|id| open_torrents.contains(&id))
+        });
 
         // Measure every torrent once (the watched one and ones outside the queue included, so
         // the meter sees the whole link).
@@ -389,7 +441,8 @@ impl Runtime {
         let total_bps: u64 = measured.values().map(|m| m.stats.download_bps).sum();
         let total_upload_bps: u64 = measured.values().map(|m| m.stats.upload_bps).sum();
 
-        // The video being watched (the newest stream).
+        // The video being watched (the newest stream). A stream parked at its reported end is
+        // no longer foreground; seeking it back makes it foreground again on the next tick.
         let (watched, status) = {
             let streams = core.streams.lock().unwrap_or_else(PoisonError::into_inner);
             streams
@@ -399,7 +452,18 @@ impl Runtime {
                     let have = measured
                         .get(&s.torrent)
                         .map_or(&[][..], |m| m.have.as_slice());
-                    (Some((s.torrent, s.file)), Some(s.session.status(have)))
+                    let status = s.session.status(have);
+                    let ended = engine.info(s.torrent).ok().is_some_and(|info| {
+                        info.files
+                            .iter()
+                            .find(|file| file.index == s.file)
+                            .is_some_and(|file| file.len > 0 && status.position_bytes >= file.len)
+                    });
+                    if ended {
+                        (None, None)
+                    } else {
+                        (Some((s.torrent, s.file)), Some(status))
+                    }
                 })
         };
         let foreground = watched.zip(status).and_then(|((torrent, file), status)| {
@@ -562,7 +626,32 @@ impl Runtime {
             };
             let foreground = watched_torrent == Some(id);
             let needed = wanted.get(&id).copied().unwrap_or(false);
-            let pause = !foreground && (!needed || plan.pause_background);
+            if foreground {
+                run.was_watching = true;
+                run.seed_since = None;
+            } else if run.was_watching {
+                run.was_watching = false;
+                run.seed_since = Some(now);
+            }
+            let seeding = post_playback_seeding(
+                run.seed_since,
+                &settings.bandwidth,
+                m.stats.progress_bytes,
+                m.stats.uploaded_bytes,
+                now,
+            );
+            let upload_enabled = foreground || needed || seeding;
+            if run.upload_enabled != Some(upload_enabled)
+                && engine.set_upload_enabled(id, upload_enabled).is_ok()
+            {
+                run.upload_enabled = Some(upload_enabled);
+            }
+            let pause = !foreground
+                && if needed {
+                    plan.pause_background
+                } else {
+                    !seeding
+                };
             let limit = if foreground || !needed {
                 None
             } else {
@@ -786,5 +875,58 @@ mod tests {
         };
         state.set_queue(queue.clone());
         assert_eq!(state.queue(), queue);
+    }
+
+    #[test]
+    fn post_playback_seeding_stops_at_the_first_target() {
+        let since = Instant::now();
+        let now = since + Duration::from_secs(30 * 60);
+        let bandwidth = lumen_settings::BandwidthSettings {
+            seed_ratio_target: 2.0,
+            seed_time_limit_minutes: 60,
+            ..lumen_settings::BandwidthSettings::default()
+        };
+        assert!(post_playback_seeding(
+            Some(since),
+            &bandwidth,
+            1_000,
+            1_999,
+            now
+        ));
+        assert!(!post_playback_seeding(
+            Some(since),
+            &bandwidth,
+            1_000,
+            2_000,
+            now
+        ));
+        assert!(!post_playback_seeding(
+            Some(since),
+            &bandwidth,
+            1_000,
+            0,
+            since + Duration::from_secs(60 * 60)
+        ));
+    }
+
+    #[test]
+    fn post_playback_seeding_can_be_unlimited_or_disabled() {
+        let now = Instant::now();
+        let mut bandwidth = lumen_settings::BandwidthSettings {
+            seed_ratio_target: 0.0,
+            seed_time_limit_minutes: 0,
+            ..lumen_settings::BandwidthSettings::default()
+        };
+        assert!(post_playback_seeding(
+            Some(now.checked_sub(Duration::from_secs(1)).unwrap_or(now)),
+            &bandwidth,
+            1,
+            u64::MAX,
+            now
+        ));
+        bandwidth.seed_after_watching = false;
+        assert!(!post_playback_seeding(Some(now), &bandwidth, 1, 0, now));
+        bandwidth.seed_after_watching = true;
+        assert!(!post_playback_seeding(None, &bandwidth, 1, 0, now));
     }
 }

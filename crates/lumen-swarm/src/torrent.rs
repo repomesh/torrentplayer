@@ -17,7 +17,7 @@ use librqbit_tracker_comms::{
     TorrentStatsProvider, TrackerComms, TrackerCommsStats, TrackerCommsStatsState, UdpTrackerClient,
 };
 use lumen_net::{Network, Policy};
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
@@ -59,6 +59,8 @@ const MAX_KNOWN: usize = 2000;
 const RETRY_TICKS: u32 = 5;
 /// The playhead's interest id; readers use ids above it.
 const PLAYHEAD: InterestId = 0;
+/// Disk reads queued for upload across the engine. Each holds at most one 16 KiB block.
+const MAX_UPLOAD_READS: usize = 256;
 
 /// Engine settings.
 // Independent switches, each read by a different part of the engine.
@@ -95,6 +97,8 @@ pub struct SwarmConfig {
     pub scheduler: SchedulerConfig,
     /// Maximum download rate for the whole engine, bytes per second.
     pub download_limit_bps: Option<NonZeroU32>,
+    /// Maximum upload rate for the whole engine, bytes per second.
+    pub upload_limit_bps: Option<NonZeroU32>,
     /// Sends peer and tracker traffic through TorrentStream's network manager (proxy, bound
     /// interface, kill switch). `None` connects directly.
     pub network: Option<Network>,
@@ -122,6 +126,7 @@ impl SwarmConfig {
             announce_port: 6881,
             scheduler: SchedulerConfig::default(),
             download_limit_bps: None,
+            upload_limit_bps: None,
             network: None,
             enable_web_seeds: true,
             allow_local_web_seeds: false,
@@ -161,6 +166,10 @@ pub struct SwarmStats {
     pub download_bps: f64,
     /// Verified bytes downloaded.
     pub downloaded_bytes: u64,
+    /// Upload rate, bytes per second.
+    pub upload_bps: f64,
+    /// Piece payload bytes uploaded.
+    pub uploaded_bytes: u64,
     /// Verified pieces.
     pub have_pieces: u32,
     /// Requests outstanding across all peers.
@@ -250,6 +259,8 @@ impl Smoothed {
 pub struct Swarm {
     cfg: Arc<SwarmConfig>,
     limiter: Option<Arc<RateLimiter>>,
+    upload_limiter: Arc<RateLimiter>,
+    upload_slots: Arc<Semaphore>,
     peer_id: [u8; 20],
     http: reqwest::Client,
     /// For web seeds: only public destinations, checked redirects.
@@ -314,6 +325,11 @@ impl Swarm {
                 cfg.download_limit_bps
                     .map_or_else(RateLimiter::unlimited, RateLimiter::new),
             )),
+            upload_limiter: Arc::new(
+                cfg.upload_limit_bps
+                    .map_or_else(RateLimiter::unlimited, RateLimiter::new),
+            ),
+            upload_slots: Arc::new(Semaphore::new(MAX_UPLOAD_READS)),
             cfg: Arc::new(cfg),
             peer_id: generate_peer_id(),
             http,
@@ -343,7 +359,10 @@ impl Swarm {
             store,
             cfg: Arc::clone(&self.cfg),
             limiter: self.limiter.clone(),
+            upload_limiter: Arc::clone(&self.upload_limiter),
+            upload_slots: Arc::clone(&self.upload_slots),
             own_limit: RateLimiter::unlimited(),
+            upload_enabled: AtomicBool::new(true),
             paused: AtomicBool::new(false),
             selected: Mutex::new(Vec::new()),
             peer_id: self.peer_id,
@@ -355,10 +374,12 @@ impl Swarm {
             verdicts: Mutex::new(HashMap::new()),
             blame: Mutex::new(HashMap::new()),
             smoothed: Mutex::new(Smoothed::default()),
+            upload_smoothed: Mutex::new(Smoothed::default()),
             candidates: Mutex::new(Candidates::default()),
             next_peer: AtomicU64::new(1),
             next_interest: AtomicU64::new(PLAYHEAD + 1),
             downloaded: AtomicU64::new(0),
+            uploaded: AtomicU64::new(0),
             web_seeds: AtomicUsize::new(0),
             downloaded_web: AtomicU64::new(0),
             cancel: self.cancel.child_token(),
@@ -412,6 +433,12 @@ impl Swarm {
         if let Some(limiter) = &self.limiter {
             limiter.set_rate(limit);
         }
+    }
+
+    /// Changes the upload limit shared by every torrent of the engine (bytes per second);
+    /// `None` removes it. Takes effect within a fraction of a second.
+    pub fn set_upload_limit(&self, limit: Option<NonZeroU32>) {
+        self.upload_limiter.set_rate(limit);
     }
 
     /// Stops every torrent.
@@ -516,6 +543,40 @@ impl Torrent {
     /// `None` removes the limit. Takes effect within a fraction of a second.
     pub fn set_download_limit(&self, limit: Option<NonZeroU32>) {
         self.shared.own_limit.set_rate(limit);
+    }
+
+    /// Enables or disables serving verified pieces to peers. Existing peers are choked or
+    /// unchoked at once.
+    pub fn set_upload_enabled(&self, enabled: bool) {
+        // Serialize the state change and choke with the final upload enqueue. This prevents an
+        // already-read block from slipping into a peer's queue after its choke.
+        let mut peers = self
+            .shared
+            .peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.shared.upload_enabled.swap(enabled, Ordering::Relaxed) == enabled {
+            return;
+        }
+        let message = if enabled {
+            Outgoing::Unchoke
+        } else {
+            Outgoing::Choke
+        };
+        peers.retain(|key, tx| {
+            if tx.try_send(message.clone()).is_ok() {
+                true
+            } else {
+                debug!(peer = key, "peer send queue full; disconnecting");
+                false
+            }
+        });
+    }
+
+    /// Whether this torrent currently serves pieces to peers.
+    #[must_use]
+    pub fn upload_enabled(&self) -> bool {
+        self.shared.upload_enabled.load(Ordering::Relaxed)
     }
 
     /// Downloads part of a file (`range`, in bytes within the file, clamped to it) in the
@@ -660,6 +721,14 @@ impl Torrent {
             peers_unchoked: s.unchoked,
             download_bps: s.download_bps,
             downloaded_bytes: self.shared.downloaded.load(Ordering::Relaxed),
+            upload_bps: self
+                .shared
+                .upload_smoothed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .bps
+                .unwrap_or(0.0),
+            uploaded_bytes: self.shared.uploaded.load(Ordering::Relaxed),
             have_pieces: s.have_pieces,
             outstanding_requests: s.outstanding,
             duplicate_requests: s.duplicate_requests,
@@ -857,8 +926,14 @@ pub(crate) struct Shared {
     pub(crate) store: PieceStore,
     pub(crate) cfg: Arc<SwarmConfig>,
     pub(crate) limiter: Option<Arc<RateLimiter>>,
+    /// Upload limit shared by every torrent in this engine.
+    pub(crate) upload_limiter: Arc<RateLimiter>,
+    /// Caps blocking piece reads across every peer and torrent in this engine.
+    pub(crate) upload_slots: Arc<Semaphore>,
     /// This torrent's own limit (see [`Torrent::set_download_limit`]), applied after `limiter`.
     pub(crate) own_limit: RateLimiter,
+    /// Whether peers may request verified pieces from this torrent.
+    pub(crate) upload_enabled: AtomicBool,
     /// See [`Torrent::set_paused`].
     paused: AtomicBool,
     /// Byte ranges selected for background download (absolute), so one file can be deselected
@@ -878,10 +953,13 @@ pub(crate) struct Shared {
     blame: Mutex<HashMap<PeerKey, Blame>>,
     /// The download rate behind [`Torrent::playback_estimate`].
     smoothed: Mutex<Smoothed>,
+    /// The upload rate behind [`SwarmStats::upload_bps`].
+    upload_smoothed: Mutex<Smoothed>,
     candidates: Mutex<Candidates>,
     next_peer: AtomicU64,
     next_interest: AtomicU64,
     pub(crate) downloaded: AtomicU64,
+    pub(crate) uploaded: AtomicU64,
     /// Web seeds in use.
     web_seeds: AtomicUsize,
     /// Bytes received from web seeds.
@@ -898,6 +976,18 @@ impl Shared {
         self.candidates
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The BEP 3 bitfield for every verified piece currently stored.
+    pub(crate) fn bitfield(&self) -> bytes::Bytes {
+        let have = self.sched().have_all();
+        let mut bits = vec![0_u8; have.len().div_ceil(8)];
+        for (piece, present) in have.into_iter().enumerate() {
+            if present {
+                bits[piece / 8] |= 0x80 >> (piece % 8);
+            }
+        }
+        bits.into()
     }
 
     /// Queues peer addresses from trackers or the caller. An address given up on is tried once
@@ -1017,6 +1107,18 @@ impl Shared {
         self.wake.notify_one();
     }
 
+    /// Waits for the engine-wide upload limit. Returns early when the torrent or request is
+    /// cancelled, or when uploading was disabled while it waited.
+    pub(crate) async fn throttle_upload(&self, bytes: usize, request: &CancellationToken) -> bool {
+        tokio::select! {
+            () = self.cancel.cancelled() => false,
+            () = request.cancelled() => false,
+            () = self.upload_limiter.acquire(bytes) => {
+                self.upload_enabled.load(Ordering::Relaxed) && !request.is_cancelled()
+            }
+        }
+    }
+
     /// Sends messages to a peer. A peer whose queue is full is not keeping up and is dropped
     /// (its writer sees the channel close).
     pub(crate) fn send(&self, key: PeerKey, messages: impl IntoIterator<Item = Outgoing>) {
@@ -1030,6 +1132,23 @@ impl Shared {
                 peers.remove(&key);
                 return;
             }
+        }
+    }
+
+    /// Queues a piece only while uploads remain enabled. This shares the peer-map lock with
+    /// [`Torrent::set_upload_enabled`], so an upload is always ordered before the choke or
+    /// discarded after it.
+    pub(crate) fn send_upload(&self, key: PeerKey, message: Outgoing) {
+        let mut peers = self.peers.lock().unwrap_or_else(PoisonError::into_inner);
+        if !self.upload_enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(tx) = peers.get(&key) else {
+            return;
+        };
+        if tx.try_send(message).is_err() {
+            debug!(peer = key, "peer send queue full; disconnecting");
+            peers.remove(&key);
         }
     }
 
@@ -1302,6 +1421,11 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .update(now, shared.downloaded.load(Ordering::Relaxed));
+        shared
+            .upload_smoothed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .update(now, shared.uploaded.load(Ordering::Relaxed));
         let seek = shared.seek_pending.swap(false, Ordering::Relaxed);
         let refresh = shared.refresh_background.swap(false, Ordering::Relaxed)
             || ticks.is_multiple_of(BACKGROUND_REFRESH_TICKS);
@@ -1436,7 +1560,7 @@ impl TorrentStatsProvider for TrackerStats {
             return TrackerCommsStats::default();
         };
         TrackerCommsStats {
-            uploaded_bytes: 0,
+            uploaded_bytes: shared.uploaded.load(Ordering::Relaxed),
             downloaded_bytes: shared.downloaded.load(Ordering::Relaxed),
             total_bytes: shared.meta.total_len,
             torrent_state: TrackerCommsStatsState::Live,

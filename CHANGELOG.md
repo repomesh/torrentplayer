@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- lumen-swarm now uploads verified pieces with cancellable, bounded reads, reports per-torrent
+  and total upload rates, and shares the global upload limit with librqbit.
+- Seeding can continue after playback until a ratio or time target is reached, and the configured
+  peer cap now applies to both engines.
+
 ## [0.2.0] - 2026-10-20
 
 ### Changed
@@ -34,9 +41,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Known limitations
 
-- TorrentStream's engine does not upload yet, so magnet torrents no longer share pieces while
-  they play (in 0.1.0 librqbit did). The upload limit applies only to the `rqbit` engine choice.
-  Seeding is being built (#9).
 - Installers are not code-signed yet: Windows SmartScreen and macOS Gatekeeper warn the first
   time you open the app.
 - The built-in player uses the system web engine, which cannot decode Dolby (AC-3, E-AC-3,
@@ -67,7 +71,7 @@ The first public preview: stream any torrent, video or audio, and skip to any mo
   them to TorrentStream's engine); `.torrent` files use TorrentStream's engine.
 - The built-in player uses the system web engine, which cannot decode Dolby (AC-3, E-AC-3,
   TrueHD) or DTS audio; the app warns instead of playing silently.
-- Desktop only; no seeding controls yet.
+- Desktop only.
 
 ### VPN connections
 

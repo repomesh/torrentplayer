@@ -144,8 +144,11 @@ pub struct StreamEngineConfig {
     /// Download limit for everything together (both engines, bytes per second); `None` is
     /// unlimited. Change it later with [`StreamEngine::set_rate_limits`].
     pub download_limit_bps: Option<NonZeroU32>,
-    /// Upload limit (librqbit; lumen-swarm does not upload).
+    /// Upload limit for everything together (both engines, bytes per second); `None` is
+    /// unlimited. Change it later with [`StreamEngine::set_rate_limits`].
     pub upload_limit_bps: Option<NonZeroU32>,
+    /// Maximum connected peers per torrent.
+    pub peer_limit: usize,
 }
 
 impl StreamEngineConfig {
@@ -158,6 +161,7 @@ impl StreamEngineConfig {
             public_discovery: true,
             download_limit_bps: None,
             upload_limit_bps: None,
+            peer_limit: 40,
         }
     }
 }
@@ -358,6 +362,8 @@ impl StreamEngine {
         swarm_config.enable_dht = config.public_discovery;
         swarm_config.network.clone_from(&network);
         swarm_config.download_limit_bps = config.download_limit_bps;
+        swarm_config.upload_limit_bps = config.upload_limit_bps;
+        swarm_config.peer_limit = config.peer_limit;
         let swarm_window = (
             swarm_config.scheduler.read_ahead,
             swarm_config.scheduler.tail_bytes,
@@ -396,8 +402,8 @@ impl StreamEngine {
         *self.limits.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Changes the download limit for everything together (both engines, playback and
-    /// background alike) and librqbit's upload limit, bytes per second; `None` removes one.
+    /// Changes the download and upload limits for everything together (both engines, playback
+    /// and background alike), bytes per second; `None` removes one.
     /// Takes effect at once, and carries over when librqbit restarts for a network change.
     pub async fn set_rate_limits(&self, download: Option<NonZeroU32>, upload: Option<NonZeroU32>) {
         {
@@ -409,6 +415,7 @@ impl StreamEngine {
         }
         if let Some(swarm) = &self.swarm {
             swarm.set_download_limit(download);
+            swarm.set_upload_limit(upload);
         }
         if let Some(swarm) = self.thumbnails.get() {
             swarm.set_download_limit(thumbnail_rate(download));
@@ -443,6 +450,7 @@ impl StreamEngine {
         c.enable_dht = self.config.public_discovery;
         c.enable_trackers = self.config.public_discovery;
         c.network.clone_from(&self.network);
+        c.peer_limit = Some(self.config.peer_limit);
         (c.download_limit_bps, c.upload_limit_bps) = self.limits();
         let engine = Engine::start(c).await?;
         *slot = Some(engine.clone());
@@ -621,6 +629,9 @@ impl StreamEngine {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let info = swarm_info(id, &meta);
         let torrent = swarm.add(meta, peers).map_err(swarm_err)?;
+        // The facade only serves pieces while the torrent is actively being watched,
+        // downloaded, or retained by the user's post-playback seeding policy.
+        torrent.set_upload_enabled(false);
         torrents.insert(
             id,
             Backed::Swarm {
@@ -836,6 +847,7 @@ impl StreamEngine {
         // An interrupted earlier download of this torrent may have left its cache behind.
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let torrent = swarm.add(meta, cached.peers).map_err(swarm_err)?;
+        torrent.set_upload_enabled(false);
         let fetching = ThumbnailTorrent {
             torrent: torrent.clone(),
             dir,
@@ -1015,6 +1027,7 @@ impl StreamEngine {
                 Ok(Playback::Rqbit(session))
             }
             Handle::Swarm(torrent) => {
+                torrent.set_upload_enabled(true);
                 torrent.select_file(file).map_err(swarm_err)?;
                 torrent.set_playhead(file, 0, None).map_err(swarm_err)?;
                 Ok(Playback::Swarm(SwarmPlayback {
@@ -1117,6 +1130,22 @@ impl StreamEngine {
         }
     }
 
+    /// Enables or disables serving a lumen-swarm torrent to peers. librqbit applies the same
+    /// policy by being paused or resumed by the queue manager, so this returns `false` for it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the torrent is unknown.
+    pub fn set_upload_enabled(&self, id: TorrentId, enabled: bool) -> Result<bool, EngineError> {
+        match self.handle(id)? {
+            Handle::Rqbit(_) => Ok(false),
+            Handle::Swarm(torrent) => {
+                torrent.set_upload_enabled(enabled);
+                Ok(true)
+            }
+        }
+    }
+
     /// Which pieces are downloaded and verified.
     ///
     /// # Errors
@@ -1144,7 +1173,8 @@ impl StreamEngine {
                 let to_u32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
                 // Rates are non-negative and far below u64::MAX.
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let download_bps = s.download_bps.max(0.0) as u64;
+                let (download_bps, upload_bps) =
+                    (s.download_bps.max(0.0) as u64, s.upload_bps.max(0.0) as u64);
                 Ok(TorrentStats {
                     state: if torrent.is_paused() {
                         TorrentState::Paused
@@ -1152,7 +1182,8 @@ impl StreamEngine {
                         TorrentState::Live
                     },
                     download_bps,
-                    upload_bps: 0,
+                    upload_bps,
+                    uploaded_bytes: s.uploaded_bytes,
                     peers_live: to_u32(s.peers_live),
                     peers_connecting: to_u32(s.peers_connecting),
                     peers_seen: to_u32(s.peers_seen),
@@ -1361,6 +1392,7 @@ impl StreamEngine {
             let id = self.next_id.fetch_add(1, Ordering::Relaxed);
             let info = swarm_info(id, &meta);
             let torrent = swarm.add(meta, seen_peers).map_err(swarm_err)?;
+            torrent.set_upload_enabled(false);
             let marker = self.swarm_dir().join(format!("{hash}{PRELOAD_MARKER}"));
             if let Err(error) = std::fs::write(&marker, b"") {
                 tracing::debug!(%error, "could not mark the preload cache");

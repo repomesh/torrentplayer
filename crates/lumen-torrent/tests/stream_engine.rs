@@ -106,6 +106,7 @@ async fn fixture(choice: EngineChoice) -> Fixture {
         public_discovery: false,
         download_limit_bps: None,
         upload_limit_bps: None,
+        peer_limit: 40,
     })
     .await
     .unwrap();
@@ -611,6 +612,7 @@ async fn a_torrents_poster_becomes_its_thumbnail() {
         public_discovery: false,
         download_limit_bps: None,
         upload_limit_bps: None,
+        peer_limit: 40,
     })
     .await
     .unwrap();
@@ -657,6 +659,7 @@ async fn a_stopped_thumbnail_download_leaves_nothing_behind() {
         public_discovery: false,
         download_limit_bps: None,
         upload_limit_bps: None,
+        peer_limit: 40,
     })
     .await
     .unwrap();

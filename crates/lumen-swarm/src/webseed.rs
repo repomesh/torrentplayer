@@ -339,9 +339,9 @@ impl WebSeed {
                         debug!(web_seed = self.index, "web seed dropped");
                         return;
                     };
-                    self.on_message(message);
+                    self.on_message(&message);
                     while let Ok(message) = rx.try_recv() {
-                        self.on_message(message);
+                        self.on_message(&message);
                     }
                 }
                 Some(done) = self.tasks.join_next(), if !self.tasks.is_empty() => {
@@ -364,20 +364,27 @@ impl WebSeed {
         }
     }
 
-    fn on_message(&mut self, message: Outgoing) {
+    fn on_message(&mut self, message: &Outgoing) {
         match message {
             Outgoing::Request { piece, begin, len } if self.paused_until.is_none() => {
-                let abs = self.shared.meta.piece_offset(piece) + u64::from(begin);
+                let abs = self.shared.meta.piece_offset(*piece) + u64::from(*begin);
                 if self
                     .pending
-                    .insert(abs, Request { piece, begin, len })
+                    .insert(
+                        abs,
+                        Request {
+                            piece: *piece,
+                            begin: *begin,
+                            len: *len,
+                        },
+                    )
                     .is_none()
                 {
                     self.order.push_back(abs);
                 }
             }
             Outgoing::Cancel { piece, begin, .. } => {
-                let abs = self.shared.meta.piece_offset(piece) + u64::from(begin);
+                let abs = self.shared.meta.piece_offset(*piece) + u64::from(*begin);
                 if self.pending.remove(&abs).is_some() {
                     return;
                 }

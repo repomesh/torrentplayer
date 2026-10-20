@@ -118,6 +118,7 @@ async fn course(choice: EngineChoice) -> Course {
         public_discovery: false,
         download_limit_bps: None,
         upload_limit_bps: None,
+        peer_limit: 40,
     })
     .await
     .unwrap();
