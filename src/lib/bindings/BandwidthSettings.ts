@@ -23,7 +23,7 @@ seedRatioTarget: number,
 /**
  * Stop seeding this many minutes after watching; 0 has no time limit.
  */
-seedTimeLimitMinutes: number,
+seedTimeLimitMinutes: number, 
 /**
  * Maximum connected peers per torrent.
  */
