@@ -101,8 +101,8 @@ impl Core {
         config: StreamEngineConfig,
         network: lumen_net::Network,
     ) -> Result<Self, IpcError> {
-        // By default lumen-swarm for .torrent files and links, librqbit for magnet links; the
-        // engine setting and LUMEN_ENGINE override (see lumen_torrent::EngineChoice).
+        // By default lumen-swarm serves every source; librqbit only resolves magnet metadata.
+        // The engine setting and LUMEN_ENGINE override (see lumen_torrent::EngineChoice).
         let engine = StreamEngine::start_with_network(config, Some(network)).await?;
         let first_bytes = Arc::new(FirstByteObserver::default());
         let server = StreamServer::start(ServerConfig {

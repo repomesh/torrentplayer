@@ -392,7 +392,7 @@ impl Default for AdvancedSettings {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub enum EngineSetting {
-    /// TorrentStream's engine for `.torrent` files and links, librqbit for magnet links.
+    /// TorrentStream's engine for every source. librqbit resolves magnet metadata only.
     #[default]
     Auto,
     /// Always TorrentStream's own engine. For magnet links, librqbit fetches the metadata only.
