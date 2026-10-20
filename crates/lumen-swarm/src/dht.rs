@@ -47,9 +47,14 @@ impl DhtNode {
         }
     }
 
-    /// The running node, starting it if needed. `None` if it cannot start.
-    async fn get(&self) -> Option<Dht> {
+    /// The running node, starting it if needed. `None` if it cannot start, or if `policy` does
+    /// not allow it: checked under the same lock as [`DhtNode::stop`], so a mode change that
+    /// stops the node cannot be overtaken by a start that checked the policy just before it.
+    async fn get(&self, policy: Option<&watch::Receiver<Policy>>) -> Option<Dht> {
         let mut running = self.running.lock().await;
+        if !allowed(policy) {
+            return None;
+        }
         if let Some((dht, token)) = running.as_ref()
             && !token.is_cancelled()
         {
@@ -133,7 +138,11 @@ pub(crate) async fn discover(
                 ok = changed(&mut policy) => if !ok { return },
             }
         }
-        let Some(dht) = node.get().await else {
+        let Some(dht) = node.get(policy.as_ref()).await else {
+            if !allowed(policy.as_ref()) {
+                // The policy changed since the check above: wait for it again.
+                continue;
+            }
             tokio::select! {
                 () = cancel.cancelled() => return,
                 () = tokio::time::sleep(RESTART_AFTER) => continue,
@@ -198,6 +207,18 @@ mod tests {
         assert!(!allowed(Some(&rx)), "a protected mode");
         tx.send_replace(policy(false, true));
         assert!(!allowed(Some(&rx)), "the kill switch");
+    }
+
+    #[tokio::test]
+    async fn never_starts_while_the_policy_disallows_it() {
+        // A mode change that lands between `discover`'s policy check and the start must not
+        // leave a node running: the start checks the policy again under the lock.
+        let node = DhtNode::new(CancellationToken::new());
+        let (tx, rx) = watch::channel(policy(true, false));
+        assert!(node.get(Some(&rx)).await.is_none(), "a protected mode");
+        tx.send_replace(policy(false, true));
+        assert!(node.get(Some(&rx)).await.is_none(), "the kill switch");
+        assert!(node.running.lock().await.is_none(), "nothing was started");
     }
 
     #[test]

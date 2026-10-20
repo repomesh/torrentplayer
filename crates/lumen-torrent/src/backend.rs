@@ -353,6 +353,9 @@ impl StreamEngine {
     ) -> Result<Self, EngineError> {
         let mut swarm_config = SwarmConfig::new(config.download_dir.join("lumen-swarm"));
         swarm_config.enable_trackers = config.public_discovery;
+        // Magnet links come here too, and their trackers are often dead: the DHT finds their
+        // peers (and runs only while the network policy allows UDP, as for librqbit).
+        swarm_config.enable_dht = config.public_discovery;
         swarm_config.network.clone_from(&network);
         swarm_config.download_limit_bps = config.download_limit_bps;
         let swarm_window = (
