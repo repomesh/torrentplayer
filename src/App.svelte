@@ -77,6 +77,7 @@
     newItemId,
     nextItem,
     optimizeQueue,
+    putFirst,
     remove,
     restoreOrder,
     sanitizeQueue,
@@ -710,26 +711,50 @@
     }
   }
 
+  /**
+   * The queue entry of a file that starts playing. Played from search, a torrent's files or the
+   * file chooser (`first`), it is added to the queue, or moved, to the front, so what plays is
+   * always queued and everything else stays up next. A file of a queued torrent played from
+   * the queue (`group`) joins its torrent's items in lecture order. Otherwise it is the file's
+   * entry if it is queued.
+   */
+  function enterQueue(
+    torrent: TorrentSummary,
+    file: FileSummary,
+    where: 'first' | 'group' | undefined,
+  ): string | null {
+    const [item] = itemsFor(torrent, [file]);
+    if (item === undefined) {
+      return null;
+    }
+    if (where === 'first') {
+      const placed = putFirst(queue, item);
+      queue = placed.queue;
+      return placed.id;
+    }
+    if (where === 'group') {
+      queue = enqueue(queue, [item], lectureOrder(torrent)).queue;
+    }
+    return findEntry(queue, item)?.id ?? null;
+  }
+
   async function play(
     torrent: TorrentSummary,
     file: FileSummary,
-    options: { queueId?: string | null; autoSeeks?: number[]; request?: number } = {},
+    options: {
+      queueId?: string | null;
+      queue?: 'first' | 'group';
+      autoSeeks?: number[];
+      request?: number;
+    } = {},
   ): Promise<boolean> {
     const request = options.request ?? ++selection;
     if (request !== selection) {
       return false;
     }
     lastTorrentId = torrent.id;
-    // A file that is queued becomes the queue's current item, wherever it was played from.
-    const queueId =
-      options.queueId ??
-      findEntry(queue, {
-        source: sourceOf(torrent),
-        infoHash: torrent.infoHash,
-        fileIndex: file.index,
-      })?.id ??
-      null;
     if (nowPlaying?.torrent.id === torrent.id && nowPlaying.file.index === file.index) {
+      const queueId = options.queueId ?? enterQueue(torrent, file, options.queue);
       if (queueId !== null) {
         queue = setCurrent(queue, queueId);
         nowPlaying = { ...nowPlaying, queueId };
@@ -763,6 +788,8 @@
       }
       playback.position = 0;
       playback.duration = Number.NaN;
+      // The file becomes the queue's current item, wherever it was played from.
+      const queueId = options.queueId ?? enterQueue(torrent, file, options.queue);
       nowPlaying = {
         torrent,
         file,
@@ -823,7 +850,7 @@
       }
       lastTorrentId = torrent.id;
       const file = playTarget(torrent, fileIndex);
-      const played = file ? await play(torrent, file, { request }) : false;
+      const played = file ? await play(torrent, file, { request, queue: 'first' }) : false;
       if (!played && request === selection) {
         navigate({ name: 'torrent', torrentId: torrent.id });
       }
@@ -1344,7 +1371,7 @@
             playingIndex={nowPlaying?.torrent.id === torrent.id ? nowPlaying.file.index : null}
             isQueued={(file: FileSummary) => isQueued(torrent, file)}
             onSelectTorrent={(entry: ExplorerTorrent) => void explore(entry, true)}
-            onPlay={(file: FileSummary) => void play(torrent, file)}
+            onPlay={(file: FileSummary) => void play(torrent, file, { queue: 'first' })}
             onQueue={(file: FileSummary) => {
               queueFiles(torrent, [file]);
             }}
@@ -1389,7 +1416,7 @@
               onPlayFile={(key: string, file: FileSummary) => {
                 const torrent = torrentOf(key);
                 if (torrent) {
-                  void play(torrent, file);
+                  void play(torrent, file, { queue: 'group' });
                 }
               }}
               onToggleFile={(key: string, file: FileSummary, queued: boolean) => {
@@ -1500,7 +1527,7 @@
         }}
         onPlay={(file: FileSummary) => {
           chooser = null;
-          void play(torrent, file);
+          void play(torrent, file, { queue: 'first' });
         }}
         onClose={() => {
           selection += 1;

@@ -664,10 +664,12 @@ impl Runtime {
                 used_bps: self.planner.meter.current_bps(),
                 upload_bps: total_upload_bps,
                 playback_need_bps: foreground.map(|f| f.need_bps()),
+                // Starving shows as such only while the background is paused for it; otherwise
+                // the background is limited, as when guarded.
                 pressure: match plan.pressure {
                     Pressure::Relaxed => LinkPressure::Relaxed,
-                    Pressure::Guarded => LinkPressure::Guarded,
-                    Pressure::Starving => LinkPressure::Starving,
+                    Pressure::Starving if plan.pause_background => LinkPressure::Starving,
+                    Pressure::Guarded | Pressure::Starving => LinkPressure::Guarded,
                 },
                 max_active: max_active.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
                 active: u32::try_from(plan.active.len()).unwrap_or(u32::MAX),

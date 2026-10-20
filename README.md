@@ -117,8 +117,9 @@ sources, details, and where other tools are the better fit.
   ready before you get to it. Set a maximum in Settings if you prefer fewer at once.
 - **What you are watching always comes first.** Every second TorrentStream measures your
   connection and playback's needs. While the buffer is short, the rest of the queue gets only
-  what playback leaves; if playback runs low, the rest pauses until it catches up. Once you are
-  comfortably ahead, everything runs at full speed again.
+  what playback leaves; if playback runs low, the rest pauses briefly to let it catch up, and
+  keeps going if the video's own swarm is the bottleneck. Once you are comfortably ahead,
+  everything runs at full speed again.
 - **Live status for every item:** download and upload speed, peers, percent downloaded, and
   time left, with a bar
   that is green when it is ready to play, yellow while it downloads, and grey while it

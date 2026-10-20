@@ -151,6 +151,29 @@ export function findEntry(
 }
 
 /**
+ * Puts the entry for `item`'s file first in the queue, adding `item` if that file is not queued:
+ * its torrent's other items follow it, then everything else in order. Returns the entry's id,
+ * or null (and the same queue) when the queue is full.
+ */
+export function putFirst(queue: Queue, item: QueueItem): { queue: Queue; id: string | null } {
+  const existing = findEntry(queue, item);
+  if (existing === null && queue.items.length >= MAX_QUEUE_ITEMS) {
+    return { queue, id: null };
+  }
+  const entry = existing ?? item;
+  const key = groupKey(entry);
+  const others = queue.items.filter((i) => i !== entry);
+  const items = [
+    entry,
+    ...others.filter((i) => groupKey(i) === key),
+    ...others.filter((i) => groupKey(i) !== key),
+  ];
+  const unchanged =
+    items.every((i, n) => i === queue.items[n]) && items.length === queue.items.length;
+  return { queue: unchanged ? queue : { ...queue, items }, id: entry.id };
+}
+
+/**
  * Removes an item. Removing the cursor moves it to the previous item, so the item that
  * followed is still next.
  */

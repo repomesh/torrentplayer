@@ -46,6 +46,13 @@ const GUARD_BELOW_SECS: f64 = 25.0;
 const STARVING_BELOW_SECS: f64 = 10.0;
 /// Playback's need is its media rate times this, to refill what was played and absorb jitter.
 const NEED_MARGIN: f64 = 1.5;
+/// Starving playback pauses the background for at most this long, to see whether that helps.
+const PAUSE_TRIAL: Duration = Duration::from_secs(15);
+/// A pause ends sooner if the link carries under half its capacity this long into it: the
+/// bandwidth it freed is not being used.
+const PAUSE_IDLE_AFTER: Duration = Duration::from_secs(5);
+/// After a pause that did not help, pausing is not tried again for this long.
+const PAUSE_RETRY_AFTER: Duration = Duration::from_secs(300);
 /// How long the meter remembers samples for its peak, and how much of a 3-second average
 /// counts as a sample.
 const PEAK_WINDOW: Duration = Duration::from_secs(60);
@@ -201,7 +208,7 @@ pub enum Pressure {
     /// The buffer is short: the background gets what playback leaves.
     Guarded,
     /// The buffer is low and playback downloads slower than it plays: background torrents
-    /// pause until it recovers.
+    /// pause for a while to see whether that helps, and are limited as when guarded otherwise.
     Starving,
 }
 
@@ -213,7 +220,7 @@ pub struct Plan {
     /// Each background torrent's limit (by [`Candidate::group`]), bytes per second; torrents
     /// not listed are unlimited.
     pub limits: HashMap<String, u64>,
-    /// Pause every background torrent (playback is starving).
+    /// Pause every background torrent (playback is starving, and pausing may help it).
     pub pause_background: bool,
     /// How playback is doing.
     pub pressure: Pressure,
@@ -227,6 +234,10 @@ pub struct Planner {
     pressure: Pressure,
     /// When each active item started.
     started: HashMap<String, Instant>,
+    /// When the current pause of the background began.
+    paused_since: Option<Instant>,
+    /// A pause did not help: no pausing until then.
+    no_pause_until: Option<Instant>,
 }
 
 impl Planner {
@@ -280,14 +291,39 @@ impl Planner {
         }
         Plan {
             limits: self.limits(foreground, &groups),
-            pause_background: self.pressure == Pressure::Starving,
+            pause_background: self.pause_background(now, total_bps),
             pressure: self.pressure,
             active,
         }
     }
 
-    /// While the buffer is short, what playback leaves of the link, shared between `groups`
-    /// (in priority order) in proportion 1, 1/2, 1/3, …: the top torrent gets the most.
+    /// Whether to pause the background now. Starving playback pauses it as a trial: when the
+    /// link is the bottleneck, playback catches up and the pressure eases. When playback still
+    /// starves after the trial, or the link sits half idle during it, the video's own swarm is
+    /// the limit and a pause would only stop everything else, so the background resumes
+    /// (limited to what playback leaves) and pausing is not tried again for a while.
+    fn pause_background(&mut self, now: Instant, total_bps: u64) -> bool {
+        if self.pressure != Pressure::Starving {
+            self.paused_since = None;
+            return false;
+        }
+        if self.no_pause_until.is_some_and(|until| now < until) {
+            return false;
+        }
+        let paused_for = now.saturating_duration_since(*self.paused_since.get_or_insert(now));
+        let capacity = self.meter.capacity_bps();
+        let idle = capacity > 0 && total_bps.saturating_mul(2) < capacity;
+        if paused_for >= PAUSE_TRIAL || (paused_for >= PAUSE_IDLE_AFTER && idle) {
+            self.paused_since = None;
+            self.no_pause_until = Some(now + PAUSE_RETRY_AFTER);
+            return false;
+        }
+        true
+    }
+
+    /// While the buffer is short (guarded, or starving without a pause), what playback leaves of
+    /// the link, shared between `groups` (in priority order) in proportion 1, 1/2, 1/3, …: the
+    /// top torrent gets the most.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -297,7 +333,7 @@ impl Planner {
         let Some(fg) = foreground else {
             return HashMap::new();
         };
-        if self.pressure != Pressure::Guarded || groups.is_empty() {
+        if self.pressure == Pressure::Relaxed || groups.is_empty() {
             return HashMap::new();
         }
         let budget = self
@@ -552,6 +588,62 @@ mod tests {
         assert_eq!(plan.pressure, Pressure::Relaxed);
         assert!(plan.limits.is_empty());
         assert!(!plan.pause_background);
+    }
+
+    #[test]
+    fn a_pause_that_does_not_help_ends_and_is_not_retried_soon() {
+        let mut p = Planner::default();
+        let t0 = Instant::now();
+        let c = many(3);
+        let starving = Some(watching(3.0, MIB / 2));
+        let mut plan_at = |s: u64| {
+            p.plan(
+                t0 + Duration::from_secs(s),
+                MIB / 2,
+                starving,
+                &c,
+                DownloadOrder::InOrder,
+                None,
+            )
+        };
+        // The link's capacity is unknown, so the pause gets its whole trial.
+        assert!(plan_at(0).pause_background);
+        assert!(plan_at(10).pause_background);
+        // Still starving after it: the video's own swarm is the limit. The background resumes,
+        // limited to what playback leaves.
+        let plan = plan_at(15);
+        assert_eq!(plan.pressure, Pressure::Starving);
+        assert!(!plan.pause_background);
+        assert_eq!(plan.limits.len(), 3);
+        // Pausing is tried again only after a while.
+        assert!(!plan_at(200).pause_background);
+        assert!(plan_at(15 + 300).pause_background);
+    }
+
+    #[test]
+    fn a_pause_ends_early_when_the_link_sits_idle() {
+        let mut p = Planner::default();
+        let t0 = Instant::now();
+        // Learn a 10 MiB/s link.
+        for i in 0..3 {
+            p.meter.update(t0 + Duration::from_secs(i), 10 * MIB);
+        }
+        let c = many(2);
+        let starving = Some(watching(3.0, MIB / 2));
+        let mut plan_at = |s: u64| {
+            p.plan(
+                t0 + Duration::from_secs(3 + s),
+                MIB / 2,
+                starving,
+                &c,
+                DownloadOrder::InOrder,
+                None,
+            )
+        };
+        assert!(plan_at(0).pause_background);
+        // Five seconds in, the link carries a twentieth of what it can: the pause frees
+        // bandwidth nothing uses.
+        assert!(!plan_at(5).pause_background);
     }
 
     #[test]

@@ -17,6 +17,7 @@ import {
   keepGroupsTogether,
   moveGroup,
   optimizeQueue,
+  putFirst,
   restoreOrder,
   isPlayed,
   move,
@@ -285,6 +286,29 @@ describe('groups', () => {
     let q = queueFrom([of('a', 1), of('a', 3), of('b', 1)]);
     q = enqueue(q, [of('a', 2), of('a', 9)], lectureOrder).queue;
     expect(ids(q)).toEqual(['a1', 'a2', 'a3', 'a9', 'b1']);
+  });
+
+  it('puts a file played from elsewhere first, adding it or moving it with its torrent', () => {
+    const q = queueFrom([of('a', 1), of('b', 1), of('b', 2), of('c', 1)], 'b1');
+    // Not queued: added in front, the rest untouched.
+    const added = putFirst(q, of('d', 1));
+    expect(added.id).toBe('d1');
+    expect(ids(added.queue)).toEqual(['d1', 'a1', 'b1', 'b2', 'c1']);
+    expect(added.queue.current).toBe('b1');
+    // Queued: moved to the front with its torrent's other files after it.
+    const moved = putFirst(q, { ...of('b', 2), id: 'new' });
+    expect(moved.id).toBe('b2');
+    expect(ids(moved.queue)).toEqual(['b2', 'b1', 'a1', 'c1']);
+    // Already first: the same queue.
+    const first = queueFrom([of('a', 1), of('b', 1)]);
+    expect(putFirst(first, { ...of('a', 1), id: 'other' }).queue).toBe(first);
+  });
+
+  it('leaves a full queue as it is when the file is not queued', () => {
+    const full = queueFrom(
+      Array.from({ length: MAX_QUEUE_ITEMS }, (_, i) => of(String(i).padStart(4, '0'), 1)),
+    );
+    expect(putFirst(full, of('z', 1))).toEqual({ queue: full, id: null });
   });
 
   it('groups by link when the info hash is unknown', () => {
