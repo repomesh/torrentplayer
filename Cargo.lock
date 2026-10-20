@@ -3242,7 +3242,7 @@ name = "lumen-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "embed-resource",
  "lumen-library",
@@ -3317,7 +3317,7 @@ dependencies = [
 name = "lumen-net"
 version = "0.1.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "dns-parser",
  "getrandom 0.3.4",
  "if-addrs",
