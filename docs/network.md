@@ -40,12 +40,12 @@ shown, until the settings are fixed.
 | Traffic                                 | Direct                                                          | Bind to interface              | SOCKS5 proxy                                                   | Kill switch engaged   |
 | --------------------------------------- | --------------------------------------------------------------- | ------------------------------ | -------------------------------------------------------------- | --------------------- |
 | Peers over TCP, lumen-swarm             | direct                                                          | bound to the interface         | through the proxy                                              | refused, closed       |
-| Peers over TCP, librqbit (magnet links) | direct                                                          | via the loopback bridge, bound | via the loopback bridge, through the proxy                     | refused, closed       |
+| Peers over TCP, librqbit (rqbit engine) | direct                                                          | via the loopback bridge, bound | via the loopback bridge, through the proxy                     | refused, closed       |
 | Peers over uTP (librqbit)               | when listening                                                  | **off**                        | **off**                                                        | off                   |
 | Incoming peer connections               | librqbit only if a listen address is set (it is not by default) | **off**                        | **off**                                                        | off                   |
 | HTTP(S) trackers                        | direct                                                          | bound (system DNS)             | through the proxy (proxy DNS for lumen-swarm, see [DNS](#dns)) | refused               |
 | UDP trackers                            | direct                                                          | TorrentStream's client, bound  | **skipped**                                                    | through WireGuard     |
-| DHT (librqbit)                          | on                                                              | **off**                        | **off**                                                        | off                   |
+| DHT (both engines)                      | on                                                              | **off**                        | **off**                                                        | off                   |
 | Local peer discovery (multicast)        | off                                                             | off                            | off                                                            | off                   |
 | `.torrent` file downloads               | direct                                                          | bound                          | through the proxy                                              | refused               |
 | Search (search.emberglow.tech)          | direct                                                          | bound                          | through the proxy                                              | refused               |
@@ -276,8 +276,9 @@ The Settings page (`lumen-settings`) stores what the user chooses; the app turns
 - librqbit resolves tracker host names locally in SOCKS5 mode.
 - The bound-interface check proves the adapter is up with an address, not that it reaches the
   internet; the public-IP check (status bar, or "Check connection") does.
-- Switching protection on or off stops librqbit's torrents (magnet links); they must be added
-  again. lumen-swarm torrents continue.
+- Switching protection on or off stops librqbit's torrents (only those using the `rqbit`
+  engine choice); they must be added again. lumen-swarm torrents, magnet links included,
+  continue.
 
 ## Tests
 

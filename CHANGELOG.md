@@ -7,19 +7,40 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-20
+
 ### Changed
 
-- Automatic engine selection now streams magnet links with lumen-swarm. librqbit remains the
-  metadata resolver and explicit compatibility engine.
+- Automatic engine selection now streams magnet links with lumen-swarm, TorrentStream's own
+  engine, so magnets start and skip as fast as `.torrent` files. librqbit remains the metadata
+  resolver and the explicit compatibility engine.
 
 ### Fixed
 
+- Magnet links on TorrentStream's engine now find peers through the DHT (in Direct mode), so a
+  magnet whose trackers are dead or missing keeps finding peers after the first ones leave.
+- The DHT can no longer start in a protected mode when a mode change and a peer lookup happen
+  at the same moment: the start re-checks the network policy under the same lock as the stop.
+- Playing a search result, a torrent's file, or a file from the chooser adds it to the front of
+  the queue and makes it current; it no longer plays outside the queue.
+- When playback starves, background downloads now pause only briefly to see whether that helps,
+  and keep going (limited) when the video's own swarm is the bottleneck.
 - Search results now show when their video is playing, up next, or elsewhere in the queue, and
   disable the Queue button for entries that are already queued.
 - Removing every queued file in a torrent now uses a distinct trash-and-count control and asks
   for confirmation, so it cannot be mistaken for removing one video row.
 - The queue now records completed videos separately from its cursor: watched items show as
   Played, videos jumped over show as Skipped, and Clear played preserves skipped videos.
+
+### Known limitations
+
+- TorrentStream's engine does not upload yet, so magnet torrents no longer share pieces while
+  they play (in 0.1.0 librqbit did). The upload limit applies only to the `rqbit` engine choice.
+  Seeding is being built (#9).
+- Installers are not code-signed yet: Windows SmartScreen and macOS Gatekeeper warn the first
+  time you open the app.
+- The built-in player uses the system web engine, which cannot decode Dolby (AC-3, E-AC-3,
+  TrueHD) or DTS audio; the app warns instead of playing silently.
 
 ## [0.1.0] - 2026-10-20
 
@@ -42,6 +63,8 @@ The first public preview: stream any torrent, video or audio, and skip to any mo
 
 - Installers are not code-signed yet: Windows SmartScreen and macOS Gatekeeper warn the first
   time you open the app.
+- Magnet links use the embedded librqbit engine by default (Settings → Advanced → Engine switches
+  them to TorrentStream's engine); `.torrent` files use TorrentStream's engine.
 - The built-in player uses the system web engine, which cannot decode Dolby (AC-3, E-AC-3,
   TrueHD) or DTS audio; the app warns instead of playing silently.
 - Desktop only; no seeding controls yet.
@@ -232,5 +255,6 @@ The first public preview: stream any torrent, video or audio, and skip to any mo
   never unmuted. It now mutes only when the autoplay policy refuses sound, then shows a "click
   to unmute" button. Interruptions are retried with the sound unchanged.
 
-[Unreleased]: https://github.com/torrent-stream/torrentstream/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/torrent-stream/torrentstream/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/torrent-stream/torrentstream/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/torrent-stream/torrentstream/releases/tag/v0.1.0

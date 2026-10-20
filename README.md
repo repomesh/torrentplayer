@@ -177,11 +177,11 @@ player has the bytes it needs.
 | Local seeder, 2 MiB/s link                                      | 1.08 s (1.08 s)        | **0.68 s** (0.80 s) |
 | Public swarm (Ubuntu 24.04 ISO, ~600 peers), capped at 10 MiB/s | 1.2–2.8 s              | **0.70 s** (1.47 s) |
 
-Public swarms vary between runs; that row comes from three runs per configuration. Magnet
-links currently default to the embedded librqbit engine, which took 3.7 s to start and 2.7 s
-per skip on the same swarm; Settings → Advanced → Engine routes them through TorrentStream's
-engine. See [docs/performance.md](docs/performance.md) for the methodology, and run it
-yourself:
+Public swarms vary between runs; that row comes from three runs per configuration. Since 0.2.0
+magnet links stream through TorrentStream's engine too (librqbit only fetches their metadata);
+in 0.1.0 they used the embedded librqbit engine, which took 3.7 s to start and 2.7 s per skip
+on the same swarm. See [docs/performance.md](docs/performance.md) for the methodology, and run
+it yourself:
 
 ```sh
 cargo run -p lumen-bench --release -- local --upload-mibps 8 --runs 5
@@ -280,10 +280,10 @@ The docs also build as a book with [mdBook](https://rust-lang.github.io/mdBook/)
 
 ## Roadmap
 
-Working today: the streaming engine, player, search, the queue with background downloads, VPN,
-WireGuard, and proxy modes with a kill switch, and bandwidth limits. Next:
+Working today: the streaming engine (for `.torrent` files and magnet links), player, search, the
+queue with background downloads, VPN, WireGuard, and proxy modes with a kill switch, and
+bandwidth limits. Next:
 
-- [x] TorrentStream's engine for magnet links by default
 - [ ] Seeding controls: keep sharing after watching, ratio targets, peer limits
 - [ ] Cache size limit and automatic clean-up of old downloads
 - [ ] Resume where you left off

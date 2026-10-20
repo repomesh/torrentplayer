@@ -23,7 +23,8 @@ The app config folder is `%APPDATA%\io.torrentstream.desktop` on Windows,
 one. Earlier versions kept downloads in the local data folder (`%LOCALAPPDATA%\<identifier>\downloads`);
 unless you chose a folder yourself, they are moved to the new default at start-up. Inside it,
 `lumen-swarm` holds TorrentStream's engine cache (one `pieces.dat` per torrent, not playable
-files) and `librqbit` holds magnet-link downloads as their own files.
+files) and `librqbit` holds downloads made with the librqbit engine (the `rqbit` engine
+choice) as their own files.
 
 Versions from before the rename to TorrentStream used `io.github.lumen-app.lumen` for these
 folders. At start-up, TorrentStream moves anything still there into the new folders (settings,

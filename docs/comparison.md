@@ -55,9 +55,8 @@ repositories, and documentation (sources below). Products change; corrections ar
   files; a libmpv player is on the roadmap.
 - **Hiding your address from the swarm without a VPN:** cloud services join the swarm for you.
   With TorrentStream, use its WireGuard or proxy modes.
-- **Magnet links today:** by default they use librqbit, whose seeks are slower (2.7 s median in
-  our public-swarm test). Settings → Advanced → Engine routes them through TorrentStream's
-  engine instead.
+- **Sharing back:** TorrentStream's own engine does not upload yet, so it takes from the swarm
+  without seeding. Full download clients seed; seeding controls are on TorrentStream's roadmap.
 
 ## Sources
 
