@@ -305,11 +305,11 @@ async fn prefetched_metadata_lets_a_magnet_link_skip_the_metadata_fetch() {
             .expect("the add asked peers for the metadata again")
             .unwrap();
         assert_eq!(info.info_hash, hash);
-        let expected = match choice {
-            EngineChoice::Auto => BackendKind::Rqbit,
-            _ => BackendKind::Swarm,
-        };
-        assert_eq!(f.engine.backend(info.id).unwrap(), expected, "{choice:?}");
+        assert_eq!(
+            f.engine.backend(info.id).unwrap(),
+            BackendKind::Swarm,
+            "{choice:?}"
+        );
         let _playback = f
             .engine
             .start_playback(info.id, 0, lumen_prioritize::Config::default())

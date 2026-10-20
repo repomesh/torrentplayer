@@ -68,10 +68,10 @@ including the player controls overlaid on the video.
 
 ### Engine choice
 
-`lumen_torrent::StreamEngine` sends `.torrent` files and http(s) links to **lumen-swarm** and
-magnet links to **librqbit** (lumen-swarm has no DHT until milestone M3), with the same safety
-checks on both paths. `LUMEN_ENGINE=auto|swarm|rqbit` overrides it. librqbit starts lazily, so
-its DHT socket is opened only when a magnet link is used. Downloads go to separate
+`lumen_torrent::StreamEngine` sends every source to **lumen-swarm** by default, with the same
+safety checks on every path. For a magnet link, librqbit starts lazily as a metadata-only
+resolver and hands its metadata and discovered peers to lumen-swarm. `LUMEN_ENGINE=auto|swarm|rqbit`
+overrides the choice. Downloads go to separate
 `lumen-swarm/` and `librqbit/` sub-folders. See [ADR 0006](adr/0006-streaming-engine.md).
 
 ### Search, preload, and prefetch

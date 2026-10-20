@@ -206,7 +206,7 @@ async fn magnets_through_librqbit_use_only_the_proxy() {
     let engine = StreamEngine::start_with_network(
         StreamEngineConfig {
             download_dir: dir.path().to_path_buf(),
-            choice: EngineChoice::Auto,
+            choice: EngineChoice::Rqbit,
             // Trackers on, to check which ones are used. The DHT is off in protected modes.
             public_discovery: true,
             download_limit_bps: None,
@@ -304,7 +304,7 @@ async fn turning_protection_on_replaces_the_librqbit_session() {
     let engine = StreamEngine::start_with_network(
         StreamEngineConfig {
             download_dir: dir.path().to_path_buf(),
-            choice: EngineChoice::Auto,
+            choice: EngineChoice::Rqbit,
             // No DHT or trackers: nothing may leave the machine in direct mode either.
             public_discovery: false,
             download_limit_bps: None,

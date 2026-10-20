@@ -5,12 +5,9 @@
 //! [`StreamEngine`] routes each torrent to an engine:
 //!
 //! - **lumen-swarm**, TorrentStream's own streaming-first engine (deadline scheduling, short adaptive
-//!   queues, cancel on seek), for `.torrent` files and http(s) links to them. It cannot fetch
-//!   metadata for magnet links itself yet (no DHT until milestone M3 in
-//!   `docs/adr/0006-streaming-engine.md`); when it is chosen for one, librqbit fetches the
-//!   metadata (metadata only) and hands it over with the peers it found.
-//! - **librqbit** for magnet links, started lazily the first time one is added, so its DHT
-//!   socket is only opened when needed.
+//!   queues, cancel on seek), for every source by default. For a magnet link, librqbit is used
+//!   only as a metadata resolver and hands the metadata and peers it found to lumen-swarm.
+//! - **librqbit** as an explicit compatibility choice and the magnet metadata fallback.
 //!
 //! [`StreamEngine::preload`] fetches a torrent's metadata (through librqbit for magnet links,
 //! metadata only) and downloads the start and end of its best video file into lumen-swarm, so
@@ -65,7 +62,7 @@ pub const ENGINE_ENV_VAR: &str = "LUMEN_ENGINE";
 /// Which engine to use for new torrents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EngineChoice {
-    /// lumen-swarm for `.torrent` files and links, librqbit for magnet links.
+    /// lumen-swarm for every source. For magnets, librqbit resolves metadata only.
     #[default]
     Auto,
     /// Always lumen-swarm. For magnet links, librqbit fetches the metadata only.
@@ -100,11 +97,10 @@ impl EngineChoice {
 
     /// The engine a source goes to.
     #[must_use]
-    pub fn backend_for(self, source: &TorrentSource) -> BackendKind {
-        let magnet = matches!(source, TorrentSource::Magnet(_));
-        match (self, magnet) {
-            (Self::Rqbit, _) | (Self::Auto, true) => BackendKind::Rqbit,
-            (Self::Auto, false) | (Self::Swarm, _) => BackendKind::Swarm,
+    pub fn backend_for(self, _source: &TorrentSource) -> BackendKind {
+        match self {
+            Self::Rqbit => BackendKind::Rqbit,
+            Self::Auto | Self::Swarm => BackendKind::Swarm,
         }
     }
 }
@@ -2022,9 +2018,9 @@ mod tests {
     }
 
     #[test]
-    fn auto_routes_magnets_to_librqbit_and_files_to_lumen_swarm() {
+    fn auto_routes_every_source_to_lumen_swarm() {
         let auto = EngineChoice::Auto;
-        assert_eq!(auto.backend_for(&magnet()), BackendKind::Rqbit);
+        assert_eq!(auto.backend_for(&magnet()), BackendKind::Swarm);
         assert_eq!(auto.backend_for(&file_source()), BackendKind::Swarm);
         let url = TorrentSource::parse_link("https://example.org/a.torrent").unwrap();
         assert_eq!(auto.backend_for(&url), BackendKind::Swarm);

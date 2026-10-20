@@ -7,6 +7,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Automatic engine selection now streams magnet links with lumen-swarm. librqbit remains the
+  metadata resolver and explicit compatibility engine.
+
 ### Fixed
 
 - Search results now show when their video is playing, up next, or elsewhere in the queue, and
@@ -37,8 +42,6 @@ The first public preview: stream any torrent, video or audio, and skip to any mo
 
 - Installers are not code-signed yet: Windows SmartScreen and macOS Gatekeeper warn the first
   time you open the app.
-- Magnet links use the embedded librqbit engine by default (Settings → Advanced → Engine switches
-  them to TorrentStream's engine); `.torrent` files use TorrentStream's engine.
 - The built-in player uses the system web engine, which cannot decode Dolby (AC-3, E-AC-3,
   TrueHD) or DTS audio; the app warns instead of playing silently.
 - Desktop only; no seeding controls yet.

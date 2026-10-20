@@ -254,13 +254,13 @@ async fn a_new_preload_evicts_the_unplayed_one() {
     );
     assert!(!f.marker(&f.lecture.hash).exists());
 
-    // The evicted torrent is gone: adding it again goes to librqbit as any magnet link does.
+    // The evicted torrent is gone: adding it again resolves its metadata and starts a new swarm.
     let info = f
         .engine
         .add_with_peers(magnet(&f.lecture.hash), vec![f.seeder_addr])
         .await
         .unwrap();
-    assert_eq!(f.engine.backend(info.id).unwrap(), BackendKind::Rqbit);
+    assert_eq!(f.engine.backend(info.id).unwrap(), BackendKind::Swarm);
 
     // Shutting down evicts the unplayed preload too.
     f.engine.shutdown().await;

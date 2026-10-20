@@ -179,9 +179,9 @@ The SOCKS5 password and the WireGuard private and preshared keys are [secrets](#
 | `advanced.debugOverlay` | `true`  | on / off                                  | now        |
 | `advanced.logLevel`     | `info`  | `error`, `warn`, `info`, `debug`, `trace` | now        |
 
-`auto` uses TorrentStream's engine (lumen-swarm) for `.torrent` files and links and librqbit for magnet
-links. `swarm` uses TorrentStream's engine for everything: for a magnet link, librqbit fetches only the
-metadata, then hands the torrent and the peers it found to lumen-swarm. The environment variables below override `engine` and
+`auto` and `swarm` use TorrentStream's engine (lumen-swarm) for every source. For a magnet link,
+librqbit fetches only the metadata, then hands the torrent and the peers it found to lumen-swarm.
+`rqbit` is the compatibility choice that uses librqbit for the download too. The environment variables below override `engine` and
 `logLevel`, and the Settings page says so when they do.
 
 ## Secrets

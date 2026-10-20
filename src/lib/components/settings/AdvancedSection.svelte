@@ -22,7 +22,7 @@
     label="Torrent engine"
     path="advanced.engine"
     help={view.engineOverride === null
-      ? "Automatic uses TorrentStream's streaming engine for .torrent files and librqbit for magnet links."
+      ? "Automatic uses TorrentStream's streaming engine for every source; librqbit resolves magnet metadata only."
       : `The LUMEN_ENGINE environment variable (${view.engineOverride}) overrides this setting.`}
   >
     <select

@@ -283,7 +283,7 @@ The docs also build as a book with [mdBook](https://rust-lang.github.io/mdBook/)
 Working today: the streaming engine, player, search, the queue with background downloads, VPN,
 WireGuard, and proxy modes with a kill switch, and bandwidth limits. Next:
 
-- [ ] TorrentStream's engine for magnet links by default
+- [x] TorrentStream's engine for magnet links by default
 - [ ] Seeding controls: keep sharing after watching, ratio targets, peer limits
 - [ ] Cache size limit and automatic clean-up of old downloads
 - [ ] Resume where you left off
@@ -302,9 +302,9 @@ what you play.
 peers can only be as fast as they are; the queue shows each video's peers and speed so you can
 pick one that plays smoothly, or switch the queue to "Fastest first".
 
-**Does TorrentStream upload?** Magnet-link torrents share pieces with other peers while they
-download, as BitTorrent intends, and you can cap the upload rate in Settings. Fuller seeding
-controls are on the roadmap.
+**Does TorrentStream upload?** The optional librqbit engine shares pieces while it downloads.
+Uploading from TorrentStream's default streaming engine and fuller seeding controls are on the
+roadmap.
 
 **What happens if my VPN drops?** The kill switch stops all traffic and closes connections until
 the tunnel is back; nothing falls back to a direct connection. See
