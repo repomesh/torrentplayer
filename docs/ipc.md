@@ -578,8 +578,10 @@ whole after each change. Each item holds only what is needed to play it again: t
 link (`source`: a magnet link, or an http(s) link to a `.torrent` file; torrents opened from a
 file are saved as their `TorrentSummary.magnet`, with the info hash, name, and up to 20 of the
 file's trackers; a magnet link may list at most 64 trackers), `fileIndex` (`null` plays the
-torrent's main video), `title`, `torrentName`, `sizeBytes`, and `infoHash`. Stream URLs are
-never stored: links to this computer (`localhost`, loopback addresses) are refused.
+torrent's main video), `title`, `torrentName`, `sizeBytes`, and `infoHash`. The `paused`,
+`skipped`, and `played` flags separately record download pauses, videos passed over, and videos
+that reached their end. Stream URLs are never stored: links to this computer (`localhost`,
+loopback addresses) are refused.
 
 #### `load_queue`
 
@@ -597,7 +599,7 @@ dropped, a `current` that names no item is cleared, and a damaged file is set as
 #### `save_queue`
 
 Validates and saves the whole queue atomically (temporary file, then rename), versioned
-(`"version": 1`). At most 500 items; ids are 1–64 letters, digits, `-` or `_`, unique;
+(`"version": 2`). At most 500 items; ids are 1–64 letters, digits, `-` or `_`, unique;
 titles 1–1024 characters without control characters; `infoHash` 40 hex digits.
 
 |            |                                                                                          |

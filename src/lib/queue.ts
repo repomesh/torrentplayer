@@ -48,10 +48,9 @@ export function currentIndex(queue: Queue): number {
   return queue.current === null ? -1 : queue.items.findIndex((i) => i.id === queue.current);
 }
 
-/** Whether an item comes before the cursor (it has been played). */
+/** Whether an item reached the end during playback. */
 export function isPlayed(queue: Queue, id: string): boolean {
-  const at = queue.items.findIndex((i) => i.id === id);
-  return at >= 0 && at < currentIndex(queue);
+  return queue.items.find((i) => i.id === id)?.played === true;
 }
 
 /** Number of items after the cursor, still to play. */
@@ -252,12 +251,44 @@ export function moveBy(queue: Queue, id: string, delta: number): Queue {
   return from < 0 ? queue : move(queue, id, from + delta);
 }
 
-/** Puts the cursor on an item (it is playing now), or clears it with null. */
+/**
+ * Puts the cursor on an item (it is playing now), or clears it with `null`. Items jumped over
+ * are marked skipped rather than played, and directly playing a skipped item includes it again.
+ */
 export function setCurrent(queue: Queue, id: string | null): Queue {
   if (id !== null && !queue.items.some((i) => i.id === id)) {
     return queue;
   }
-  return queue.current === id ? queue : { ...queue, current: id };
+  if (id === null) {
+    return queue.current === null ? queue : { ...queue, current: null };
+  }
+  const from = currentIndex(queue);
+  const to = queue.items.findIndex((i) => i.id === id);
+  let changed = queue.current !== id;
+  const items = queue.items.map((item, index) => {
+    if (item.id === id && item.skipped) {
+      changed = true;
+      return { ...item, skipped: false };
+    }
+    if (from < index && index < to && !item.played && !item.skipped) {
+      changed = true;
+      return { ...item, skipped: true };
+    }
+    return item;
+  });
+  return changed ? { ...queue, items, current: id } : queue;
+}
+
+/** Records that a video reached its end, and includes it again if it had been skipped. */
+export function markPlayed(queue: Queue, id: string): Queue {
+  const item = queue.items.find((i) => i.id === id);
+  if (item === undefined || (item.played && !item.skipped)) {
+    return queue;
+  }
+  return {
+    ...queue,
+    items: queue.items.map((i) => (i.id === id ? { ...i, played: true, skipped: false } : i)),
+  };
 }
 
 /**
@@ -297,10 +328,11 @@ export function setOrder(queue: Queue, order: DownloadOrder): Queue {
   return queue.order === order ? queue : { ...queue, order };
 }
 
-/** Removes the played items before the cursor. */
+/** Removes only items that actually reached the end; passed-over skipped items stay. */
 export function clearPlayed(queue: Queue): Queue {
-  const at = currentIndex(queue);
-  return at <= 0 ? queue : { ...queue, items: queue.items.slice(at) };
+  return queue.items
+    .filter((item) => item.played)
+    .reduce((next, item) => remove(next, item.id), queue);
 }
 
 /**
@@ -317,6 +349,7 @@ export function sanitizeQueue(value: unknown): Queue {
     ...i,
     paused: (i.paused as boolean | undefined) ?? false,
     skipped: (i.skipped as boolean | undefined) ?? false,
+    played: (i.played as boolean | undefined) ?? false,
   }));
   const { queue } = enqueue(emptyQueue(), valid);
   const current = 'current' in value && typeof value.current === 'string' ? value.current : null;
@@ -343,7 +376,8 @@ function isQueueItem(value: unknown): value is QueueItem {
     optional(v.torrentName, 'string') &&
     optional(v.sizeBytes, 'number') &&
     (v.paused === undefined || typeof v.paused === 'boolean') &&
-    (v.skipped === undefined || typeof v.skipped === 'boolean')
+    (v.skipped === undefined || typeof v.skipped === 'boolean') &&
+    (v.played === undefined || typeof v.played === 'boolean')
   );
 }
 

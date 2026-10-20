@@ -749,6 +749,7 @@ mod tests {
             size_bytes: None,
             paused,
             skipped: false,
+            played: false,
         }
     }
 

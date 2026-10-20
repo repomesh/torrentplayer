@@ -180,7 +180,9 @@ time. Every view stays reachable from the rail.
   current one ranks first, then the rest after the current item, then items before it
   (skipped or played); within that "In order" follows the queue and "Fastest first" prefers
   the fastest torrents, keeping a torrent's own files in order (`Queue.order`). Torrents are
-  added four at a time so a long queue does not fetch all of its metadata at once. Items can be paused (`QueueItem.paused`);
+  added four at a time so a long queue does not fetch all of its metadata at once. Items keep
+  paused, skipped, and completed state independently (`QueueItem.paused`, `.skipped`, `.played`),
+  so jumping ahead does not make bypassed videos look watched. Items can be paused;
   paused, finished, and waiting items' files are deselected and torrents nothing needs are
   paused. The settings' download limit covers everything together (both engines, playback
   included) and caps the planner's estimate; the upload limit applies to librqbit. Queue rows

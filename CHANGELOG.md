@@ -13,6 +13,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   disable the Queue button for entries that are already queued.
 - Removing every queued file in a torrent now uses a distinct trash-and-count control and asks
   for confirmation, so it cannot be mistaken for removing one video row.
+- The queue now records completed videos separately from its cursor: watched items show as
+  Played, videos jumped over show as Skipped, and Clear played preserves skipped videos.
 
 ## [0.1.0] - 2026-10-20
 
