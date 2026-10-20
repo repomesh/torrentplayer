@@ -44,6 +44,7 @@
   } from '../search';
   import SearchFiltersBar from './SearchFilters.svelte';
   import SearchResults from './SearchResults.svelte';
+  import type { QueueEntryState } from '../queue';
 
   interface Props {
     isTorrentBusy: (source: string, infoHash?: string | null) => boolean;
@@ -56,6 +57,8 @@
     onPlay?: (magnet: string, fileIndex: number | null, infoHash: string | null) => void;
     /** Adds a search result to the queue: its preloaded file, if known. */
     onQueue?: (result: SearchResultDto, fileIndex: number | null) => void;
+    /** Whether a search result's selected video is already in the queue. */
+    queuedState?: (result: SearchResultDto, fileIndex: number | null) => QueueEntryState | null;
     /** A new search started (`id`), or the results were cleared (null): a new history entry. */
     onSearch: (id: number | null) => void;
     /** Searches dropped from the cache, so history entries for them can be removed. */
@@ -72,6 +75,7 @@
     onFile,
     onPlay,
     onQueue,
+    queuedState,
     onSearch,
     onForget,
     focusRequest = 0,
@@ -594,6 +598,9 @@
         ? (result: SearchResultDto) => {
             onQueue(result, preloadedFile(result));
           }
+        : undefined}
+      queuedState={queuedState
+        ? (result: SearchResultDto) => queuedState(result, preloadedFile(result))
         : undefined}
     />
   {:else if shownResponse}

@@ -78,6 +78,7 @@
     nextItem,
     optimizeQueue,
     putFirst,
+    queueEntryState,
     remove,
     restoreOrder,
     sanitizeQueue,
@@ -1329,6 +1330,12 @@
         onPlay={(magnet: string, fileIndex: number | null, infoHash: string | null) =>
           void playNow(magnet, fileIndex, infoHash)}
         onQueue={queueResult}
+        queuedState={(result: SearchResultDto, fileIndex: number | null) =>
+          queueEntryState(
+            queue,
+            { source: result.link, infoHash: result.infoHash, fileIndex },
+            playingId,
+          )}
         onSearch={(id: number | null) => {
           addError = null;
           navigate({ name: 'search', search: id });

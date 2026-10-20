@@ -17,6 +17,7 @@
     qualityNotes,
   } from '../search';
   import type { PreviewFrameDto } from '../ipc';
+  import type { QueueEntryState } from '../queue';
 
   interface Props {
     response: SearchResponseDto;
@@ -38,6 +39,8 @@
     onPlay?: ((result: SearchResultDto) => void) | undefined;
     /** Adds a result to the queue. */
     onQueue?: ((result: SearchResultDto) => void) | undefined;
+    /** Whether this result is already queued, and where it is in playback. */
+    queuedState?: ((result: SearchResultDto) => QueueEntryState | null) | undefined;
   }
 
   let {
@@ -52,6 +55,7 @@
     onAdd,
     onPlay,
     onQueue,
+    queuedState,
   }: Props = $props();
 
   // Rows slide to their new places as results arrive; less motion if the system asks for it.
@@ -154,6 +158,7 @@
         {@const preloaded = preloadLabel(preload, result.infoHash)}
         {@const picture = thumbnails.get(result.key)}
         {@const open = expanded.has(result.key)}
+        {@const queued = queuedState?.(result) ?? null}
         <li
           class:best={result.bestPick}
           animate:flip={{ duration: MOVE_MS }}
@@ -198,6 +203,15 @@
             >
               <span class="title">
                 {#if result.bestPick}<span class="pick">Best pick</span>{/if}
+                {#if queued}
+                  <span class="queued" aria-label="In queue">
+                    {queued === 'playing'
+                      ? 'Playing'
+                      : queued === 'upNext'
+                        ? 'Up next'
+                        : 'In queue'}
+                  </span>
+                {/if}
                 {result.title}
               </span>
               {#if result.bestPick}
@@ -241,10 +255,13 @@
                 <button
                   type="button"
                   class="secondary"
-                  title="Play it after the current video"
+                  disabled={queued !== null}
+                  title={queued === null
+                    ? 'Play it after the current video'
+                    : 'Already in the queue'}
                   onclick={() => {
                     onQueue(result);
-                  }}>Queue</button
+                  }}>{queued === null ? 'Queue' : 'Queued'}</button
                 >
               {/if}
               <button
@@ -425,6 +442,17 @@
     border-radius: 1rem;
     background: rgb(242 180 90 / 15%);
     color: var(--accent);
+    font-size: 0.75rem;
+    font-weight: 600;
+    vertical-align: 0.1em;
+  }
+
+  .queued {
+    margin-right: 0.45rem;
+    padding: 0.05rem 0.45rem;
+    border-radius: 1rem;
+    background: rgb(111 180 145 / 15%);
+    color: #9ad6b9;
     font-size: 0.75rem;
     font-weight: 600;
     vertical-align: 0.1em;
