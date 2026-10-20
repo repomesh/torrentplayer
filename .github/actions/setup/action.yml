@@ -1,0 +1,48 @@
+name: Set up TorrentStream build environment
+description: >-
+  Installs the pinned Rust toolchain, Node.js, Tauri system dependencies, and frontend
+  packages, then builds the frontend (Tauri embeds dist/ at compile time).
+
+inputs:
+  build-frontend:
+    description: Whether to run `npm run build`.
+    default: 'true'
+  rust-cache:
+    description: Whether to cache Cargo build output. Never enable this in release workflows.
+    default: 'true'
+
+runs:
+  using: composite
+  steps:
+    - name: Install Linux system dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev \
+          libayatana-appindicator3-dev librsvg2-dev
+
+    - name: Install pinned Rust toolchain
+      shell: bash
+      # rustup reads rust-toolchain.toml and installs the exact pinned version.
+      run: rustup show active-toolchain || rustup toolchain install
+
+    - name: Cache Cargo build output
+      if: inputs.rust-cache == 'true'
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+    - name: Set up Node.js
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: 22
+        cache: npm
+
+    - name: Install frontend dependencies
+      shell: bash
+      run: npm ci
+
+    - name: Build frontend
+      if: inputs.build-frontend == 'true'
+      shell: bash
+      run: npm run build

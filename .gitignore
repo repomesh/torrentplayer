@@ -1,0 +1,23 @@
+# Rust
+/target/
+
+# Frontend
+node_modules/
+/dist/
+
+# Tauri generated files
+/src-tauri/gen/
+
+# Docs build output
+/docs/book/
+
+# Coverage and benchmark output
+lcov.info
+*.profraw
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cache-usage"
+description = "Enables the cache_usage command without any pre-configured scope."
+commands.allow = ["cache_usage"]
+
+[[permission]]
+identifier = "deny-cache-usage"
+description = "Denies the cache_usage command without any pre-configured scope."
+commands.deny = ["cache_usage"]

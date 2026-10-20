@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-torrent-file"
+description = "Enables the add_torrent_file command without any pre-configured scope."
+commands.allow = ["add_torrent_file"]
+
+[[permission]]
+identifier = "deny-add-torrent-file"
+description = "Denies the add_torrent_file command without any pre-configured scope."
+commands.deny = ["add_torrent_file"]

@@ -1,0 +1,55 @@
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait two weeks after a release before proposing it, so compromised or broken releases
+    # are usually caught and yanked first.
+    cooldown:
+      default-days: 14
+    groups:
+      tauri:
+        patterns: ['tauri', 'tauri-*']
+      rust-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: build(deps)
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      tauri:
+        patterns: ['@tauri-apps/*']
+      lint-and-format:
+        patterns:
+          [
+            'eslint',
+            '@eslint/*',
+            'eslint-*',
+            'typescript-eslint',
+            'prettier',
+            'prettier-*',
+            'globals',
+          ]
+      npm-minor-and-patch:
+        update-types: [minor, patch]
+    commit-message:
+      prefix: build(deps)
+
+  - package-ecosystem: github-actions
+    directories: ['/', '/.github/actions/*']
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 14
+    groups:
+      actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci(deps)

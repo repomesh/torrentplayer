@@ -1,0 +1,119 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "src-tauri"]
+exclude = ["vendor/librqbit-dht", "vendor/tokio-wireguard"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT OR Apache-2.0"
+authors = ["The Lumen Contributors"]
+repository = "https://github.com/torrent-stream/torrentstream"
+homepage = "https://github.com/torrent-stream/torrentstream"
+publish = false
+
+[workspace.dependencies]
+# Internal crates.
+lumen-bench = { path = "crates/lumen-bench" }
+lumen-course = { path = "crates/lumen-course" }
+lumen-library = { path = "crates/lumen-library" }
+lumen-media = { path = "crates/lumen-media" }
+lumen-net = { path = "crates/lumen-net" }
+lumen-player = { path = "crates/lumen-player" }
+lumen-prioritize = { path = "crates/lumen-prioritize" }
+lumen-search = { path = "crates/lumen-search" }
+lumen-settings = { path = "crates/lumen-settings" }
+lumen-stream = { path = "crates/lumen-stream" }
+lumen-swarm = { path = "crates/lumen-swarm" }
+lumen-torrent = { path = "crates/lumen-torrent" }
+
+# External crates. New dependencies need a justification in the PR that adds them.
+anyhow = "1.0.100"
+base64 = "0.22"
+bytes = "1.10"
+# Small DNS wire parser; name queries travel inside the WireGuard tunnel.
+dns-parser = "0.8"
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+getrandom = "0.3"
+http = "1.3"
+http-body-util = "0.1.3"
+hyper = { version = "1.7", features = ["server", "http1"] }
+hyper-util = { version = "0.1.17", features = ["tokio"] }
+if-addrs = "0.15"
+# OS credential stores (Windows Credential Manager, macOS Keychain, Linux Secret Service) for
+# proxy passwords and WireGuard keys; the `v1` feature selects the platform store.
+keyring = "4.2"
+# rustls: avoids linking OpenSSL (via crypto-hash) on Linux. librqbit-upnp enables reqwest's
+# default TLS (rustls + aws-lc-rs) regardless, so aws-lc is built either way. The HTTP API and
+# web UI features are not needed; TorrentStream uses the library directly.
+librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
+# librqbit's tracker and metadata crates, used directly by lumen-swarm (same versions as
+# librqbit 9, so nothing is built twice).
+librqbit-core = { version = "9.0.1", default-features = false, features = ["sha1-ring"] }
+# The DHT node librqbit uses (already built for it), for lumen-swarm's own peer discovery.
+librqbit-dht = "9.0.1"
+librqbit-tracker-comms = "9.0.1"
+proptest = "1.7"
+# The system folder picker for choosing the download folder (Tauri v2 has none built in). GTK3 on
+# Linux, which Tauri already links, so no other toolkit or D-Bus client is added.
+rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
+# Same version and TLS backend librqbit already uses, so no second copy is built.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# Zeroizing, Debug-redacting wrappers for secrets held in memory.
+secrecy = "0.10.3"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
+sha1 = "0.10.6"
+socket2 = { version = "0.6", features = ["all"] }
+subtle = "2.6"
+tauri = { version = "2.12", features = [] }
+tauri-build = { version = "2.7", features = [] }
+tempfile = "3.20"
+thiserror = "2.0.17"
+tokio = { version = "1.47", features = ["fs", "macros", "net", "rt-multi-thread", "sync", "time"] }
+# In-process WireGuard TCP/IP stack; vendored for preshared keys and handshake health.
+tokio-wireguard = { path = "vendor/tokio-wireguard" }
+tokio-util = { version = "0.7.16", features = ["io"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+ts-rs = "12.0"
+url = "2.5"
+zeroize = "1.8"
+
+[workspace.lints.rust]
+# `deny` rather than `forbid` so the FFI crate can opt in locally. Every other crate
+# additionally declares `#![forbid(unsafe_code)]` at its root.
+unsafe_code = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Panicking shortcuts are banned outside tests (see clippy.toml for the test exemptions).
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+# Use `tracing`, never print directly.
+print_stdout = "deny"
+print_stderr = "deny"
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = 3
+panic = "unwind" # Required so FFI callbacks can catch panics at the C boundary.
+strip = "symbols"
+
+[patch.crates-io]
+# librqbit's DHT node, vendored so a single bad UDP datagram on Windows cannot end it (see
+# vendor/librqbit-dht/LUMEN.md). Used by librqbit and lumen-swarm alike.
+librqbit-dht = { path = "vendor/librqbit-dht" }

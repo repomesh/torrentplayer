@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-add-torrent-link"
+description = "Enables the add_torrent_link command without any pre-configured scope."
+commands.allow = ["add_torrent_link"]
+
+[[permission]]
+identifier = "deny-add-torrent-link"
+description = "Denies the add_torrent_link command without any pre-configured scope."
+commands.deny = ["add_torrent_link"]

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
+<!--
+  Embedded into every linked target, including tests (see build.rs). Tauri uses Common Controls v6
+  APIs, which Windows resolves only for executables that declare this dependency. Tauri
+  normally embeds this into the app binary only, so test harnesses would fail
+  with STATUS_ENTRYPOINT_NOT_FOUND.
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>

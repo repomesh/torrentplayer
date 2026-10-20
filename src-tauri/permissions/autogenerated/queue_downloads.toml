@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-queue-downloads"
+description = "Enables the queue_downloads command without any pre-configured scope."
+commands.allow = ["queue_downloads"]
+
+[[permission]]
+identifier = "deny-queue-downloads"
+description = "Denies the queue_downloads command without any pre-configured scope."
+commands.deny = ["queue_downloads"]

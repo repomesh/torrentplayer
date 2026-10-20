@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-prefetch-torrents"
+description = "Enables the prefetch_torrents command without any pre-configured scope."
+commands.allow = ["prefetch_torrents"]
+
+[[permission]]
+identifier = "deny-prefetch-torrents"
+description = "Denies the prefetch_torrents command without any pre-configured scope."
+commands.deny = ["prefetch_torrents"]

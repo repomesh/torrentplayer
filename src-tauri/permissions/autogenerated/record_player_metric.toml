@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-record-player-metric"
+description = "Enables the record_player_metric command without any pre-configured scope."
+commands.allow = ["record_player_metric"]
+
+[[permission]]
+identifier = "deny-record-player-metric"
+description = "Denies the record_player_metric command without any pre-configured scope."
+commands.deny = ["record_player_metric"]

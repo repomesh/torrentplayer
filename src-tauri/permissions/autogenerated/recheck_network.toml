@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-recheck-network"
+description = "Enables the recheck_network command without any pre-configured scope."
+commands.allow = ["recheck_network"]
+
+[[permission]]
+identifier = "deny-recheck-network"
+description = "Denies the recheck_network command without any pre-configured scope."
+commands.deny = ["recheck_network"]

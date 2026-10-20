@@ -1,0 +1,6 @@
+# zizmor configuration: https://docs.zizmor.sh/configuration/
+rules:
+  # Local composite actions are referenced with the widely supported `./` form; revisit once the
+  # newer self-repository syntax is supported by all the tooling we use (actionlint, Dependabot).
+  self-repository:
+    disable: true

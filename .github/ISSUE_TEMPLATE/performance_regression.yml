@@ -1,0 +1,44 @@
+name: Performance regression
+description: Playback starts slowly, seeks are slow, or buffering falls behind.
+labels: [performance, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Streaming performance is TorrentStream's top priority. Numbers from the debug overlay (press D in the player) help most.
+  - type: input
+    id: torrent
+    attributes:
+      label: Torrent
+      description: A link to the openly licensed torrent (for example on Academic Torrents), or the magnet link.
+    validations:
+      required: true
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Metrics
+      description: Time to first frame, seek latency, buffer ahead, download speed, and peer/seed counts.
+      placeholder: |
+        Time to first frame: 7.2 s
+        Seek latency: 3.1 s
+        Peers / seeds: 12 / 40
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: TorrentStream version or commit (and the last version that was fast, if known)
+    validations:
+      required: true
+  - type: dropdown
+    id: network-mode
+    attributes:
+      label: Network mode
+      options: [Direct, Bound interface, Built-in WireGuard, SOCKS5 proxy]
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, connection speed, and anything unusual about your network.

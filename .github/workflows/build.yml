@@ -1,0 +1,85 @@
+name: Build
+
+# Builds unsigned installers for every platform on each push to main, on pull requests, and on
+# demand, and keeps them as workflow artifacts for testing. Signed, published builds come from
+# release.yml when a version tag is pushed. See docs/release.md.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x64
+            os: macos-15
+            target: x86_64-apple-darwin
+          # The oldest supported Ubuntu, so the AppImage and .deb run on older glibc versions.
+          - name: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Tauri builds the frontend itself (beforeBuildCommand).
+      - uses: ./.github/actions/setup
+        with:
+          build-frontend: 'false'
+
+      - name: Add Rust target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "$TARGET"
+
+      # Without a tag, tauri-action only builds; nothing is published.
+      - name: Build installers
+        id: tauri
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        with:
+          args: --target ${{ matrix.target }}
+
+      - name: Collect installers
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: |
+          mkdir -p build-assets
+          node -e 'for (const p of JSON.parse(process.env.ARTIFACT_PATHS)) console.log(p)' |
+            while IFS= read -r path; do
+              # .app bundles are directories; their archives (.app.tar.gz) are kept instead.
+              if [ -f "$path" ]; then cp "$path" build-assets/; fi
+            done
+          ls -l build-assets
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installers-${{ matrix.name }}
+          path: build-assets/
+          if-no-files-found: error
+          retention-days: 14

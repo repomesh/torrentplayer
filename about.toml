@@ -1,0 +1,19 @@
+# cargo-about configuration: generates THIRD_PARTY_NOTICES.md.
+# Regenerate with: cargo about generate --workspace about.hbs -o THIRD_PARTY_NOTICES.md
+accepted = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "BSD-2-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "0BSD",
+  "CDLA-Permissive-2.0",
+  "MPL-2.0",
+]
+ignore-build-dependencies = false
+ignore-dev-dependencies = true

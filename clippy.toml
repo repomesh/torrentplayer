@@ -1,0 +1,11 @@
+msrv = "1.90"
+
+# Tests may use panicking shortcuts; production code may not.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+allow-print-in-tests = true
+
+# Product names that are not code identifiers; ".." keeps Clippy's built-in defaults.
+doc-valid-idents = ["TorrentStream", "BitTorrent", "FFmpeg", "WireGuard", "SQLite", "OpenCourseWare", "WebView2", ".."]

@@ -1,0 +1,21 @@
+[package]
+name = "lumen-media"
+description = "Media probing for TorrentStream: tracks from container headers, subtitle files; ffprobe in Phase 2."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+# Reads the container header through the same seekable readers the stream server uses.
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

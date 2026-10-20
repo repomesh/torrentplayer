@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preload-status"
+description = "Enables the preload_status command without any pre-configured scope."
+commands.allow = ["preload_status"]
+
+[[permission]]
+identifier = "deny-preload-status"
+description = "Denies the preload_status command without any pre-configured scope."
+commands.deny = ["preload_status"]

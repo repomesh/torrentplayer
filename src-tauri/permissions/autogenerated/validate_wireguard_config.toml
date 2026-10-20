@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-validate-wireguard-config"
+description = "Enables the validate_wireguard_config command without any pre-configured scope."
+commands.allow = ["validate_wireguard_config"]
+
+[[permission]]
+identifier = "deny-validate-wireguard-config"
+description = "Denies the validate_wireguard_config command without any pre-configured scope."
+commands.deny = ["validate_wireguard_config"]

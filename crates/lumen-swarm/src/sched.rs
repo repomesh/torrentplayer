@@ -1,0 +1,2212 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+//! The request scheduler: decides what to request, from whom, and when.
+//!
+//! This is where streaming performance comes from, so it is pure logic with no I/O and is
+//! unit-tested directly. The policy:
+//!
+//! - **Deadlines.** Readers and the playhead register *interests*. Every missing piece in an
+//!   interest's window gets an urgency: how soon the player will need it at the current byte
+//!   rate. Urgent pieces are always requested first, in urgency order.
+//! - **Short, adaptive queues.** Each peer gets about [`SchedulerConfig::queue_time`] of requests
+//!   at its measured rate (instead of a fixed number), so a newly urgent block never waits behind
+//!   seconds of queued data.
+//! - **Cancel on seek.** When the playhead jumps, requests that are no longer urgent are cancelled
+//!   so peers' queues free up for the new position at once.
+//! - **Duplicate urgent blocks.** A block that is due within [`SchedulerConfig::endgame_horizon`]
+//!   and has been outstanding for a while is also requested from a second peer; the slower copy
+//!   is cancelled when the first arrives.
+//! - **Critical phase.** When a reader starts, seeks, or has to wait for data, only the
+//!   [`SchedulerConfig::critical_bytes`] ahead of it are requested until half of them are
+//!   downloaded, so background downloading cannot compete with the bytes the player is waiting
+//!   for.
+//! - **Background fill.** Otherwise, selected files are downloaded rarest piece first, finishing
+//!   started pieces before starting new ones.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use crate::metainfo::{BLOCK_LEN, Metainfo};
+
+/// Identifies a connected peer.
+pub(crate) type PeerKey = u64;
+/// Identifies an interest (a reader or the playhead).
+pub(crate) type InterestId = u64;
+
+/// Scheduler settings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerConfig {
+    /// How much download time each peer's request queue should hold.
+    pub queue_time: Duration,
+    /// Request queue used when nothing is needed soon (see
+    /// [`SchedulerConfig::relax_horizon`]). Data already queued cannot be recalled from peers
+    /// that ignore `cancel`, so a short queue here is what makes the *next* seek fast;
+    /// background throughput drops slightly (measured about 17% on a link with 200 ms of
+    /// queueing delay).
+    pub relaxed_queue_time: Duration,
+    /// The queue counts as relaxed unless some missing piece is due within this time.
+    pub relax_horizon: Duration,
+    /// Queue for a peer whose rate has not been measured yet, in blocks. Deep enough that a
+    /// fast peer is not throttled while its rate is first measured (about one tick), shallow
+    /// enough that a seek right after connecting waits behind little data.
+    pub initial_queue: usize,
+    /// Smallest per-peer queue once the rate is known, in blocks.
+    pub min_queue: usize,
+    /// Largest per-peer queue, in blocks.
+    pub max_queue: usize,
+    /// Blocks due within this time may be requested from a second peer. Zero disables
+    /// duplicate requests.
+    pub endgame_horizon: Duration,
+    /// How long an urgent block must be outstanding before it is duplicated.
+    pub duplicate_after: Duration,
+    /// Only duplicate blocks held by a snubbed peer: one with requests outstanding that has
+    /// delivered nothing for [`SchedulerConfig::snub_after`]. Peers that ignore `cancel`
+    /// (such as librqbit) serve every duplicate in full, so time-based duplication wastes
+    /// bandwidth; a stalled peer is the case duplication actually helps.
+    pub duplicate_only_snubbed: bool,
+    /// How long a peer with outstanding requests may deliver nothing before it counts as
+    /// snubbed.
+    pub snub_after: Duration,
+    /// Outstanding requests older than this are given up and re-requested elsewhere.
+    pub request_timeout: Duration,
+    /// On a seek, outstanding requests due later than this are cancelled.
+    pub cancel_beyond: Duration,
+    /// Bytes ahead of a reader requested exclusively in its critical phase (see the module
+    /// documentation). The phase ends once half of them are downloaded.
+    pub critical_bytes: u64,
+    /// Also stay critical until this much playback time is buffered (at the media byte
+    /// rate), so high-bitrate video gets a proportionally larger start-up buffer. Zero means
+    /// [`SchedulerConfig::critical_bytes`] alone decides.
+    pub critical_secs: Duration,
+    /// Bytes after each reader's position that are urgent.
+    pub reader_window: u64,
+    /// Playback time to keep downloaded ahead of the playhead.
+    pub read_ahead: Duration,
+    /// Media byte rate assumed until the real one is known (bytes per second).
+    pub fallback_byte_rate: u64,
+    /// Largest read-ahead window in bytes.
+    pub max_window: u64,
+    /// Bytes at the end of a playing file to prefetch (container indexes), once not critical.
+    pub tail_bytes: u64,
+    /// Upper bound on memory held by partially downloaded background pieces.
+    pub max_in_progress_bytes: u64,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        const MIB: u64 = 1024 * 1024;
+        Self {
+            queue_time: Duration::from_millis(500),
+            relaxed_queue_time: Duration::from_millis(150),
+            relax_horizon: Duration::from_secs(4),
+            initial_queue: 32,
+            min_queue: 4,
+            max_queue: 128,
+            endgame_horizon: Duration::from_secs(1),
+            duplicate_after: Duration::from_millis(300),
+            duplicate_only_snubbed: true,
+            snub_after: Duration::from_secs(1),
+            request_timeout: Duration::from_secs(8),
+            cancel_beyond: Duration::from_secs(5),
+            critical_bytes: 2 * MIB,
+            critical_secs: Duration::from_millis(1_500),
+            reader_window: 8 * MIB,
+            read_ahead: Duration::from_secs(30),
+            fallback_byte_rate: 312_500,
+            max_window: 512 * MIB,
+            tail_bytes: 2 * MIB,
+            max_in_progress_bytes: 256 * MIB,
+        }
+    }
+}
+
+/// A request to send to a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Request {
+    pub(crate) piece: u32,
+    pub(crate) begin: u32,
+    pub(crate) len: u32,
+}
+
+/// What kind of interest: a reader has a short urgent window; the playhead has the full
+/// read-ahead window plus tail prefetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InterestKind {
+    Reader,
+    Playhead,
+}
+
+/// A position in a file the player cares about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Interest {
+    pub(crate) kind: InterestKind,
+    /// Absolute offset of the file in the torrent.
+    pub(crate) file_offset: u64,
+    /// File length.
+    pub(crate) file_len: u64,
+    /// Position within the file.
+    pub(crate) position: u64,
+    /// Media byte rate, if known.
+    pub(crate) byte_rate: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+enum BlockState {
+    Missing,
+    Requested(Vec<(PeerKey, Instant)>),
+    Received,
+}
+
+#[derive(Debug)]
+struct Progress {
+    blocks: Vec<BlockState>,
+    data: Vec<u8>,
+    received: u32,
+    contributors: Vec<PeerKey>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Outstanding {
+    piece: u32,
+    block: u32,
+    at: Instant,
+    /// Blocks already queued at this peer when the request was sent (0 = an empty queue).
+    ahead: u32,
+}
+
+/// The base round-trip estimate is the lowest sample of this window. An older minimum is replaced
+/// by the next sample, even a higher one, so the estimate follows a peer whose latency rises.
+/// Without samples it stays as it is: a busy peer never has an empty queue to sample, and its
+/// round trip cannot be observed while its pipeline is full (latency is then just queue length
+/// over rate), so drifting upwards would only inflate its queue.
+const RTT_WINDOW: Duration = Duration::from_secs(10);
+/// Request queues hold at least this many round trips of data, so a peer's pipeline never
+/// runs dry while a request is in flight.
+const QUEUE_RTTS: f64 = 2.0;
+
+/// Most requests [`Scheduler::fill_all`] gives one peer per turn: 256 KiB.
+const ROUND_BLOCKS: usize = 16;
+
+/// A slow peer leaves an urgent block to a peer that would deliver it this many times sooner,
+/// and a block held by a peer this many times slower is requested again from the faster one.
+const FASTER_BY: f64 = 2.0;
+
+/// Another peer that could take urgent blocks (see [`Scheduler::leave_to_faster`]).
+#[derive(Debug, Clone, Copy)]
+struct Rival {
+    key: PeerKey,
+    /// When it would deliver a block requested now.
+    eta: Duration,
+    /// Its rate, bytes per second.
+    rate: f64,
+}
+
+impl Rival {
+    /// When it would deliver the block `more` blocks after that one.
+    fn finish(&self, more: usize) -> Duration {
+        #[allow(clippy::cast_precision_loss)]
+        let bytes = more as f64 * f64::from(BLOCK_LEN);
+        self.eta + Duration::from_secs_f64(bytes / self.rate)
+    }
+}
+
+/// What a peer offers for an urgent block another peer holds (see [`Scheduler::take_blocks`]).
+#[derive(Debug, Clone, Copy)]
+struct Rescue {
+    /// When the block is needed.
+    needed_in: Duration,
+    /// When this peer would deliver it.
+    eta: Duration,
+    /// This peer's rate, bytes per second.
+    rate: f64,
+}
+
+/// Rates are sampled over windows of at least this long; shorter windows give wildly noisy
+/// samples because blocks arrive in bursts.
+const RATE_WINDOW: Duration = Duration::from_millis(100);
+/// Time constant of the rate average.
+const RATE_TAU: f64 = 0.5;
+
+/// Exponentially weighted download rate, weighted by time rather than by sample count.
+#[derive(Debug, Default, Clone, Copy)]
+struct Rate {
+    bytes_since: u64,
+    bytes_per_sec: f64,
+    measured: bool,
+    /// Recent peak of [`Rate::bytes_per_sec`], decaying slowly. While the queue is relaxed a
+    /// peer delivers only what is asked for, so its current rate understates what it can do;
+    /// urgent queues are sized from the peak so a seek gets full speed at once.
+    peak: f64,
+}
+
+/// Time constant of the peak-rate decay.
+const PEAK_TAU: f64 = 10.0;
+
+impl Rate {
+    fn add(&mut self, bytes: u64) {
+        self.bytes_since += bytes;
+    }
+
+    /// Folds in the bytes received over `elapsed` (at least [`RATE_WINDOW`]).
+    fn update(&mut self, elapsed: Duration) {
+        let secs = elapsed.as_secs_f64();
+        if secs <= 0.0 {
+            return;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let sample = self.bytes_since as f64 / secs;
+        if self.measured {
+            let alpha = 1.0 - (-secs / RATE_TAU).exp();
+            self.bytes_per_sec += alpha * (sample - self.bytes_per_sec);
+        } else if self.bytes_since > 0 {
+            self.bytes_per_sec = sample;
+            self.measured = true;
+        }
+        self.peak = (self.peak * (-secs / PEAK_TAU).exp()).max(self.bytes_per_sec);
+        self.bytes_since = 0;
+    }
+}
+
+#[derive(Debug)]
+struct Peer {
+    has: Vec<bool>,
+    has_count: u32,
+    choked: bool,
+    outstanding: Vec<Outstanding>,
+    rate: Rate,
+    timeouts: u32,
+    bad_pieces: u32,
+    /// When the peer last delivered a block, or when its queue last became non-empty.
+    last_progress: Option<Instant>,
+    /// Lowest recent latency of a request sent to an empty queue: an estimate of the network
+    /// round trip.
+    base_rtt: Option<Duration>,
+    /// When [`Peer::base_rtt`] was sampled.
+    base_rtt_at: Option<Instant>,
+    /// Requests cancelled at this peer that it may still send: peers such as librqbit ignore
+    /// `cancel`. While any are pending its queue is not really empty, so no round-trip sample is
+    /// taken (it would measure the drain of the cancelled data, not the round trip).
+    cancelled_pending: u32,
+    /// When the peer last delivered a block or had requests cancelled.
+    last_activity: Option<Instant>,
+}
+
+/// Result of receiving a block.
+#[derive(Debug, Default)]
+pub(crate) struct BlockOutcome {
+    /// Requests for the same block sent to other peers, to cancel.
+    pub(crate) cancels: Vec<(PeerKey, Request)>,
+    /// The piece is complete and must be verified: `(piece, data)`.
+    pub(crate) completed: Option<(u32, Vec<u8>)>,
+}
+
+/// Aggregate counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct SchedStats {
+    /// Requests sent for a block another peer was already fetching.
+    pub(crate) duplicate_requests: u64,
+    /// Requests cancelled on a seek or timeout.
+    pub(crate) cancelled_requests: u64,
+    /// Bytes received for blocks that were already received or no longer needed.
+    pub(crate) wasted_bytes: u64,
+    pub(crate) peers: usize,
+    pub(crate) unchoked: usize,
+    pub(crate) download_bps: f64,
+    pub(crate) have_pieces: u32,
+    pub(crate) outstanding: usize,
+}
+
+/// The scheduler for one torrent.
+#[derive(Debug)]
+pub(crate) struct Scheduler {
+    meta: Arc<Metainfo>,
+    cfg: SchedulerConfig,
+    have: Vec<bool>,
+    have_count: u32,
+    availability: Vec<u16>,
+    wanted: Vec<bool>,
+    progress: HashMap<u32, Progress>,
+    verifying: HashMap<u32, Vec<PeerKey>>,
+    in_progress_bytes: u64,
+    urgency: Vec<Option<Duration>>,
+    urgent_order: Vec<u32>,
+    critical: bool,
+    /// Pieces within the critical bytes of an interest that is still in the critical phase.
+    critical_pieces: Vec<u32>,
+    /// The critical pieces of ranges that reach the end of their file (container indexes,
+    /// needed whole before playback starts): first among equally urgent pieces. Sorted.
+    index_pieces: Vec<u32>,
+    background: Vec<u32>,
+    peers: HashMap<PeerKey, Peer>,
+    interests: HashMap<InterestId, Interest>,
+    /// Interests in their critical phase.
+    critical_interests: HashSet<InterestId>,
+    last_rate_update: Option<Instant>,
+    duplicate_requests: u64,
+    cancelled_requests: u64,
+    wasted_bytes: u64,
+    /// No requests are handed out (see [`Scheduler::set_paused`]).
+    paused: bool,
+}
+
+impl Scheduler {
+    pub(crate) fn new(meta: Arc<Metainfo>, cfg: SchedulerConfig) -> Self {
+        let n = meta.piece_count() as usize;
+        Self {
+            meta,
+            cfg,
+            have: vec![false; n],
+            have_count: 0,
+            availability: vec![0; n],
+            wanted: vec![false; n],
+            progress: HashMap::new(),
+            verifying: HashMap::new(),
+            in_progress_bytes: 0,
+            urgency: vec![None; n],
+            urgent_order: Vec::new(),
+            critical: false,
+            critical_pieces: Vec::new(),
+            index_pieces: Vec::new(),
+            background: Vec::new(),
+            peers: HashMap::new(),
+            interests: HashMap::new(),
+            critical_interests: HashSet::new(),
+            last_rate_update: None,
+            duplicate_requests: 0,
+            cancelled_requests: 0,
+            wasted_bytes: 0,
+            paused: false,
+        }
+    }
+
+    // ----- Queries -----------------------------------------------------------------------
+
+    pub(crate) fn have(&self, piece: u32) -> bool {
+        self.have.get(piece as usize).copied().unwrap_or(false)
+    }
+
+    pub(crate) fn have_all(&self) -> Vec<bool> {
+        self.have.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_critical(&self) -> bool {
+        self.critical
+    }
+
+    pub(crate) fn stats(&self) -> SchedStats {
+        SchedStats {
+            duplicate_requests: self.duplicate_requests,
+            cancelled_requests: self.cancelled_requests,
+            wasted_bytes: self.wasted_bytes,
+            peers: self.peers.len(),
+            unchoked: self.peers.values().filter(|p| !p.choked).count(),
+            download_bps: self.peers.values().map(|p| p.rate.bytes_per_sec).sum(),
+            have_pieces: self.have_count,
+            outstanding: self.peers.values().map(|p| p.outstanding.len()).sum(),
+        }
+    }
+
+    /// Contiguous downloaded bytes from absolute offset `abs` up to `end`.
+    pub(crate) fn buffered_from(&self, abs: u64, end: u64) -> u64 {
+        for piece in self.meta.pieces_in(abs, end) {
+            if !self.have(piece) {
+                return self.meta.piece_offset(piece).max(abs) - abs;
+            }
+        }
+        end.saturating_sub(abs)
+    }
+
+    /// Queue length (blocks) to keep outstanding for a peer.
+    fn target_queue(&self, peer: &Peer) -> usize {
+        let max = self.cfg.max_queue.max(self.cfg.min_queue);
+        if !peer.rate.measured {
+            return self.cfg.initial_queue.clamp(self.cfg.min_queue, max);
+        }
+        let relaxed = self.relaxed();
+        let configured = if relaxed {
+            self.cfg.relaxed_queue_time
+        } else {
+            self.cfg.queue_time
+        };
+        let rate = if relaxed {
+            peer.rate.bytes_per_sec
+        } else {
+            peer.rate.bytes_per_sec.max(peer.rate.peak)
+        };
+        // Never less than a couple of round trips, or the peer idles between requests.
+        let queue_time = peer
+            .base_rtt
+            .map_or(configured, |rtt| configured.max(rtt.mul_f64(QUEUE_RTTS)));
+        let by_rate = rate * queue_time.as_secs_f64() / f64::from(BLOCK_LEN);
+        // Saturating float-to-int conversion; clamped below.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let by_rate = by_rate.ceil() as usize;
+        by_rate.clamp(self.cfg.min_queue, max)
+    }
+
+    /// Whether nothing is needed soon: not in the critical phase, and no missing piece is due
+    /// within [`SchedulerConfig::relax_horizon`].
+    fn relaxed(&self) -> bool {
+        !self.critical
+            && self.urgent_order.first().is_none_or(|&p| {
+                self.urgency[p as usize].is_none_or(|due| due > self.cfg.relax_horizon)
+            })
+    }
+
+    // ----- Peers -------------------------------------------------------------------------
+
+    pub(crate) fn add_peer(&mut self, key: PeerKey) {
+        self.peers.insert(
+            key,
+            Peer {
+                has: vec![false; self.have.len()],
+                has_count: 0,
+                choked: true,
+                outstanding: Vec::new(),
+                rate: Rate::default(),
+                timeouts: 0,
+                bad_pieces: 0,
+                last_progress: None,
+                base_rtt: None,
+                base_rtt_at: None,
+                cancelled_pending: 0,
+                last_activity: None,
+            },
+        );
+    }
+
+    /// Forgets a peer and releases its outstanding requests.
+    pub(crate) fn remove_peer(&mut self, key: PeerKey) {
+        self.release_outstanding(key);
+        if let Some(peer) = self.peers.remove(&key) {
+            for (piece, has) in peer.has.iter().enumerate() {
+                if *has {
+                    self.availability[piece] = self.availability[piece].saturating_sub(1);
+                }
+            }
+        }
+    }
+
+    /// Records a peer's bitfield. Returns `false` if its length is wrong (BEP 3).
+    pub(crate) fn on_bitfield(&mut self, key: PeerKey, bits: &[u8]) -> bool {
+        let n = self.have.len();
+        if bits.len() != n.div_ceil(8) {
+            return false;
+        }
+        let Some(peer) = self.peers.get_mut(&key) else {
+            return false;
+        };
+        for piece in 0..n {
+            let set = bits[piece / 8] & (0x80 >> (piece % 8)) != 0;
+            if set && !peer.has[piece] {
+                peer.has[piece] = true;
+                peer.has_count += 1;
+                self.availability[piece] = self.availability[piece].saturating_add(1);
+            }
+        }
+        true
+    }
+
+    /// Records a `have` message. Returns `false` if the index is invalid.
+    pub(crate) fn on_have(&mut self, key: PeerKey, piece: u32) -> bool {
+        let i = piece as usize;
+        let Some(peer) = self.peers.get_mut(&key) else {
+            return false;
+        };
+        if i >= peer.has.len() {
+            return false;
+        }
+        if !peer.has[i] {
+            peer.has[i] = true;
+            peer.has_count += 1;
+            self.availability[i] = self.availability[i].saturating_add(1);
+        }
+        true
+    }
+
+    /// A choked peer discards our requests (BEP 3), so they are released.
+    pub(crate) fn on_choke(&mut self, key: PeerKey) {
+        self.release_outstanding(key);
+        if let Some(peer) = self.peers.get_mut(&key) {
+            peer.choked = true;
+        }
+    }
+
+    pub(crate) fn on_unchoke(&mut self, key: PeerKey) {
+        if let Some(peer) = self.peers.get_mut(&key) {
+            peer.choked = false;
+        }
+    }
+
+    fn release_outstanding(&mut self, key: PeerKey) {
+        let Some(peer) = self.peers.get_mut(&key) else {
+            return;
+        };
+        for o in std::mem::take(&mut peer.outstanding) {
+            if let Some(progress) = self.progress.get_mut(&o.piece) {
+                release_holder(&mut progress.blocks[o.block as usize], key);
+            }
+        }
+    }
+
+    // ----- Files and interests -------------------------------------------------------------
+
+    /// Marks every piece of a file as wanted for background download.
+    pub(crate) fn want_range(&mut self, start: u64, end: u64) {
+        for piece in self.meta.pieces_in(start, end) {
+            self.wanted[piece as usize] = true;
+        }
+    }
+
+    /// Wants exactly the pieces overlapping `ranges` (absolute byte ranges): pieces no longer
+    /// covered stop being downloaded in the background. Requests already sent still complete.
+    pub(crate) fn set_wanted(&mut self, ranges: &[(u64, u64)]) {
+        self.wanted.fill(false);
+        for &(start, end) in ranges {
+            self.want_range(start, end);
+        }
+    }
+
+    /// Stops or resumes handing out requests. Pausing cancels every outstanding request, so
+    /// data stops arriving within about a round trip; connections stay open for a quick resume.
+    /// Returns the cancels to send.
+    pub(crate) fn set_paused(&mut self, paused: bool) -> Vec<(PeerKey, Request)> {
+        self.paused = paused;
+        let mut cancels = Vec::new();
+        if !paused {
+            return cancels;
+        }
+        for (&key, peer) in &mut self.peers {
+            let outstanding = std::mem::take(&mut peer.outstanding);
+            if outstanding.is_empty() {
+                continue;
+            }
+            peer.cancelled_pending = peer
+                .cancelled_pending
+                .saturating_add(u32::try_from(outstanding.len()).unwrap_or(u32::MAX));
+            peer.last_activity = Some(Instant::now());
+            for o in outstanding {
+                if let Some(progress) = self.progress.get_mut(&o.piece) {
+                    release_holder(&mut progress.blocks[o.block as usize], key);
+                }
+                cancels.push((key, block_request(&self.meta, o.piece, o.block)));
+            }
+        }
+        self.cancelled_requests += cancels.len() as u64;
+        cancels
+    }
+
+    /// Adds or moves an interest. Moving forward by at most [`SchedulerConfig::reader_window`]
+    /// within the same file is continuous playback; anything else is a jump, which starts a
+    /// critical phase.
+    pub(crate) fn set_interest(&mut self, id: InterestId, interest: Interest) {
+        let continuous = self.interests.get(&id).is_some_and(|old| {
+            old.file_offset == interest.file_offset
+                && interest.position >= old.position
+                && interest.position <= old.position.saturating_add(self.cfg.reader_window)
+        });
+        if !continuous {
+            self.critical_interests.insert(id);
+        }
+        self.interests.insert(id, interest);
+    }
+
+    pub(crate) fn interest(&self, id: InterestId) -> Option<&Interest> {
+        self.interests.get(&id)
+    }
+
+    pub(crate) fn remove_interest(&mut self, id: InterestId) {
+        self.interests.remove(&id);
+        self.critical_interests.remove(&id);
+    }
+
+    /// Recomputes urgencies. With `seek`, cancels outstanding requests that are no longer
+    /// urgent so peers' queues free up for the new position; the cancels are returned.
+    pub(crate) fn reprioritize(&mut self, seek: bool) -> Vec<(PeerKey, Request)> {
+        for piece in self.urgent_order.drain(..) {
+            self.urgency[piece as usize] = None;
+        }
+        let mut critical = false;
+        let mut critical_pieces: Vec<u32> = Vec::new();
+        let mut index_pieces: Vec<u32> = Vec::new();
+        let mut touched: Vec<u32> = Vec::new();
+        let mut phases: Vec<(InterestId, bool)> = Vec::new();
+        // Readers do not know the media bitrate; the playhead of the same file does. Using it
+        // keeps a reader's window (for example the container index at the end of the file)
+        // as urgent as the playhead's, instead of looking far away at the fallback rate.
+        let known_rates: Vec<(u64, u64)> = self
+            .interests
+            .values()
+            .filter_map(|i| i.byte_rate.filter(|&r| r > 0).map(|r| (i.file_offset, r)))
+            .collect();
+        for (id, interest) in &self.interests {
+            let rate = interest
+                .byte_rate
+                .filter(|&r| r > 0)
+                .or_else(|| {
+                    known_rates
+                        .iter()
+                        .find(|(offset, _)| *offset == interest.file_offset)
+                        .map(|(_, r)| *r)
+                })
+                .unwrap_or(self.cfg.fallback_byte_rate)
+                .max(1);
+            let position = interest.position.min(interest.file_len);
+            let start = interest.file_offset + position;
+            let file_end = interest.file_offset + interest.file_len;
+            let window = match interest.kind {
+                InterestKind::Reader => self.cfg.reader_window,
+                InterestKind::Playhead => {
+                    let secs = self.cfg.read_ahead.as_secs_f64();
+                    #[allow(
+                        clippy::cast_possible_truncation,
+                        clippy::cast_sign_loss,
+                        clippy::cast_precision_loss
+                    )]
+                    let bytes = (rate as f64 * secs) as u64;
+                    bytes.clamp(
+                        self.cfg.reader_window,
+                        self.cfg.max_window.max(self.cfg.reader_window),
+                    )
+                }
+            };
+            let end = start.saturating_add(window).min(file_end);
+            let phase = self.critical_phase(*id, interest, rate);
+            phases.push((*id, phase.is_some()));
+            if let Some((from, to)) = phase {
+                critical = true;
+                let missing = self
+                    .meta
+                    .pieces_in(from, to)
+                    .filter(|&p| !self.have[p as usize]);
+                if to == file_end {
+                    index_pieces.extend(missing.clone());
+                }
+                critical_pieces.extend(missing);
+            }
+            for piece in self.meta.pieces_in(start, end) {
+                let dist = self.meta.piece_offset(piece).saturating_sub(start);
+                #[allow(clippy::cast_precision_loss)]
+                let due = Duration::from_secs_f64(dist as f64 / rate as f64);
+                set_urgency(&mut self.urgency, &mut touched, &self.have, piece, due);
+            }
+            if interest.kind == InterestKind::Playhead {
+                // Container indexes at the end of the file; due at the end of the read-ahead.
+                let tail_start = file_end.saturating_sub(self.cfg.tail_bytes).max(end);
+                for piece in self.meta.pieces_in(tail_start, file_end) {
+                    set_urgency(
+                        &mut self.urgency,
+                        &mut touched,
+                        &self.have,
+                        piece,
+                        self.cfg.read_ahead,
+                    );
+                }
+            }
+        }
+        touched.sort_by_key(|&p| (self.urgency[p as usize], p));
+        self.urgent_order = touched;
+        for (id, in_phase) in phases {
+            if in_phase {
+                self.critical_interests.insert(id);
+            } else {
+                self.critical_interests.remove(&id);
+            }
+        }
+        self.critical = critical;
+        critical_pieces.sort_unstable();
+        critical_pieces.dedup();
+        self.critical_pieces = critical_pieces;
+        index_pieces.sort_unstable();
+        index_pieces.dedup();
+        self.index_pieces = index_pieces;
+
+        if seek {
+            self.cancel_stale_requests()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Whether an interest is in its critical phase, given its state before this update; if so,
+    /// the absolute range to request exclusively: the critical bytes ahead of it.
+    ///
+    /// The phase starts when the interest is added or jumps, and again whenever it has to wait
+    /// for data. It ends once half of the range is downloaded ahead of the interest, not all of
+    /// it: a player that keeps reading moves the range forward, so its far end is always in
+    /// flight, and waiting for all of it would never end the phase.
+    fn critical_phase(&self, id: InterestId, interest: &Interest, rate: u64) -> Option<(u64, u64)> {
+        let start = interest.file_offset + interest.position.min(interest.file_len);
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::cast_precision_loss
+        )]
+        let critical_bytes = self
+            .cfg
+            .critical_bytes
+            .max((rate as f64 * self.cfg.critical_secs.as_secs_f64()) as u64);
+        let file_end = interest.file_offset + interest.file_len;
+        let end = start.saturating_add(critical_bytes).min(file_end);
+        let buffered = self.buffered_from(start, end);
+        // A range that reaches the end of the file is a container index being read, which a
+        // player needs whole before it can start; streamed data only needs half (see above).
+        let needed = if end == file_end {
+            end - start
+        } else {
+            (critical_bytes / 2).min(end - start)
+        };
+        let critical = if self.critical_interests.contains(&id) {
+            buffered < needed
+        } else {
+            start < end && buffered == 0
+        };
+        critical.then_some((start, end))
+    }
+
+    /// After a seek, cancels outstanding requests that are no longer needed: in the critical
+    /// phase everything outside the critical pieces, otherwise read-ahead due later than
+    /// [`SchedulerConfig::cancel_beyond`]. Returns the cancels to send.
+    fn cancel_stale_requests(&mut self) -> Vec<(PeerKey, Request)> {
+        let mut cancels: Vec<(PeerKey, Request)> = Vec::new();
+        let urgency = &self.urgency;
+        let cancel_beyond = self.cfg.cancel_beyond;
+        let critical = self.critical;
+        let critical_pieces = &self.critical_pieces;
+        for (&key, peer) in &mut self.peers {
+            let before = peer.outstanding.len();
+            peer.outstanding.retain(|o| {
+                let keep = if critical {
+                    // Only what the player needs right now survives.
+                    critical_pieces.binary_search(&o.piece).is_ok()
+                } else {
+                    // Background work survives; far-future read-ahead does not.
+                    urgency[o.piece as usize].is_none_or(|due| due <= cancel_beyond)
+                };
+                if !keep {
+                    if let Some(progress) = self.progress.get_mut(&o.piece) {
+                        release_holder(&mut progress.blocks[o.block as usize], key);
+                    }
+                    cancels.push((key, block_request(&self.meta, o.piece, o.block)));
+                }
+                keep
+            });
+            let cancelled = u32::try_from(before - peer.outstanding.len()).unwrap_or(u32::MAX);
+            if cancelled > 0 {
+                peer.cancelled_pending = peer.cancelled_pending.saturating_add(cancelled);
+                peer.last_activity = Some(Instant::now());
+            }
+        }
+        self.cancelled_requests += cancels.len() as u64;
+        cancels
+    }
+
+    // ----- Requests ----------------------------------------------------------------------
+
+    /// Tops up the queues of all `keys`, handing out at most [`ROUND_BLOCKS`] per peer in turn.
+    /// Peers serve their queues in order, so filling one peer at a time would put all of the
+    /// most urgent data behind a single peer while the others send later data; taking turns
+    /// spreads it over all of them.
+    pub(crate) fn fill_all(
+        &mut self,
+        keys: &[PeerKey],
+        now: Instant,
+    ) -> Vec<(PeerKey, Vec<Request>)> {
+        if self.paused {
+            return Vec::new();
+        }
+        let mut fills: Vec<(PeerKey, Vec<Request>)> =
+            keys.iter().map(|&k| (k, Vec::new())).collect();
+        loop {
+            let mut progressed = false;
+            for (key, requests) in &mut fills {
+                let more = self.fill_up_to(*key, now, ROUND_BLOCKS);
+                progressed |= !more.is_empty();
+                requests.extend(more);
+            }
+            if !progressed {
+                return fills;
+            }
+        }
+    }
+
+    /// Chooses requests to top up a peer's queue.
+    pub(crate) fn fill(&mut self, key: PeerKey, now: Instant) -> Vec<Request> {
+        if self.paused {
+            return Vec::new();
+        }
+        self.fill_up_to(key, now, usize::MAX)
+    }
+
+    /// Chooses up to `max` requests to top up a peer's queue.
+    fn fill_up_to(&mut self, key: PeerKey, now: Instant, max: usize) -> Vec<Request> {
+        let Some(peer) = self.peers.get(&key) else {
+            return Vec::new();
+        };
+        if peer.choked || peer.has_count == 0 {
+            return Vec::new();
+        }
+        let target = self.target_queue(peer);
+        let mut want = target.saturating_sub(peer.outstanding.len()).min(max);
+        let mut picked: Vec<(u32, u32)> = Vec::new();
+        let rivals = self.rivals(key);
+
+        // 1. Urgent pieces, most urgent first. In the critical phase, only critical pieces.
+        let urgent = if self.critical {
+            let mut critical = self.critical_pieces.clone();
+            // A player reading ahead as fast as data arrives keeps its next piece due now; the
+            // index it also waits for goes first.
+            critical.sort_by_key(|&p| {
+                let index = self.index_pieces.binary_search(&p).is_ok();
+                (self.urgency[p as usize], !index, p)
+            });
+            critical
+        } else {
+            self.urgent_order.clone()
+        };
+        for piece in urgent {
+            if want == 0 {
+                break;
+            }
+            let due = self.urgency[piece as usize].unwrap_or(Duration::MAX);
+            if !self.peer_has(key, piece) || self.have(piece) || self.verifying.contains_key(&piece)
+            {
+                continue;
+            }
+            // In the critical phase the player is waiting: everything is due now.
+            let needed_in = if self.critical { Duration::ZERO } else { due };
+            let blocks = (self.meta.blocks_in(piece) as usize).min(want);
+            if self.leave_to_faster(key, piece, needed_in, picked.len(), blocks, &rivals) {
+                continue;
+            }
+            let mine = self.eta(key, picked.len());
+            self.ensure_progress(piece, true);
+            let duplicate = !self.cfg.endgame_horizon.is_zero() && due <= self.cfg.endgame_horizon;
+            let rescue = mine.zip(self.rate_of(key)).map(|(eta, rate)| Rescue {
+                needed_in,
+                eta,
+                rate,
+            });
+            want -= self.take_blocks(key, piece, want, duplicate, rescue, now, &mut picked);
+        }
+
+        // 2. In the critical phase nothing else competes for bandwidth.
+        if !self.critical && want > 0 {
+            // Finish started pieces before starting new ones.
+            let mut started: Vec<u32> = self.progress.keys().copied().collect();
+            started.sort_unstable();
+            for piece in started {
+                if want == 0 {
+                    break;
+                }
+                // Started urgent pieces follow the same rule as in step 1.
+                let blocks = (self.meta.blocks_in(piece) as usize).min(want);
+                let leave = self.urgency[piece as usize].is_some_and(|due| {
+                    self.leave_to_faster(key, piece, due, picked.len(), blocks, &rivals)
+                });
+                if self.peer_has(key, piece) && !leave {
+                    want -= self.take_blocks(key, piece, want, false, None, now, &mut picked);
+                }
+            }
+            // 3. Rarest wanted pieces first.
+            let mut i = 0;
+            while want > 0 && i < self.background.len() {
+                let piece = self.background[i];
+                i += 1;
+                if self.have(piece)
+                    || self.progress.contains_key(&piece)
+                    || self.verifying.contains_key(&piece)
+                    || !self.peer_has(key, piece)
+                {
+                    continue;
+                }
+                if !self.ensure_progress(piece, false) {
+                    break;
+                }
+                want -= self.take_blocks(key, piece, want, false, None, now, &mut picked);
+            }
+        }
+
+        let peer = self
+            .peers
+            .get_mut(&key)
+            .unwrap_or_else(|| unreachable_peer());
+        picked
+            .into_iter()
+            .map(|(piece, block)| {
+                if peer.outstanding.is_empty() {
+                    peer.last_progress = Some(now);
+                }
+                let ahead = u32::try_from(peer.outstanding.len())
+                    .unwrap_or(u32::MAX)
+                    .saturating_add(peer.cancelled_pending);
+                peer.outstanding.push(Outstanding {
+                    piece,
+                    block,
+                    at: now,
+                    ahead,
+                });
+                block_request(&self.meta, piece, block)
+            })
+            .collect()
+    }
+
+    fn peer_has(&self, key: PeerKey, piece: u32) -> bool {
+        self.peers
+            .get(&key)
+            .and_then(|p| p.has.get(piece as usize))
+            .copied()
+            .unwrap_or(false)
+    }
+
+    /// Creates download state for a piece. Background pieces respect the memory budget.
+    fn ensure_progress(&mut self, piece: u32, urgent: bool) -> bool {
+        if self.progress.contains_key(&piece) {
+            return true;
+        }
+        let size = u64::from(self.meta.piece_size(piece));
+        if !urgent && self.in_progress_bytes + size > self.cfg.max_in_progress_bytes {
+            return false;
+        }
+        let blocks = self.meta.blocks_in(piece) as usize;
+        self.progress.insert(
+            piece,
+            Progress {
+                blocks: vec![BlockState::Missing; blocks],
+                data: vec![0; usize::try_from(size).unwrap_or(0)],
+                received: 0,
+                contributors: Vec::new(),
+            },
+        );
+        self.in_progress_bytes += size;
+        true
+    }
+
+    /// When a block requested from `key` now, after `extra` more, would arrive: what is queued
+    /// ahead of it at the peer's rate, plus a round trip. `None` until the rate is measured.
+    fn eta(&self, key: PeerKey, extra: usize) -> Option<Duration> {
+        let peer = self.peers.get(&key)?;
+        let rate = self.rate_of(key)?;
+        #[allow(clippy::cast_precision_loss)]
+        let bytes = (peer.outstanding.len() + extra + 1) as f64 * f64::from(BLOCK_LEN);
+        Some(Duration::from_secs_f64(bytes / rate) + peer.base_rtt.unwrap_or_default())
+    }
+
+    /// A peer's rate for urgent work (its recent peak, see [`Rate::peak`]); `None` until
+    /// measured.
+    fn rate_of(&self, key: PeerKey) -> Option<f64> {
+        let peer = self.peers.get(&key)?;
+        let rate = peer.rate.bytes_per_sec.max(peer.rate.peak);
+        (peer.rate.measured && rate > 0.0).then_some(rate)
+    }
+
+    /// The other unchoked peers with a measured rate, for [`Self::leave_to_faster`].
+    fn rivals(&self, key: PeerKey) -> Vec<Rival> {
+        self.peers
+            .iter()
+            .filter(|(k, p)| **k != key && !p.choked && p.has_count > 0)
+            .filter_map(|(&k, _)| {
+                Some(Rival {
+                    key: k,
+                    eta: self.eta(k, 0)?,
+                    rate: self.rate_of(k)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether `key` should leave `blocks` blocks of `piece` (after `extra` it was just given) to
+    /// a rival: only if it would deliver them after they are needed (`needed_in`), and a rival
+    /// that has the piece would deliver them [`FASTER_BY`] times sooner. What counts is the last
+    /// block, as a piece is complete only then: a peer with a short round trip but a slow link
+    /// delivers the first block early and the piece late. A slow peer then fetches data that is
+    /// needed later, instead of holding up the next seconds of video.
+    fn leave_to_faster(
+        &self,
+        key: PeerKey,
+        piece: u32,
+        needed_in: Duration,
+        extra: usize,
+        blocks: usize,
+        rivals: &[Rival],
+    ) -> bool {
+        let last = blocks.saturating_sub(1);
+        let Some(mine) = self.eta(key, extra + last).filter(|&mine| mine > needed_in) else {
+            return false;
+        };
+        rivals
+            .iter()
+            .any(|r| r.finish(last).mul_f64(FASTER_BY) < mine && self.peer_has(r.key, piece))
+    }
+
+    /// Marks up to `want` blocks of `piece` as requested from `key`. Returns how many.
+    ///
+    /// A block another peer is fetching is requested again if `allow_duplicate` and the holder
+    /// has been at it for [`SchedulerConfig::duplicate_after`] (and is snubbed, with
+    /// [`SchedulerConfig::duplicate_only_snubbed`]); or, with `rescue`, if the holder is
+    /// [`FASTER_BY`] times slower than `key` and would deliver it after it is needed and that
+    /// many times later than `key`. A holder that is merely busier is left alone: it delivers
+    /// its queue as fast as `key` would, and peers that ignore `cancel` would send both copies.
+    // Each argument is a separate decision input; bundling them would only rename them.
+    #[allow(clippy::too_many_arguments)]
+    fn take_blocks(
+        &mut self,
+        key: PeerKey,
+        piece: u32,
+        want: usize,
+        allow_duplicate: bool,
+        rescue: Option<Rescue>,
+        now: Instant,
+        picked: &mut Vec<(u32, u32)>,
+    ) -> usize {
+        let duplicate_after = self.cfg.duplicate_after;
+        let only_snubbed = self.cfg.duplicate_only_snubbed;
+        let snub_after = self.cfg.snub_after;
+        let peers = &self.peers;
+        let snubbed = |holder: PeerKey| {
+            peers.get(&holder).is_none_or(|p| {
+                !p.outstanding.is_empty()
+                    && p.last_progress
+                        .is_none_or(|t| now.saturating_duration_since(t) >= snub_after)
+            })
+        };
+        // Whether `holder` would deliver block `block` (its queue up to it, at its rate) only
+        // after it is needed, and much later than `key` could.
+        let late = |holder: PeerKey, block: u32| {
+            let Some(rescue) = rescue else {
+                return false;
+            };
+            peers.get(&holder).is_some_and(|p| {
+                let rate = p.rate.bytes_per_sec.max(p.rate.peak);
+                let position = p
+                    .outstanding
+                    .iter()
+                    .position(|o| o.piece == piece && o.block == block);
+                match position {
+                    Some(at) if p.rate.measured && rate > 0.0 && rate * FASTER_BY < rescue.rate => {
+                        #[allow(clippy::cast_precision_loss)]
+                        let bytes = (at + 1) as f64 * f64::from(BLOCK_LEN);
+                        let remaining = Duration::from_secs_f64(bytes / rate);
+                        remaining > rescue.needed_in && remaining > rescue.eta.mul_f64(FASTER_BY)
+                    }
+                    _ => false,
+                }
+            })
+        };
+        let Some(progress) = self.progress.get_mut(&piece) else {
+            return 0;
+        };
+        let mut taken = 0;
+        for (i, state) in progress.blocks.iter_mut().enumerate() {
+            if taken == want {
+                break;
+            }
+            let take = match state {
+                BlockState::Missing => true,
+                BlockState::Requested(holders) => {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let block = i as u32;
+                    let stalled = allow_duplicate
+                        && holders
+                            .iter()
+                            .all(|(_, at)| now.saturating_duration_since(*at) >= duplicate_after)
+                        && (!only_snubbed || holders.iter().all(|(k, _)| snubbed(*k)));
+                    holders.len() < 2
+                        && holders.iter().all(|(k, _)| *k != key)
+                        && (stalled || holders.iter().all(|(k, _)| late(*k, block)))
+                }
+                BlockState::Received => false,
+            };
+            if take {
+                match state {
+                    BlockState::Requested(holders) => {
+                        holders.push((key, now));
+                        self.duplicate_requests += 1;
+                    }
+                    _ => *state = BlockState::Requested(vec![(key, now)]),
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                picked.push((piece, i as u32));
+                taken += 1;
+            }
+        }
+        taken
+    }
+
+    // ----- Responses ---------------------------------------------------------------------
+
+    /// Records a received block. Unrequested or duplicate data is ignored.
+    pub(crate) fn on_block(
+        &mut self,
+        key: PeerKey,
+        piece: u32,
+        begin: u32,
+        data: &[u8],
+    ) -> BlockOutcome {
+        self.on_block_at(key, piece, begin, data, Instant::now())
+    }
+
+    /// [`Scheduler::on_block`] with an explicit time, for tests.
+    pub(crate) fn on_block_at(
+        &mut self,
+        key: PeerKey,
+        piece: u32,
+        begin: u32,
+        data: &[u8],
+        now: Instant,
+    ) -> BlockOutcome {
+        let mut outcome = BlockOutcome::default();
+        if let Some(peer) = self.peers.get_mut(&key) {
+            peer.rate.add(data.len() as u64);
+            peer.last_progress = Some(now);
+        }
+        if !begin.is_multiple_of(BLOCK_LEN) || piece >= self.meta.piece_count() {
+            return outcome;
+        }
+        let block = begin / BLOCK_LEN;
+        let expected = block_request(&self.meta, piece, block);
+        if block >= self.meta.blocks_in(piece) || data.len() != expected.len as usize {
+            return outcome;
+        }
+        if let Some(peer) = self.peers.get_mut(&key) {
+            peer.last_activity = Some(now);
+            if !peer
+                .outstanding
+                .iter()
+                .any(|o| o.piece == piece && o.block == block)
+            {
+                // A block cancelled at this peer that it sent anyway.
+                peer.cancelled_pending = peer.cancelled_pending.saturating_sub(1);
+            }
+            // A request sent to an empty queue waits behind nothing, so its latency is the
+            // round trip plus one block transfer: an unbiased round-trip sample.
+            if let Some(o) = peer
+                .outstanding
+                .iter()
+                .find(|o| o.piece == piece && o.block == block && o.ahead == 0)
+            {
+                let sample = now.saturating_duration_since(o.at);
+                let expired = peer
+                    .base_rtt_at
+                    .is_none_or(|at| now.saturating_duration_since(at) >= RTT_WINDOW);
+                if expired || peer.base_rtt.is_none_or(|rtt| sample <= rtt) {
+                    peer.base_rtt = Some(sample);
+                    peer.base_rtt_at = Some(now);
+                }
+            }
+            peer.outstanding
+                .retain(|o| !(o.piece == piece && o.block == block));
+        }
+        let Some(progress) = self.progress.get_mut(&piece) else {
+            self.wasted_bytes += data.len() as u64;
+            return outcome;
+        };
+        let state = std::mem::replace(&mut progress.blocks[block as usize], BlockState::Received);
+        match state {
+            BlockState::Received => {
+                self.wasted_bytes += data.len() as u64;
+                return outcome;
+            }
+            BlockState::Requested(holders) => {
+                for (other, _) in holders.into_iter().filter(|(k, _)| *k != key) {
+                    if let Some(peer) = self.peers.get_mut(&other) {
+                        peer.outstanding
+                            .retain(|o| !(o.piece == piece && o.block == block));
+                        peer.cancelled_pending = peer.cancelled_pending.saturating_add(1);
+                        peer.last_activity = Some(now);
+                    }
+                    outcome.cancels.push((other, expected));
+                }
+            }
+            BlockState::Missing => {}
+        }
+        let at = begin as usize;
+        progress.data[at..at + data.len()].copy_from_slice(data);
+        progress.received += 1;
+        if !progress.contributors.contains(&key) {
+            progress.contributors.push(key);
+        }
+        if progress.received as usize == progress.blocks.len()
+            && let Some(done) = self.progress.remove(&piece)
+        {
+            self.in_progress_bytes -= done.data.len() as u64;
+            self.verifying.insert(piece, done.contributors);
+            outcome.completed = Some((piece, done.data));
+        }
+        outcome
+    }
+
+    /// Records the hash check of a completed piece. On failure the piece is downloaded again
+    /// and the contributing peers are returned so the caller can penalize them.
+    pub(crate) fn on_verified(&mut self, piece: u32, ok: bool) -> Vec<PeerKey> {
+        let contributors = self.verifying.remove(&piece).unwrap_or_default();
+        if ok {
+            if let Some(slot) = self.have.get_mut(piece as usize)
+                && !*slot
+            {
+                *slot = true;
+                self.have_count += 1;
+            }
+            return Vec::new();
+        }
+        for key in &contributors {
+            if let Some(peer) = self.peers.get_mut(key) {
+                peer.bad_pieces += 1;
+            }
+        }
+        contributors
+    }
+
+    pub(crate) fn bad_pieces(&self, key: PeerKey) -> u32 {
+        self.peers.get(&key).map_or(0, |p| p.bad_pieces)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn timeouts(&self, key: PeerKey) -> u32 {
+        self.peers.get(&key).map_or(0, |p| p.timeouts)
+    }
+
+    /// Peers that have timed out this often are not worth keeping.
+    pub(crate) fn unresponsive_peers(&self, max_timeouts: u32) -> Vec<PeerKey> {
+        self.peers
+            .iter()
+            .filter(|(_, p)| p.timeouts >= max_timeouts)
+            .map(|(k, _)| *k)
+            .collect()
+    }
+
+    // ----- Time --------------------------------------------------------------------------
+
+    /// Updates rates, gives up on timed-out requests (returned as cancels), and periodically
+    /// refreshes the rarest-first order.
+    pub(crate) fn tick(
+        &mut self,
+        now: Instant,
+        refresh_background: bool,
+    ) -> Vec<(PeerKey, Request)> {
+        match self.last_rate_update {
+            Some(last) if now.saturating_duration_since(last) >= RATE_WINDOW => {
+                let elapsed = now.saturating_duration_since(last);
+                for peer in self.peers.values_mut() {
+                    peer.rate.update(elapsed);
+                }
+                if tracing::enabled!(tracing::Level::TRACE) {
+                    for (key, peer) in &self.peers {
+                        tracing::trace!(
+                            peer = key,
+                            rate_kib = peer.rate.bytes_per_sec / 1024.0,
+                            rtt_ms = peer.base_rtt.map(|r| r.as_secs_f64() * 1000.0),
+                            target = self.target_queue(peer),
+                            outstanding = peer.outstanding.len(),
+                            choked = peer.choked,
+                            relaxed = self.relaxed(),
+                            critical = self.critical,
+                            "peer queue"
+                        );
+                    }
+                }
+                self.last_rate_update = Some(now);
+            }
+            Some(_) => {}
+            None => self.last_rate_update = Some(now),
+        }
+
+        let timeout = self.cfg.request_timeout;
+        let mut cancels = Vec::new();
+        for (&key, peer) in &mut self.peers {
+            let before = peer.outstanding.len();
+            peer.outstanding.retain(|o| {
+                let expired = now.saturating_duration_since(o.at) >= timeout;
+                if expired {
+                    if let Some(progress) = self.progress.get_mut(&o.piece) {
+                        release_holder(&mut progress.blocks[o.block as usize], key);
+                    }
+                    cancels.push((key, block_request(&self.meta, o.piece, o.block)));
+                }
+                !expired
+            });
+            #[allow(clippy::cast_possible_truncation)]
+            let expired = (before - peer.outstanding.len()) as u32;
+            peer.timeouts += expired;
+            if expired > 0 {
+                peer.cancelled_pending = peer.cancelled_pending.saturating_add(expired);
+                peer.last_activity = Some(now);
+            }
+            // A peer quiet for a while after cancels has honoured them: nothing more is coming.
+            let quiet = peer.base_rtt.unwrap_or_default() * 2 + Duration::from_secs(1);
+            if peer.cancelled_pending > 0
+                && peer
+                    .last_activity
+                    .is_none_or(|t| now.saturating_duration_since(t) >= quiet)
+            {
+                peer.cancelled_pending = 0;
+            }
+        }
+
+        self.cancelled_requests += cancels.len() as u64;
+        if refresh_background {
+            let mut order: Vec<u32> = (0..self.meta.piece_count())
+                .filter(|&p| self.wanted[p as usize] && !self.have[p as usize])
+                .collect();
+            order.sort_by_key(|&p| (self.availability[p as usize], p));
+            self.background = order;
+        }
+        cancels
+    }
+}
+
+fn set_urgency(
+    urgency: &mut [Option<Duration>],
+    touched: &mut Vec<u32>,
+    have: &[bool],
+    piece: u32,
+    due: Duration,
+) {
+    let i = piece as usize;
+    if have[i] {
+        return;
+    }
+    match urgency[i] {
+        None => {
+            urgency[i] = Some(due);
+            touched.push(piece);
+        }
+        Some(existing) if due < existing => urgency[i] = Some(due),
+        Some(_) => {}
+    }
+}
+
+fn release_holder(state: &mut BlockState, key: PeerKey) {
+    if let BlockState::Requested(holders) = state {
+        holders.retain(|(k, _)| *k != key);
+        if holders.is_empty() {
+            *state = BlockState::Missing;
+        }
+    }
+}
+
+fn block_request(meta: &Metainfo, piece: u32, block: u32) -> Request {
+    let begin = block * BLOCK_LEN;
+    Request {
+        piece,
+        begin,
+        len: (meta.piece_size(piece) - begin).min(BLOCK_LEN),
+    }
+}
+
+/// Peers are only removed through `remove_peer`, never while `fill` runs.
+#[cold]
+fn unreachable_peer() -> &'static mut Peer {
+    // `fill` returns early when the peer is missing, so this cannot happen.
+    #[allow(clippy::panic)]
+    {
+        panic!("peer disappeared during fill")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PIECE: u32 = 4 * BLOCK_LEN; // 64 KiB pieces, 4 blocks each
+    const MIB: u64 = 1024 * 1024;
+
+    /// A single-file torrent of `pieces` pieces.
+    fn meta(pieces: u32) -> Arc<Metainfo> {
+        let len = u64::from(pieces) * u64::from(PIECE);
+        let mut t = format!(
+            "d4:infod6:lengthi{len}e4:name5:a.mp412:piece lengthi{PIECE}e6:pieces{}:",
+            pieces * 20
+        )
+        .into_bytes();
+        t.extend(std::iter::repeat_n(0u8, (pieces * 20) as usize));
+        t.extend_from_slice(b"ee");
+        Arc::new(Metainfo::from_bytes(&t).unwrap())
+    }
+
+    fn sched(pieces: u32, cfg: SchedulerConfig) -> Scheduler {
+        Scheduler::new(meta(pieces), cfg)
+    }
+
+    /// Defaults with a 4-block initial queue, which keeps the expected fills small.
+    fn small_queues() -> SchedulerConfig {
+        SchedulerConfig {
+            initial_queue: 4,
+            ..SchedulerConfig::default()
+        }
+    }
+
+    /// Adds an unchoked seed.
+    fn seed(s: &mut Scheduler, key: PeerKey) {
+        s.add_peer(key);
+        let bits = vec![0xffu8; s.have.len().div_ceil(8)];
+        assert!(s.on_bitfield(key, &bits));
+        s.on_unchoke(key);
+    }
+
+    fn reader(position: u64, s: &Scheduler) -> Interest {
+        Interest {
+            kind: InterestKind::Reader,
+            file_offset: 0,
+            file_len: s.meta.total_len,
+            position,
+            byte_rate: Some(MIB),
+        }
+    }
+
+    fn deliver(s: &mut Scheduler, key: PeerKey, r: Request) -> BlockOutcome {
+        s.on_block(key, r.piece, r.begin, &vec![0u8; r.len as usize])
+    }
+
+    #[test]
+    fn queues_start_at_the_initial_size_then_follow_the_measured_rate() {
+        let mut s = sched(
+            1000,
+            SchedulerConfig {
+                relaxed_queue_time: Duration::from_millis(500),
+                ..SchedulerConfig::default()
+            },
+        );
+        s.want_range(0, s.meta.total_len);
+        s.tick(Instant::now(), true);
+        seed(&mut s, 1);
+        let now = Instant::now();
+        assert_eq!(
+            s.fill(1, now).len(),
+            32,
+            "initial_queue before the rate is known"
+        );
+
+        // Deliver 4 MiB/s worth for one second: 0.5 s queue at 4 MiB/s = 128 blocks (the max).
+        s.peers.get_mut(&1).unwrap().rate.add(4 * MIB);
+        s.tick(now + Duration::from_secs(1), false);
+        assert_eq!(s.target_queue(&s.peers[&1]), 128);
+        s.peers.get_mut(&1).unwrap().rate = Rate {
+            bytes_since: 0,
+            bytes_per_sec: 320.0 * 1024.0,
+            measured: true,
+            peak: 0.0,
+        };
+        assert_eq!(
+            s.target_queue(&s.peers[&1]),
+            10,
+            "320 KiB/s × 0.5 s = 10 blocks"
+        );
+        s.peers.get_mut(&1).unwrap().rate.bytes_per_sec = 1.0;
+        assert_eq!(
+            s.target_queue(&s.peers[&1]),
+            4,
+            "never below min_queue once measured"
+        );
+    }
+
+    #[test]
+    fn readers_inherit_the_playhead_bitrate_of_their_file() {
+        let mut s = sched(1000, small_queues());
+        let len = s.meta.total_len;
+        // A reader near the end (a container index) with no bitrate of its own.
+        let mut tail = reader(len - 8 * u64::from(PIECE), &s);
+        tail.byte_rate = None;
+        s.set_interest(1, tail);
+        s.reprioritize(false);
+        let at_fallback = s.urgency[998].unwrap();
+        // Once the playhead reports 4 MiB/s, the reader's pieces become correspondingly urgent.
+        s.set_interest(
+            2,
+            Interest {
+                kind: InterestKind::Playhead,
+                file_offset: 0,
+                file_len: len,
+                position: 0,
+                byte_rate: Some(4 * MIB),
+            },
+        );
+        s.reprioritize(false);
+        let inherited = s.urgency[998].unwrap();
+        assert!(
+            inherited < at_fallback / 10,
+            "{inherited:?} vs {at_fallback:?}"
+        );
+    }
+
+    #[test]
+    fn urgent_queues_use_the_recent_peak_rate() {
+        let mut s = sched(1000, small_queues());
+        seed(&mut s, 1);
+        let t0 = Instant::now();
+        s.tick(t0, false);
+        // One second at 4 MiB/s, then two quiet seconds (relaxed, demand-limited).
+        s.peers.get_mut(&1).unwrap().rate.add(4 * MIB);
+        s.tick(t0 + Duration::from_secs(1), false);
+        s.tick(t0 + Duration::from_secs(3), false);
+        let rate = s.peers[&1].rate;
+        assert!(rate.bytes_per_sec < 0.1 * rate.peak, "{rate:?}");
+        // With urgent work, the queue is sized from the peak (≈ 3.3 MiB/s after 2 s of decay):
+        // 0.5 s of that is about 105 blocks.
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let target = s.target_queue(&s.peers[&1]);
+        assert!((95..=115).contains(&target), "{target}");
+    }
+
+    #[test]
+    fn queues_cover_at_least_two_round_trips() {
+        let mut s = sched(1000, small_queues());
+        seed(&mut s, 1);
+        s.peers.get_mut(&1).unwrap().rate = Rate {
+            bytes_since: 0,
+            bytes_per_sec: 1024.0 * 1024.0,
+            measured: true,
+            peak: 0.0,
+        };
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        // 0.5 s at 1 MiB/s = 32 blocks.
+        assert_eq!(s.target_queue(&s.peers[&1]), 32);
+
+        // The first block (nothing queued ahead of it) arrives after 400 ms: RTT ≈ 400 ms, so
+        // the queue must hold 0.8 s = 52 blocks (rounded up).
+        let t0 = Instant::now();
+        let r = s.fill(1, t0)[0];
+        s.on_block_at(
+            1,
+            r.piece,
+            r.begin,
+            &vec![0; r.len as usize],
+            t0 + Duration::from_millis(400),
+        );
+        assert_eq!(s.peers[&1].base_rtt, Some(Duration::from_millis(400)));
+        assert_eq!(s.target_queue(&s.peers[&1]), 52);
+    }
+
+    #[test]
+    fn round_trip_estimate_is_a_windowed_minimum() {
+        let cfg = SchedulerConfig {
+            min_queue: 1,
+            initial_queue: 1,
+            ..SchedulerConfig::default()
+        };
+        let mut s = sched(1000, cfg);
+        seed(&mut s, 1);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let t0 = Instant::now();
+        // One request at a time, so each is sent to an empty queue and is a sample.
+        let sample = |s: &mut Scheduler, sent: Instant, rtt_ms: u64| {
+            let r = s.fill(1, sent)[0];
+            s.on_block_at(
+                1,
+                r.piece,
+                r.begin,
+                &vec![0; r.len as usize],
+                sent + Duration::from_millis(rtt_ms),
+            );
+            s.peers[&1].base_rtt.unwrap()
+        };
+        assert_eq!(sample(&mut s, t0, 100), Duration::from_millis(100));
+        // A higher sample within the window keeps the minimum, and time alone changes nothing.
+        let t1 = t0 + Duration::from_secs(5);
+        s.tick(t1, false);
+        assert_eq!(sample(&mut s, t1, 300), Duration::from_millis(100));
+        s.tick(t0 + Duration::from_secs(9), false);
+        assert_eq!(s.peers[&1].base_rtt, Some(Duration::from_millis(100)));
+        // Once the minimum is older than the window, the next sample replaces it.
+        let t2 = t0 + Duration::from_secs(11);
+        assert_eq!(sample(&mut s, t2, 250), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn queues_shrink_once_only_background_work_remains() {
+        let mut s = sched(1000, SchedulerConfig::default());
+        s.want_range(0, s.meta.total_len);
+        seed(&mut s, 1);
+        s.peers.get_mut(&1).unwrap().rate = Rate {
+            bytes_since: 0,
+            bytes_per_sec: 2.0 * 1024.0 * 1024.0,
+            measured: true,
+            peak: 0.0,
+        };
+        // A reader with missing data ahead: 0.5 s at 2 MiB/s = 64 blocks.
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        assert_eq!(s.target_queue(&s.peers[&1]), 64);
+        // No interests: background only, 0.15 s at 2 MiB/s = 20 blocks (rounded up).
+        s.remove_interest(1);
+        s.reprioritize(false);
+        assert_eq!(s.target_queue(&s.peers[&1]), 20);
+    }
+
+    #[test]
+    fn rates_are_time_weighted_and_ignore_tiny_windows() {
+        let mut s = sched(10, SchedulerConfig::default());
+        seed(&mut s, 1);
+        let t0 = Instant::now();
+        s.tick(t0, false);
+        // A burst within 1 ms must not register as a huge rate.
+        s.peers.get_mut(&1).unwrap().rate.add(1024 * 1024);
+        s.tick(t0 + Duration::from_millis(1), false);
+        assert!(
+            !s.peers[&1].rate.measured,
+            "windows shorter than 100 ms are not sampled"
+        );
+        s.tick(t0 + Duration::from_millis(100), false);
+        let first = s.peers[&1].rate.bytes_per_sec;
+        assert!(
+            (first - 10.0 * 1024.0 * 1024.0).abs() < 1.0,
+            "1 MiB over 100 ms = 10 MiB/s, got {first}"
+        );
+        // A quiet 100 ms then decays the estimate by a factor of e^(-0.1 / 0.5).
+        s.tick(t0 + Duration::from_millis(200), false);
+        let decayed = s.peers[&1].rate.bytes_per_sec / first;
+        assert!((decayed - (-0.2f64).exp()).abs() < 0.01, "{decayed}");
+    }
+
+    #[test]
+    fn critical_phase_requests_only_the_critical_bytes() {
+        let cfg = SchedulerConfig {
+            min_queue: 128,
+            initial_queue: 128,
+            ..SchedulerConfig::default()
+        };
+        let mut s = sched(1000, cfg);
+        seed(&mut s, 1);
+        // 2 MiB critical = 32 pieces of 64 KiB; the 8 MiB reader window is 128 pieces.
+        s.set_interest(1, reader(100 * u64::from(PIECE), &s));
+        s.reprioritize(false);
+        let requests = s.fill(1, Instant::now());
+        assert_eq!(requests.len(), 128, "32 critical pieces × 4 blocks");
+        assert!(
+            requests.iter().all(|r| (100..132).contains(&r.piece)),
+            "{:?}",
+            requests.last()
+        );
+    }
+
+    #[test]
+    fn urgent_pieces_come_first_in_deadline_order() {
+        let mut s = sched(1000, small_queues());
+        s.want_range(0, s.meta.total_len);
+        s.tick(Instant::now(), true);
+        seed(&mut s, 1);
+        s.set_interest(1, reader(500 * u64::from(PIECE), &s));
+        s.reprioritize(false);
+        let requests = s.fill(1, Instant::now());
+        assert_eq!(requests.len(), 4);
+        assert!(requests.iter().all(|r| r.piece == 500), "{requests:?}");
+        assert_eq!(requests[0].begin, 0);
+    }
+
+    #[test]
+    fn critical_phase_suppresses_background_requests() {
+        let cfg = SchedulerConfig {
+            min_queue: 64,
+            ..SchedulerConfig::default()
+        };
+        let mut s = sched(1000, cfg);
+        s.want_range(0, s.meta.total_len);
+        s.tick(Instant::now(), true);
+        seed(&mut s, 1);
+        // A reader near the end of the file: only a few pieces are urgent.
+        let position = s.meta.total_len - 2 * u64::from(PIECE);
+        s.set_interest(1, reader(position, &s));
+        s.reprioritize(false);
+        assert!(s.is_critical());
+        let requests = s.fill(1, Instant::now());
+        assert_eq!(
+            requests.len(),
+            8,
+            "only the 2 urgent pieces (8 blocks), no background"
+        );
+        assert!(requests.iter().all(|r| r.piece >= 998));
+
+        // Once the reader is buffered, background fills the rest of the queue.
+        for r in requests {
+            if let Some((piece, _)) = deliver(&mut s, 1, r).completed {
+                s.on_verified(piece, true);
+            }
+        }
+        s.reprioritize(false);
+        assert!(!s.is_critical());
+        let requests = s.fill(1, Instant::now());
+        assert_eq!(requests.len(), 64);
+        assert!(requests.iter().any(|r| r.piece < 998));
+    }
+
+    #[test]
+    fn critical_phase_ends_while_the_reader_keeps_reading() {
+        let cfg = SchedulerConfig {
+            min_queue: 128,
+            initial_queue: 128,
+            ..SchedulerConfig::default()
+        };
+        let mut s = sched(1000, cfg);
+        seed(&mut s, 1);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        for r in s.fill(1, Instant::now()) {
+            if let Some((piece, _)) = deliver(&mut s, 1, r).completed {
+                s.on_verified(piece, true);
+            }
+        }
+        // The player has read 1 MiB. Only 1 MiB of the 2 MiB critical bytes ahead of it is
+        // downloaded (the rest would be in flight while it keeps reading), which is enough.
+        s.set_interest(1, reader(16 * u64::from(PIECE), &s));
+        s.reprioritize(false);
+        assert!(!s.is_critical());
+
+        // A seek starts a new critical phase at the target.
+        s.set_interest(1, reader(500 * u64::from(PIECE), &s));
+        s.reprioritize(true);
+        assert!(s.is_critical());
+    }
+
+    #[test]
+    fn fill_all_spreads_the_most_urgent_data_over_all_peers() {
+        let cfg = SchedulerConfig {
+            min_queue: 64,
+            initial_queue: 64,
+            ..SchedulerConfig::default()
+        };
+        let mut s = sched(1000, cfg);
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        s.set_interest(1, reader(100 * u64::from(PIECE), &s));
+        s.reprioritize(false);
+        let fills = s.fill_all(&[1, 2], Instant::now());
+        let pieces = |key: PeerKey| -> Vec<u32> {
+            let mut p: Vec<u32> = fills
+                .iter()
+                .filter(|(k, _)| *k == key)
+                .flat_map(|(_, r)| r.iter().map(|r| r.piece))
+                .collect();
+            p.dedup();
+            p
+        };
+        // Turns of 16 blocks (4 pieces): each peer starts with its share of the most urgent.
+        assert_eq!(pieces(1)[..4], [100, 101, 102, 103]);
+        assert_eq!(pieces(2)[..4], [104, 105, 106, 107]);
+        assert_eq!(pieces(1)[4], 108);
+        assert_eq!(fills.iter().map(|(_, r)| r.len()).sum::<usize>(), 128);
+    }
+
+    #[test]
+    fn critical_phase_covers_a_reader_that_is_waiting_for_data() {
+        let cfg = SchedulerConfig {
+            min_queue: 256,
+            initial_queue: 256,
+            ..SchedulerConfig::default()
+        };
+        let mut s = sched(1000, cfg);
+        seed(&mut s, 1);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        for r in s.fill(1, Instant::now()) {
+            if let Some((piece, _)) = deliver(&mut s, 1, r).completed {
+                s.on_verified(piece, true);
+            }
+        }
+        // The player read all 2 MiB and still wants more (it needs more than the critical
+        // bytes to start): the phase continues ahead of it.
+        s.set_interest(1, reader(32 * u64::from(PIECE), &s));
+        s.reprioritize(false);
+        assert!(s.is_critical());
+        let requests = s.fill(1, Instant::now());
+        assert!(!requests.is_empty());
+        assert!(
+            requests.iter().all(|r| (32..64).contains(&r.piece)),
+            "{requests:?}"
+        );
+        for r in requests {
+            if let Some((piece, _)) = deliver(&mut s, 1, r).completed {
+                s.on_verified(piece, true);
+            }
+        }
+        s.reprioritize(false);
+        assert!(!s.is_critical());
+
+        // Playing on into data that is not there yet starts the phase again.
+        s.set_interest(1, reader(64 * u64::from(PIECE), &s));
+        s.reprioritize(false);
+        assert!(s.is_critical());
+    }
+
+    #[test]
+    fn seeking_cancels_requests_that_are_no_longer_urgent() {
+        let mut s = sched(1000, small_queues());
+        seed(&mut s, 1);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let first = s.fill(1, Instant::now());
+        assert!(first.iter().all(|r| r.piece == 0));
+
+        // Jump far ahead: the old requests are cancelled and the queue refills at the target.
+        s.set_interest(1, reader(700 * u64::from(PIECE), &s));
+        let cancels = s.reprioritize(true);
+        assert_eq!(cancels.len(), first.len());
+        assert!(cancels.iter().all(|(k, r)| *k == 1 && r.piece == 0));
+        let next = s.fill(1, Instant::now());
+        assert_eq!(next.len(), 4);
+        assert!(next.iter().all(|r| r.piece == 700));
+    }
+
+    #[test]
+    fn urgent_blocks_are_duplicated_to_a_second_peer_and_the_loser_cancelled() {
+        let cfg = SchedulerConfig {
+            duplicate_only_snubbed: false,
+            ..small_queues()
+        };
+        let mut s = sched(100, cfg);
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let t0 = Instant::now();
+        let slow = s.fill(1, t0);
+        assert_eq!(slow.len(), 4);
+
+        // Too soon to duplicate: peer 2 gets the next piece instead.
+        let early = s.fill(2, t0 + Duration::from_millis(10));
+        assert!(early.iter().all(|r| r.piece == 1));
+        s.on_choke(2);
+        s.on_unchoke(2);
+
+        // After `duplicate_after`, the still-missing urgent blocks go to peer 2 as well.
+        let late = s.fill(2, t0 + Duration::from_millis(400));
+        assert!(late.iter().any(|r| r.piece == 0), "{late:?}");
+        let dup = *late.iter().find(|r| r.piece == 0).unwrap();
+        let outcome = deliver(&mut s, 2, dup);
+        assert_eq!(
+            outcome.cancels,
+            vec![(1, dup)],
+            "peer 1's copy is cancelled"
+        );
+    }
+
+    #[test]
+    fn snubbed_policy_duplicates_only_from_stalled_peers() {
+        let mut s = sched(100, small_queues());
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let t0 = Instant::now();
+        let first = s.fill(1, t0);
+        assert_eq!(first.len(), 4);
+
+        // Peer 1 keeps delivering (just one of its four blocks), so it is not snubbed: after
+        // 400 ms its remaining blocks are still not duplicated.
+        s.on_block_at(
+            1,
+            first[0].piece,
+            first[0].begin,
+            &vec![0; first[0].len as usize],
+            t0 + Duration::from_millis(350),
+        );
+        let busy = s.fill(2, t0 + Duration::from_millis(400));
+        assert!(busy.iter().all(|r| r.piece != 0), "{busy:?}");
+        s.on_choke(2);
+        s.on_unchoke(2);
+
+        // Peer 1 then stalls for more than `snub_after`: its blocks go to peer 2 as well.
+        let stalled = s.fill(2, t0 + Duration::from_millis(1_500));
+        assert!(stalled.iter().any(|r| r.piece == 0), "{stalled:?}");
+    }
+
+    #[test]
+    fn choke_releases_requests_for_other_peers() {
+        let mut s = sched(10, small_queues());
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let now = Instant::now();
+        let taken = s.fill(1, now);
+        s.on_choke(1);
+        assert!(s.fill(1, now).is_empty(), "choked peers get nothing");
+        let moved = s.fill(2, now);
+        assert_eq!(moved, taken, "the same blocks go to the other peer");
+    }
+
+    #[test]
+    fn pausing_cancels_outstanding_requests_and_hands_out_none() {
+        let mut s = sched(10, small_queues());
+        seed(&mut s, 1);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let now = Instant::now();
+        let taken = s.fill(1, now);
+        assert!(!taken.is_empty());
+        let cancels = s.set_paused(true);
+        assert_eq!(
+            cancels.len(),
+            taken.len(),
+            "everything outstanding is cancelled"
+        );
+        assert!(s.fill(1, now).is_empty());
+        assert!(s.fill_all(&[1], now).is_empty());
+        assert!(s.set_paused(false).is_empty());
+        assert!(!s.fill(1, now).is_empty(), "requests resume");
+    }
+
+    #[test]
+    fn set_wanted_replaces_the_background_selection() {
+        let mut s = sched(10, small_queues());
+        let piece = u64::from(PIECE);
+        let wanted = |s: &Scheduler| (0..10).filter(|&p| s.wanted[p]).collect::<Vec<usize>>();
+        s.set_wanted(&[(0, 4 * piece), (6 * piece, 8 * piece)]);
+        assert_eq!(wanted(&s), [0, 1, 2, 3, 6, 7]);
+        s.set_wanted(&[(6 * piece, 8 * piece)]);
+        assert_eq!(wanted(&s), [6, 7]);
+        s.set_wanted(&[]);
+        assert!(wanted(&s).is_empty());
+    }
+
+    #[test]
+    fn completed_pieces_are_verified_once_and_failures_are_retried() {
+        let mut s = sched(10, small_queues());
+        seed(&mut s, 1);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let now = Instant::now();
+        let mut completed = None;
+        for r in s.fill(1, now) {
+            completed = deliver(&mut s, 1, r).completed.or(completed);
+        }
+        let (piece, data) = completed.expect("all four blocks received");
+        assert_eq!((piece, data.len()), (0, PIECE as usize));
+        // While verifying, the piece is not requested again.
+        s.reprioritize(false);
+        assert!(s.fill(1, now).iter().all(|r| r.piece != 0));
+
+        // Free the queue (it now holds piece 1) so there is room to re-request piece 0.
+        s.on_choke(1);
+        s.on_unchoke(1);
+        assert_eq!(s.on_verified(0, false), vec![1]);
+        assert_eq!(s.bad_pieces(1), 1);
+        s.reprioritize(false);
+        assert!(
+            s.fill(1, now).iter().any(|r| r.piece == 0),
+            "re-requested after a bad hash"
+        );
+    }
+
+    #[test]
+    fn ignores_unrequested_malformed_and_duplicate_blocks() {
+        let mut s = sched(10, small_queues());
+        seed(&mut s, 1);
+        assert!(
+            s.on_block(1, 0, 0, &[0; 16]).completed.is_none(),
+            "wrong length"
+        );
+        assert!(
+            s.on_block(1, 0, 5, &[0; 16_384]).completed.is_none(),
+            "unaligned"
+        );
+        assert!(
+            s.on_block(1, 99, 0, &[0; 16_384]).completed.is_none(),
+            "bad index"
+        );
+        assert!(
+            !s.on_bitfield(1, &[0xff; 1]),
+            "bitfield too short for 10 pieces"
+        );
+        assert!(
+            !s.on_bitfield(1, &[0xff; 5]),
+            "bitfield too long for 10 pieces"
+        );
+        assert!(!s.on_have(1, 10));
+    }
+
+    #[test]
+    fn timed_out_requests_are_released() {
+        let mut s = sched(10, small_queues());
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let t0 = Instant::now();
+        let taken = s.fill(1, t0);
+        let cancels = s.tick(t0 + Duration::from_secs(9), false);
+        assert_eq!(cancels.len(), taken.len());
+        assert_eq!(s.timeouts(1), 4);
+        assert_eq!(s.fill(2, t0 + Duration::from_secs(9)), taken);
+    }
+
+    #[test]
+    fn background_is_rarest_first_and_respects_selection() {
+        let mut s = sched(
+            8,
+            SchedulerConfig {
+                critical_bytes: 0,
+                ..SchedulerConfig::default()
+            },
+        );
+        // Only the second half of the torrent is wanted.
+        s.want_range(4 * u64::from(PIECE), 8 * u64::from(PIECE));
+        seed(&mut s, 1);
+        s.add_peer(2);
+        assert!(s.on_have(2, 6));
+        s.tick(Instant::now(), true);
+        let requests = s.fill(1, Instant::now());
+        assert!(requests.iter().all(|r| r.piece >= 4), "{requests:?}");
+        assert_ne!(requests[0].piece, 6, "piece 6 is less rare than 4, 5, 7");
+    }
+
+    fn rate(bytes_per_sec: f64) -> Rate {
+        Rate {
+            bytes_since: 0,
+            bytes_per_sec,
+            measured: true,
+            peak: 0.0,
+        }
+    }
+
+    #[test]
+    fn a_container_index_stays_critical_until_it_is_complete() {
+        let cfg = SchedulerConfig {
+            min_queue: 128,
+            initial_queue: 128,
+            ..SchedulerConfig::default()
+        };
+        let mut s = sched(1000, cfg);
+        seed(&mut s, 1);
+        // A reader of the last 1 MiB (16 pieces): its critical range reaches the end of the file.
+        let first = 1000 - 16;
+        s.set_interest(1, reader(u64::from(first) * u64::from(PIECE), &s));
+        s.reprioritize(false);
+        assert!(s.is_critical());
+        let requests = s.fill(1, Instant::now());
+        // Twelve of the sixteen pieces arrive: more than half, but not all.
+        for r in requests.iter().filter(|r| r.piece < first + 12) {
+            if let Some((piece, _)) = deliver(&mut s, 1, *r).completed {
+                s.on_verified(piece, true);
+            }
+        }
+        s.reprioritize(false);
+        assert!(s.is_critical(), "the rest of the index stays exclusive");
+        for r in requests.iter().filter(|r| r.piece >= first + 12) {
+            if let Some((piece, _)) = deliver(&mut s, 1, *r).completed {
+                s.on_verified(piece, true);
+            }
+        }
+        s.reprioritize(false);
+        assert!(!s.is_critical());
+    }
+
+    #[test]
+    fn the_container_index_goes_first_among_equally_urgent_pieces() {
+        let mut s = sched(1000, small_queues());
+        seed(&mut s, 1);
+        // A player reading the head and one reading the index at the end both wait for the
+        // piece at their position (due now).
+        s.set_interest(1, reader(0, &s));
+        s.set_interest(2, reader(996 * u64::from(PIECE), &s));
+        s.reprioritize(false);
+        let requests = s.fill(1, Instant::now());
+        assert_eq!(requests.len(), 4);
+        assert!(requests.iter().all(|r| r.piece == 996), "{requests:?}");
+    }
+
+    #[test]
+    fn slow_peers_leave_urgent_blocks_to_much_faster_ones() {
+        // 4 MiB critical: more than the fast peer queues at once.
+        let cfg = SchedulerConfig {
+            critical_bytes: 4 * MIB,
+            ..small_queues()
+        };
+        let mut s = sched(1000, cfg);
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        s.peers.get_mut(&1).unwrap().rate = rate(4.0 * 1024.0 * 1024.0);
+        s.peers.get_mut(&2).unwrap().rate = rate(64.0 * 1024.0);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        assert!(s.is_critical());
+        let now = Instant::now();
+        // The slow peer would need 0.25 s per block; the idle fast peer 4 ms.
+        assert!(s.fill(2, now).is_empty());
+        // 0.5 s at 4 MiB/s: the fast peer's queue holds 128 blocks, about 0.5 s of work.
+        assert_eq!(s.fill(1, now).len(), 128);
+        // Now the slow peer is sooner for the next block, and takes some.
+        let slow = s.fill(2, now);
+        assert!(!slow.is_empty() && slow.len() <= 4, "{slow:?}");
+    }
+
+    #[test]
+    fn blocks_held_by_a_slow_peer_are_requested_from_a_much_faster_one() {
+        let mut s = sched(1000, small_queues());
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let t0 = Instant::now();
+        // Before any rate is known the slow peer gets its initial queue of urgent blocks.
+        let held = s.fill(2, t0);
+        assert_eq!(held.len(), 4);
+        // Then the rates are measured: peer 2 needs 0.25 s per block, peer 1 4 ms.
+        s.peers.get_mut(&1).unwrap().rate = rate(4.0 * 1024.0 * 1024.0);
+        s.peers.get_mut(&2).unwrap().rate = rate(64.0 * 1024.0);
+        let fast = s.fill(1, t0 + Duration::from_millis(10));
+        assert!(held.iter().all(|r| fast.contains(r)), "{held:?} {fast:?}");
+        assert_eq!(s.stats().duplicate_requests, 4);
+        // The first copy to arrive wins; the slow peer's request is cancelled.
+        let outcome = deliver(&mut s, 1, held[0]);
+        assert_eq!(outcome.cancels, [(2, held[0])]);
+    }
+
+    #[test]
+    fn a_busier_peer_of_the_same_speed_keeps_its_blocks() {
+        let mut s = sched(1000, small_queues());
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        for key in [1, 2] {
+            s.peers.get_mut(&key).unwrap().rate = rate(1024.0 * 1024.0);
+        }
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let t0 = Instant::now();
+        // Peer 2 is idle while peer 1 has queued blocks: as fast, it gets other blocks, not
+        // copies of peer 1's (which a peer ignoring cancels would send anyway).
+        let busy = s.fill(1, t0);
+        let idle = s.fill(2, t0);
+        assert!(!busy.is_empty() && !idle.is_empty());
+        assert!(idle.iter().all(|r| !busy.contains(r)), "{busy:?} {idle:?}");
+        assert_eq!(s.stats().duplicate_requests, 0);
+    }
+
+    #[test]
+    fn cancelled_data_still_arriving_is_no_round_trip_sample() {
+        let mut s = sched(1000, small_queues());
+        seed(&mut s, 1);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let t0 = Instant::now();
+        let old = s.fill(1, t0);
+        assert_eq!(old.len(), 4);
+        // A seek cancels them, but the peer (like librqbit) sends them anyway, taking 2 s.
+        s.set_interest(1, reader(500 * u64::from(PIECE), &s));
+        assert_eq!(s.reprioritize(true).len(), 4);
+        let new = s.fill(1, t0);
+        let at = |ms| t0 + Duration::from_millis(ms);
+        for (i, r) in old.iter().enumerate() {
+            s.on_block_at(
+                1,
+                r.piece,
+                r.begin,
+                &vec![0; r.len as usize],
+                at(500 * (i as u64 + 1)),
+            );
+        }
+        // The new requests waited behind that drain: no sample from them.
+        for r in &new {
+            s.on_block_at(1, r.piece, r.begin, &vec![0; r.len as usize], at(2100));
+        }
+        assert_eq!(s.peers[&1].base_rtt, None);
+        // A request to a queue that is really empty is a sample again.
+        let r = s.fill(1, at(3000))[0];
+        s.on_block_at(1, r.piece, r.begin, &vec![0; r.len as usize], at(3100));
+        assert_eq!(s.peers[&1].base_rtt, Some(Duration::from_millis(100)));
+    }
+}

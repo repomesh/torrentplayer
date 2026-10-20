@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-frame"
+description = "Enables the preview_frame command without any pre-configured scope."
+commands.allow = ["preview_frame"]
+
+[[permission]]
+identifier = "deny-preview-frame"
+description = "Denies the preview_frame command without any pre-configured scope."
+commands.deny = ["preview_frame"]

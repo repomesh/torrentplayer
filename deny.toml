@@ -1,0 +1,72 @@
+# cargo-deny configuration: https://embarkstudios.github.io/cargo-deny/
+# Run locally with `cargo deny check`.
+
+[graph]
+all-features = true
+
+[advisories]
+# Fail on any RustSec advisory for vulnerable, unmaintained, or yanked crates.
+unmaintained = "all"
+yanked = "deny"
+# Every ignore entry must say why it is safe and when it can be removed.
+ignore = [
+  # proc-macro-error is unmaintained. It is a compile-time-only dependency of gtk-rs 0.18,
+  # which Tauri uses on Linux; it does not ship in the app. Remove when Tauri upgrades gtk-rs.
+  { id = "RUSTSEC-2024-0370", reason = "build-time only, transitive via Tauri on Linux" },
+  # ringbuf < 0.5.2 can double-free when an element's Drop panics. librqbit-utp 0.7.0 (latest)
+  # only stores u8, whose Drop cannot panic, so the bug is unreachable. Remove when librqbit-utp
+  # moves to ringbuf >= 0.5.2.
+  { id = "RUSTSEC-2026-0293", reason = "unreachable: librqbit-utp only buffers u8" },
+  # zvariant, zvariant_derive, and zbus_names are "unmaintained" only because zbus 6.0
+  # (2026-10-16) merged them into itself; no vulnerability is reported. They come from keyring's
+  # Linux Secret Service store (keyring 4.2 -> secret-service 5.2 -> zbus 5). Remove when keyring
+  # moves to zbus 6.
+  { id = "RUSTSEC-2026-0370", reason = "merged into zbus 6; via keyring's Linux store" },
+  { id = "RUSTSEC-2026-0371", reason = "merged into zbus 6; via keyring's Linux store" },
+  { id = "RUSTSEC-2026-0372", reason = "merged into zbus 6; via keyring's Linux store" },
+]
+
+[licenses]
+# Every license here must be compatible with distributing TorrentStream under MIT OR Apache-2.0.
+# Only licenses actually used are listed; adding one needs maintainer review (see CONTRIBUTING.md).
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  # WireGuard routing tables (ip_network and ip_network_table via boringtun).
+  "BSD-2-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "0BSD",
+  # Data license of the bundled TLS root certificates (webpki-root-certs); permissive.
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+# MPL-2.0 is a weak, file-level copyleft. It is allowed only for these crates, which Tauri depends
+# on, and only because we distribute them unmodified. See docs/adr/0001-project-license.md.
+exceptions = [
+  { crate = "cssparser", allow = ["MPL-2.0"] },
+  { crate = "cssparser-macros", allow = ["MPL-2.0"] },
+  { crate = "dtoa-short", allow = ["MPL-2.0"] },
+  { crate = "option-ext", allow = ["MPL-2.0"] },
+  { crate = "selectors", allow = ["MPL-2.0"] },
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

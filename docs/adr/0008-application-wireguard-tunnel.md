@@ -1,0 +1,55 @@
+# 0008: Application-local WireGuard tunnel
+
+- **Status:** Proposed (implemented)
+- **Date:** 2026-10-18
+
+## Context
+
+TorrentStream could import WireGuard files but could not connect them. Users also confused local
+Hyper-V switches with VPN adapters. Protected traffic must never fall back to the host's
+internet connection, and importing a configuration must not require administrator rights.
+
+## Decision
+
+Expose separate VPN and WireGuard choices. VPN uses the existing bound-interface mode for
+connections established by provider apps, including OpenVPN. WireGuard runs inside TorrentStream,
+using boringtun for the protocol and smoltcp for the TCP/IP stack. Configured DNS queries
+also travel inside the tunnel. Endpoint bootstrap resolution uses the system resolver.
+Librqbit's HTTP tracker client still resolves tracker names locally before using its SOCKS5
+bridge, an existing limitation shared with SOCKS5 mode; search and lumen-swarm use tunneled DNS.
+
+Use a vendored copy of tokio-wireguard 0.1.3 (MIT OR Apache-2.0) to supply Tokio sockets.
+The upstream version lacks preshared keys and handshake reporting. Local changes add both,
+start handshakes, update boringtun to 0.7.1 (BSD-3-Clause), and fix socket registration,
+TCP handshake readiness, write wakeups, polling fairness, and safe waker construction.
+The source and upstream MIT copyright are preserved under `vendor/tokio-wireguard`.
+Maintaining these changes is TorrentStream's responsibility; they are covered by local peer tests.
+Boringtun's routing tables use BSD-2-Clause, a permissive license added to `deny.toml`.
+
+The small dns-parser dependency (MIT OR Apache-2.0) parses DNS wire responses without adding
+a system resolver or TLS runtime. It is an older, stable protocol parser; TorrentStream validates
+response size, source, transaction ID, and response flags. Query encoding is bounded and
+does not use its panic-prone query builder.
+
+Existing APIs return Tokio TCP streams. A private loopback socket pair relays each stream
+into WireGuard; its accepting socket checks the exact reserved source address and port.
+Applying new settings or shutting down closes the tunnel and revokes connection leases.
+Traffic remains blocked until an authenticated handshake succeeds and whenever its age
+reaches 180 seconds. No system routes, VPN services, or network adapters are created.
+
+## Alternatives considered
+
+- OS WireGuard services require privileged adapter management and system route changes.
+- onetun provides fixed port forwards instead of the arbitrary destinations TorrentStream needs.
+- Implementing the protocol or TCP stack locally would duplicate established libraries.
+- Importing OpenVPN files needs a separate runtime and lifecycle; the VPN option instead
+  supports existing OpenVPN app connections through their adapter.
+
+## Consequences
+
+WireGuard configuration files now establish real application-local connections, including
+search and peer traffic. Wrong keys or missing credentials fail closed. One peer and one
+address per family are supported. Configured DNS servers are required for host names.
+UDP tracker announces and their DNS lookups run inside the tunnel and bootstrap magnet metadata
+fetching. DHT, incoming peers, and uTP remain disabled in this mode. Throughput of the
+userspace stack remains a performance consideration for large numbers of peers.

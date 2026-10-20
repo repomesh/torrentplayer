@@ -1,0 +1,189 @@
+name: Release
+
+# Builds signed installers for every platform when a version tag is pushed, then publishes
+# checksums, an SBOM, and build provenance attestations to a draft GitHub release.
+# See docs/release.md.
+on:
+  push:
+    tags: ['v*.*.*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    # Signing secrets live in a protected environment that requires maintainer approval.
+    environment: release
+    permissions:
+      contents: write # create the draft release and upload installers
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x64
+            os: macos-15
+            target: x86_64-apple-darwin
+          # Built on the oldest supported Ubuntu so the AppImage runs on older glibc versions.
+          - name: linux-x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No build caches in release builds, to rule out cache poisoning.
+      - uses: ./.github/actions/setup
+        with:
+          rust-cache: 'false'
+          build-frontend: 'false'
+
+      - name: Add Rust target
+        env:
+          TARGET: ${{ matrix.target }}
+        run: rustup target add "$TARGET"
+
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Output "::warning::WINDOWS_CERTIFICATE is not set; the Windows build will be unsigned."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "certificate.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $config = @{ bundle = @{ windows = @{
+            certificateThumbprint = $cert.Thumbprint
+            digestAlgorithm = "sha256"
+            timestampUrl = "http://timestamp.digicert.com"
+          } } } | ConvertTo-Json -Depth 5
+          Set-Content -Path src-tauri/tauri.signing.conf.json -Value $config
+
+      # Tauri treats a defined-but-empty APPLE_CERTIFICATE as a signing request, so the
+      # variables are exported only when the secrets exist.
+      - name: Configure macOS signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning::APPLE_CERTIFICATE is not set; the macOS build will be unsigned and not notarized."
+            exit 0
+          fi
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            delimiter="EOF_$(openssl rand -hex 16)"
+            printf '%s<<%s\n%s\n%s\n' "$name" "$delimiter" "${!name}" "$delimiter" >> "$GITHUB_ENV"
+          done
+
+      - name: Build and upload installers
+        id: tauri
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: TorrentStream ${{ github.ref_name }}
+          releaseBody: See CHANGELOG.md for what changed. Verify downloads as described in docs/release.md.
+          releaseDraft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          args: >-
+            --target ${{ matrix.target }}
+            ${{ runner.os == 'Windows' && hashFiles('src-tauri/tauri.signing.conf.json') != '' && '--config src-tauri/tauri.signing.conf.json' || '' }}
+
+      # TODO(phase 5): bundle LGPL builds of libmpv and FFmpeg for each platform
+      # (see docs/adr/0001-project-license.md).
+
+      - name: Collect installers
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+        run: |
+          mkdir -p release-assets
+          node -e 'for (const p of JSON.parse(process.env.ARTIFACT_PATHS)) console.log(p)' |
+            while IFS= read -r path; do
+              # .app bundles are directories; their archives (.app.tar.gz) are uploaded instead.
+              if [ -f "$path" ]; then cp "$path" release-assets/; fi
+            done
+          ls -l release-assets
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: installers-${{ matrix.name }}
+          path: release-assets/
+          if-no-files-found: error
+
+  provenance:
+    name: Checksums, SBOM, and provenance
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # upload checksums and SBOM to the release
+      id-token: write # sign attestations
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: installers-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Install pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c # v2.87.10
+        with:
+          tool: cargo-cyclonedx
+
+      - name: Generate SBOM
+        run: |
+          cargo cyclonedx --manifest-path src-tauri/Cargo.toml --format json --spec-version 1.5 \
+            --override-filename torrentstream
+          cp src-tauri/torrentstream.cdx.json release-assets/torrentstream.cdx.json
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release-assets/*
+
+      - name: Upload checksums and SBOM to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" release-assets/SHA256SUMS.txt release-assets/torrentstream.cdx.json --clobber

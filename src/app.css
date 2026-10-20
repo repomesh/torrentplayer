@@ -1,0 +1,27 @@
+/* SPDX-License-Identifier: MIT OR Apache-2.0 */
+
+:root {
+  --bg: #0b0b0f;
+  --surface: #15151c;
+  --text: #ece9e2;
+  --text-muted: #8f8b84;
+  --accent: #f2b45a;
+  --font-display: 'Iowan Old Style', 'Palatino Linotype', Palatino, Georgia, serif;
+  --font-ui: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+
+  color-scheme: dark;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+#app {
+  height: 100%;
+}

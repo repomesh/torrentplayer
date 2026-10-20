@@ -1,0 +1,196 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this
+project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### VPN connections
+
+- Separate VPN and WireGuard choices in Network & VPN. VPN uses an existing VPN app's tunnel
+  adapter, lists likely VPN adapters first, and explains local Hyper-V switches and Tailscale
+  exit nodes. Bound status no longer implies VPN encryption or internet connectivity.
+- Imported WireGuard configurations now connect inside TorrentStream using a userspace tunnel, with
+  credential-store keys, optional preshared keys, tunneled DNS, authenticated handshake checks,
+  automatic recovery, and connection shutdown when settings change. No administrator rights
+  or system route changes are required. UDP trackers and their DNS use the tunnel; DHT remains
+  disabled in this mode.
+- Correctly hide loopback adapters even when they also have non-loopback addresses.
+- WireGuard processes incoming replies before immediate TCP stack work, preventing search
+  DNS and HTTP requests from stalling while the tunnel still appears connected. Search
+  diagnostics retain underlying network errors without logging request URLs.
+
+### Added
+
+- An idle queue explains when loading starts and offers Play first.
+- UDP-only magnets can discover peers through built-in WireGuard, including tunneled tracker
+  DNS. Tracker bootstrap retains successful replies when other trackers time out.
+- Repeatable streaming reports compare both engines under bandwidth limits, latency, peer
+  dropouts, and 2 GiB/8 GiB workloads at a 4K media rate. A separate WebView probe measures
+  actual 4K decoding and seeks. Large benchmark fixtures use bounded working memory.
+- Search results no longer show license labels or the license-check notice.
+
+- Search results and filters fill the available window width. Titles, metadata, and sources
+  wrap instead of being cut off; actions move below the text in narrow layouts, and expanded
+  details fit smaller windows.
+
+- `LUMEN_PROFILE_DIR` keeps settings, the queue, and downloads in a separate folder, for tests and
+  portable installs.
+- Project scaffolding: Cargo workspace with one crate per subsystem, a Tauri v2 app shell, and a
+  Svelte + TypeScript frontend.
+- Dual MIT OR Apache-2.0 licensing, Code of Conduct, contributing guide, security policy, and
+  governance documents.
+- Security baseline: strict Content Security Policy, least-privilege Tauri capabilities, and
+  `unsafe` code forbidden outside the libmpv wrapper crate.
+- CI quality gates on Windows, macOS, and Linux: formatting, Clippy, tests, docs, MSRV,
+  cargo-deny, frontend lint/format/typecheck/tests, DCO sign-off, and coverage.
+- Documentation: architecture overview, IPC contract, threat model, building guide, and ADRs.
+- The player says when a video's audio cannot be played by the built-in player (Dolby Digital,
+  Dolby Digital Plus/Atmos, `TrueHD`, DTS), and mentions a playable alternative track. The codec
+  comes from a new bounded container-header probe in `lumen-media` (MP4/MOV, Matroska/WebM;
+  `stream_audio` command), confirmed by the webview's decoder counters, which also catch cases
+  the probe cannot read. ADR 0007 records how these codecs will be played.
+- Search detects audio codecs in release titles (DD5.1, DDP/DD+, E-AC-3, AC3, DTS, DTS-HD, DTS-X,
+  `TrueHD`, Atmos, AAC, Opus), says "no sound in built-in player" for Dolby- or DTS-only
+  releases, and ranks them lower, so the best pick prefers releases that play with sound.
+- Subtitles (CC) in the player. Subtitle files in the torrent (`.srt`, `.vtt`, `.ass`, `.ssa`)
+  are matched to the video by name or a `Subs` folder, with their language read from the file
+  name; others are listed as "other subtitles", and a local file can be loaded too. A chosen
+  file is downloaded at background priority and parsed in Rust into plain-text cues (SRT and
+  WebVTT, ASS/SSA dialogue; UTF-8, UTF-16, or Windows-1252; bounded and fuzzed), then shown with
+  the TextTrack API. A CC button and menu (always shown; dimmed with only "Load subtitle file…" when the torrent
+  has none), C to toggle, the choice remembered for the session
+  and the next video, and a new `playback.subtitlesByDefault` setting ("Show subtitles
+  automatically", off by default). Embedded subtitle tracks are listed but cannot be shown yet.
+  New commands `stream_subtitles`, `load_subtitles`, and `parse_subtitles`, and
+  `StreamEngine::read_small_file` for small files of a torrent.
+- Search reads search.emberglow.tech's event stream (`/search/stream`): one request per search
+  instead of about a dozen, first results after 0.4–0.7 s, and every indexer's results merged
+  and ranked by TorrentStream (often 1.5–2.5 times as many as before). A strict, bounded parser reads
+  the stream; without it, search falls back to asking indexers in groups. Results arrive at most
+  every 150 ms, slide gently into place, keep their order while the pointer or focus is on the
+  list, and say how many sources are still searching. A new search, or Stop, stops the running
+  one (`cancel_search`, error kind `cancelled`), and the Search button works while searching.
+- Search can be limited to categories (Movies, TV, Anime, …) on the search service itself
+  (`categories` argument; adult categories are never sent).
+- Results that indexers offer only as a download link on the search service (about a third)
+  are shown instead of dropped. The magnet links the service looks up during a streamed search
+  (`magnet` events) fill them in place: the row keeps its key and position, and merges with other
+  indexers' copies once its info hash is known. Adding, preloading, or prefetching one follows the link to its
+  `.torrent` file or magnet link once and remembers it; only the service's own links are
+  followed, they count against the search rate limit, and links are never logged.
+- Search results show a thumbnail: a picture from inside the torrent (poster, cover, folder
+  image, screenshot, or Internet Archive's `__ia_thumb.jpg`; never an indexer's banner),
+  downloaded piece by piece once its metadata is known, checked to be a JPEG, PNG, or WebP image,
+  and shown as a `data:` URL; the best pick shows a frame from its preloaded video instead. A
+  fixed box keeps rows from moving. No outside poster service is used.
+- Each search result has a details view (click its text, or "Details"): quality (resolution,
+  source, codecs, HDR, whether it plays here and with sound), files (videos in lecture order,
+  subtitles, other files by type, sizes, piece size, private flag; "Load file list" fetches the
+  metadata of that one result), swarm (peers, health, placeholder seed counts, UDP and HTTP
+  trackers, and "needs Direct mode" when only UDP trackers meet a mode that blocks UDP), and
+  source (indexers with a link to their page, opened in the system browser after a check;
+  dates, category, release name, info hash and magnet link to copy; the torrent's comment and
+  creator as plain text). It opens in place, smoothly unless reduced motion is on.
+- "Videos only", on by default, hides results that are not videos (audio, ebooks, software,
+  games; never ones that could be either), with a note saying how many and a one-click "Show".
+  A torrent's file list shows only its videos, with "Show all files (N)".
+- Play on every search result, not only the best pick, plus a Queue action. The torrent
+  details of the first results shown are fetched in the background (`prefetch_torrents`,
+  metadata only, kept in the engine for 64 torrents), so playing any of them skips the metadata
+  lookup; those rows say "details ready". Only the best pick preloads video.
+- Navigation rail with Search, Open, Files, Queue, Playing, and Settings, plus Back and Forward
+  (Alt+←/→, the mouse's side buttons, Esc on pages). Going back from the video restores the
+  search exactly: query, results, filters, and scroll position. Each search is a history
+  entry, recent searches are suggested, and leaving the player keeps the stream open, so
+  coming back resumes where the video was.
+- One queue, in Playing: the separate Queue page and its rail item are gone; Playing opens
+  with nothing playing too ("Pick something from the queue or search"), carries the queue's
+  count, and its ⋯ menu holds Clear played, Clear all, "Play ready videos first", and "Keep
+  course order". Torrents in the queue are a tree: the torrent row (name, how many of its
+  videos are queued, size, how many are ready; drag or Alt+↑/↓ moves it), and under it all of
+  its videos in lecture order, each with a queue tick and Play now. Arrow keys move through the
+  tree, ←/→ collapse and expand, Enter plays, Space ticks.
+- Files is a file explorer: the torrents in the queue and those opened this session on the
+  left, the chosen torrent's videos in the top half (Play, + Queue, Queue all) and its other
+  files by folder in the bottom half, and a preview of the selected file: pictures, text and
+  subtitles (first 64 KB), a video's first frame once its start is downloaded, and details for
+  anything else (a new `preview_file` command; HTML and PDF are never rendered, files never
+  opened).
+- Queue groups and "Play ready videos first". A torrent's queued files sit together;
+  "Choose files…" lists its videos in lecture order to tick which are queued or play one
+  now. Queued videos that are downloaded, or whose start and end are, show "Ready", and the
+  optional `playback.optimizeQueue` (off by default; "Keep course order" on by default) moves
+  them ahead of those still downloading, with Undo. A new `queue_readiness` command reports
+  readiness from the pieces present, without downloading anything.
+- Play queue: Queue on search results and on files (or "Queue all"), a collapsible playlist
+  beside the player (reorder by dragging or Alt+↑/↓, remove with Undo, play now), a cancellable
+  5-second "Up next" countdown at the end of a video, and Shift+N to play the next one. The
+  queue is saved across restarts (`queue.json`, versioned, atomic; torrent links only, never
+  stream URLs; torrents opened from a file are saved as a magnet link with up to 20 of their
+  trackers). The next video is preloaded once the current one is fully downloaded, or nearly
+  over with the rest arriving in time: the queued file itself, also when it is the next lecture
+  of the torrent playing (its start and end at background priority) or behind a download link
+  that redirects to a magnet link. Fullscreen stays on when the next video starts.
+- Search filters and sorting, applied at once to the results on screen and kept for the
+  session: category (a menu in the search box, also sent to the search service), source,
+  minimum seeders, minimum resolution, size range, "plays here", and "no camera copies". A
+  labelled Sort menu at the start of the row: best match (default), most peers, best quality
+  (resolution, then Blu-ray > WEB-DL > WEBRip > HDTV > DVD > camera), most seeders, newest,
+  oldest, largest, smallest, or name. Ties keep the best-match order; unknown values go last.
+- An Open page for links and `.torrent` files, listing the torrents opened this session.
+
+### Changed
+
+- The best pick is preloaded once it has stayed best for 2 s (about 3 s into a search) instead
+  of when the slowest indexer answers, and at most twice per search.
+- Adult results are also recognized by their Torznab category ids, since the search service
+  now includes 15 adult-only indexers; the group fallback does not ask adult-only or
+  excluded-by-default indexers. Placeholder seed counts (`suspicious`) count as unknown, so
+  fake listings are never the best pick.
+- lumen-swarm hands out requests to peers in turns of 256 KiB, so the most urgent data is spread
+  over all peers instead of queued behind one of them, and keeps request queues short unless
+  data is due within 4 s (was 10 s), which makes seeks at 4K bitrates faster.
+
+### Fixed
+
+- Fetching one torrent's metadata no longer blocks opening or playing other torrents. Loading
+  controls are scoped to each torrent, duplicate requests share a fetch, and an older load
+  cannot override a newer selection or navigation.
+- Nothing played with the network mode "Bind to interface" (a VPN adapter) for torrents that list
+  only UDP trackers, which is most public torrents: all UDP was off in that mode, so they found no
+  peers and magnet links could not even fetch their metadata. TorrentStream now announces to UDP trackers
+  itself, from sockets bound to the interface's address (BEP 15, new `lumen_swarm::udp_tracker`
+  and `Network::udp_socket`), keeps announcing while streaming, and hands the peers to librqbit
+  for magnet metadata. librqbit's own UDP (DHT, uTP) stays off there: it cannot be pinned to an
+  interface on Windows.
+- Seeking while a video played could leave it paused for good. WebView2 paints the frame at the
+  new position before firing `seeked` and nothing more while paused, and the seek gate (which
+  holds audio back until the picture is ready) ignored frames painted before `seeked`. It now
+  recognises the new position's frame by its media time, and releases any hold one second after
+  `seeked` at the latest. Found by the new end-to-end test.
+- An MP3 audiobook was the best pick for "feynman lectures physics". Audio-only titles (mp3,
+  flac, m4b, kbps, audiobook), ebooks (pdf, epub, …), and audio or book category ids now count
+  as not a video, and a torrent with no sign of video must be at least 100 MiB to be the best
+  pick.
+- Download links that redirect to a magnet link (such as `search.emberglow.tech/download/…`)
+  failed with an empty-file error; they now add the magnet link.
+- Going from the video back to the file list or search lost the search results.
+- With the engine set to TorrentStream's engine, playing a magnet link failed ("Magnet links are not
+  supported") unless its preload had finished; librqbit now fetches the metadata and lumen-swarm
+  plays it.
+- lumen-swarm stayed in its start-up (critical) phase while a player kept reading, downloading
+  only just ahead of the reader, so the read-ahead buffer never built up on high-bitrate video
+  (about 10 MiB/s at most on a 25 MiB/s link). The phase now ends once half of the critical
+  bytes ahead of the reader are downloaded, and starts again whenever the reader has to wait.
+- lumen-swarm's round-trip estimate only took samples from requests sent to an empty queue, so
+  for a busy peer it drifted upwards and kept deepening that peer's queue, slowing every later
+  seek. Every block now gives a sample, corrected for the blocks queued ahead of it.
+- Videos could play silently muted: the player muted on any `play()` rejection, including the
+  `AbortError` raised when a seek (or a pause) interrupts a starting or resuming playback, and
+  never unmuted. It now mutes only when the autoplay policy refuses sound, then shows a "click
+  to unmute" button. Interruptions are retried with the sound unchanged.
+
+[Unreleased]: https://github.com/torrent-stream/torrentstream/commits/main

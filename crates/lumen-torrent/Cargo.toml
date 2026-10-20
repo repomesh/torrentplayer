@@ -1,0 +1,34 @@
+[package]
+name = "lumen-torrent"
+description = "Torrent engines for TorrentStream: lumen-swarm and librqbit behind one streaming API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+futures-util.workspace = true
+librqbit.workspace = true
+lumen-net.workspace = true
+lumen-prioritize.workspace = true
+lumen-stream.workspace = true
+lumen-swarm.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+lumen-net = { workspace = true, features = ["test-util"] }
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "fs"] }
+
+[lints]
+workspace = true
