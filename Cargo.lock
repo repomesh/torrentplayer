@@ -1099,7 +1099,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d045de693cb712d0b22c6a64be5b953f67b3ce00ab5ad3dd5d8b441886ab8e1a"
 dependencies = [
  "quote",
- "syn 3.0.9",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -3319,7 +3319,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "dns-parser",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "if-addrs",
  "reqwest",
  "serde",
@@ -3381,7 +3381,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "http",
  "http-body-util",
  "hyper",
@@ -3400,7 +3400,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures-util",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "librqbit",
  "librqbit-core",
  "librqbit-dht",
