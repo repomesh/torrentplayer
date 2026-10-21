@@ -40,8 +40,8 @@ tracked here so they can be reviewed as each phase lands.
 | ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------- |
 | Another local app or a website (via DNS rebinding) reads streams from the loopback HTTP server. | Bind to `127.0.0.1` only; random port; random per-session token compared in constant time; validate the `Host` header; no permissive CORS; strict `Range` parsing with limits. | Phase 1 |
 | Secrets read from config files or logs.                                                         | OS keychain storage; zeroizing in-memory types; redaction in `Debug`, logs, and errors.                                                                                        | Phase 5 |
-| Library database read by other users.                                                           | User-only file permissions on the database and config.                                                                                                                         | Phase 4 |
-| SQL injection via course titles or file names.                                                  | Parameterized queries only.                                                                                                                                                    | Phase 4 |
+| Library database read by other users.                                                           | It lives in the per-user app-data directory; on Unix the directory is forced to `0700` and `library.sqlite3` to `0600`.                                                        | ✅      |
+| SQL injection via course titles or file names.                                                  | Every stored value uses a SQLite query parameter; schema and query text are static. Regression-tested with SQL-shaped titles.                                                  | ✅      |
 
 ### Compromised or buggy frontend
 

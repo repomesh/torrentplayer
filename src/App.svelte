@@ -12,6 +12,7 @@
   import AddTorrent from './lib/components/AddTorrent.svelte';
   import FileChooser from './lib/components/FileChooser.svelte';
   import FileExplorer from './lib/components/FileExplorer.svelte';
+  import Library from './lib/components/Library.svelte';
   import NavRail from './lib/components/NavRail.svelte';
   import NetworkIndicator from './lib/components/NetworkIndicator.svelte';
   import TransferRates from './lib/components/TransferRates.svelte';
@@ -40,6 +41,7 @@
     streamStats,
     updateSettings,
     type DownloadsSnapshot,
+    type LibraryItem,
     type PreloadStatusDto,
     type SearchResultDto,
     type StreamInfo,
@@ -47,6 +49,7 @@
     type TorrentSummary,
     type ReadinessState,
   } from './lib/ipc';
+  import { followLibrary, libraryKey } from './lib/library';
   import {
     back,
     canGoBack,
@@ -130,6 +133,8 @@
   const playback = { position: 0, duration: Number.NaN };
 
   let queue = $state.raw<Queue>(emptyQueue());
+  let library = $state.raw<LibraryItem[]>([]);
+  const watchProgress = $derived(new Map(library.map((item) => [libraryKey(item), item] as const)));
   /** The queue as last loaded or saved, so loading it does not save it again. */
   let persisted: Queue | null = null;
   const saver = new QueueSaver(saveQueue, (reason) => {
@@ -511,6 +516,8 @@
         return `Files of ${torrents.find((t) => t.id === v.torrentId)?.name ?? 'the torrent'}`;
       case 'player':
         return nowPlaying ? `Playing ${nowPlaying.stream.fileName}` : 'Queue';
+      case 'library':
+        return 'Library';
       case 'settings':
         return 'Settings';
     }
@@ -533,6 +540,9 @@
         break;
       case 'player':
         showPlayer();
+        break;
+      case 'library':
+        navigate({ name: 'library' });
         break;
       case 'settings':
         openSettings();
@@ -740,6 +750,16 @@
     return findEntry(queue, item)?.id ?? null;
   }
 
+  function formatResumeTime(seconds: number): string {
+    const total = Math.max(0, Math.floor(seconds));
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const rest = (total % 60).toString().padStart(2, '0');
+    return hours > 0
+      ? `${String(hours)}:${minutes.toString().padStart(2, '0')}:${rest}`
+      : `${String(minutes)}:${rest}`;
+  }
+
   async function play(
     torrent: TorrentSummary,
     file: FileSummary,
@@ -788,7 +808,15 @@
         await stopStream(stream.streamId).catch(() => undefined);
         return false;
       }
-      playback.position = 0;
+      const saved = stream.resumePositionSecs;
+      const resumeAt =
+        saved !== null &&
+        globalThis.confirm(
+          `Resume ${stream.fileName} from ${formatResumeTime(saved)}?\n\nChoose Cancel to start from the beginning.`,
+        )
+          ? saved
+          : 0;
+      playback.position = resumeAt;
       playback.duration = Number.NaN;
       // The file becomes the queue's current item, wherever it was played from.
       const queueId = options.queueId ?? enterQueue(torrent, file, options.queue);
@@ -798,7 +826,7 @@
         stream,
         startedAt,
         autoSeeks: options.autoSeeks ?? [],
-        resumeAt: 0,
+        resumeAt,
         queueId,
       };
       if (queueId !== null) {
@@ -859,6 +887,31 @@
     } catch (reason: unknown) {
       if (request === selection) {
         addError = errorMessage(reason);
+      }
+    } finally {
+      finishPlayback(request);
+    }
+  }
+
+  /** Reopens an exact file from playback history. */
+  async function playLibraryItem(item: LibraryItem): Promise<void> {
+    const request = ++selection;
+    pendingPlayback = { request, source: item.source, infoHash: item.infoHash };
+    playError = null;
+    try {
+      const torrent = await fetchTorrent(item.source, item.infoHash);
+      if (request !== selection) {
+        return;
+      }
+      lastTorrentId = torrent.id;
+      const file = torrent.files.find((candidate) => candidate.index === item.fileIndex);
+      if (!file || !isPlayable(file)) {
+        throw new Error('This file is no longer available in the torrent.');
+      }
+      await play(torrent, file, { request, queue: 'first' });
+    } catch (reason: unknown) {
+      if (request === selection) {
+        showToast(`Could not open library item: ${errorMessage(reason)}`, { error: true });
       }
     } finally {
       finishPlayback(request);
@@ -1267,6 +1320,9 @@
   }
 
   onMount(() => {
+    const stopLibrary = followLibrary((items) => {
+      library = items;
+    });
     loadQueue()
       .then((saved) => {
         const loaded = sanitizeQueue(saved);
@@ -1299,6 +1355,7 @@
       countdown.cancel();
       clearTimeout(toastTimer);
       clearTimeout(nextPreloadTimer);
+      stopLibrary();
       void saver.flush();
     };
   });
@@ -1371,6 +1428,12 @@
               navigate({ name: 'torrent', torrentId: torrent.id });
             }}
           />
+        {:else if view.name === 'library'}
+          <Library
+            items={library}
+            isBusy={(item: LibraryItem) => isTorrentBusy(item.source, item.infoHash)}
+            onPlay={(item: LibraryItem) => void playLibraryItem(item)}
+          />
         {:else if view.name === 'torrent' && shownTorrent}
           {@const torrent = shownTorrent}
           <FileExplorer
@@ -1416,6 +1479,7 @@
               onChooseFiles={(key: string) => void chooseFiles(key)}
               {readiness}
               {downloads}
+              {watchProgress}
               onTogglePause={(ids: readonly string[], paused: boolean) => {
                 queue = setPaused(queue, ids, paused);
               }}

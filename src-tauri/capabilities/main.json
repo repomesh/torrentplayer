@@ -32,6 +32,7 @@
     "allow-preload-next",
     "allow-queue-readiness",
     "allow-queue-downloads",
+    "allow-library-items",
     "allow-preview-file",
     "allow-get-settings",
     "allow-update-settings",

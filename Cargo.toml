@@ -60,6 +60,9 @@ proptest = "1.7"
 rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
 # Same version and TLS backend librqbit already uses, so no second copy is built.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+# The playback library is local SQLite. Bundling gives every desktop build the same patched
+# SQLite without depending on a system package; only lumen-library exposes it to the app.
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 # Zeroizing, Debug-redacting wrappers for secrets held in memory.
 secrecy = "0.10.3"
 serde = { version = "1.0.228", features = ["derive"] }

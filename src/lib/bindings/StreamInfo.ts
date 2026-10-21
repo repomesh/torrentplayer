@@ -19,4 +19,8 @@ fileName: string,
 /**
  * Size in bytes.
  */
-length: number, };
+length: number, 
+/**
+ * Saved position worth offering to resume, if the preference is enabled.
+ */
+resumePositionSecs: number | null, };

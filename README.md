@@ -153,6 +153,8 @@ sources, details, and where other tools are the better fit.
 - **Courses, not file lists.** Lectures are natural-sorted ("Lecture 2" before "Lecture 10"), a
   torrent's videos appear as one course in the queue, and a file explorer previews pictures,
   text, and subtitles inside a torrent before you play anything.
+- **Resume across restarts.** Watch progress is saved locally, shown in the queue and Library,
+  and reopening an unfinished video offers to continue from its last position or start over.
 
 ### Network and privacy controls
 
@@ -211,7 +213,8 @@ phone home. Its only network traffic is:
 
 All of it goes through your selected VPN, WireGuard tunnel, or proxy, and nothing is sent while
 the kill switch is engaged. See the [threat model](docs/threat-model.md) and
-[network modes](docs/network.md).
+[network modes](docs/network.md). Your queue, settings, and watch progress stay on this computer;
+the playback library is a user-only local SQLite database and is never sent anywhere.
 
 ## Get TorrentStream
 
@@ -291,7 +294,7 @@ bandwidth limits. Next:
 
 - [x] Seeding controls: keep sharing after watching, ratio and time targets, peer limits
 - [x] Cache size limit and automatic clean-up of old downloads
-- [ ] Resume where you left off
+- [x] Resume where you left off
 - [ ] More search sources: Internet Archive, Academic Torrents, and your own
 - [ ] libmpv player for codecs the system web engine cannot play
 - [ ] Signed releases for every platform

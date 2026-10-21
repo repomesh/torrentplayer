@@ -20,6 +20,8 @@ export type View =
   | { name: 'torrent'; torrentId: number }
   /** The video playing (or a placeholder) and the queue beside it. */
   | { name: 'player' }
+  /** Playback history and saved positions. */
+  | { name: 'library' }
   | { name: 'settings'; section: SettingsSection };
 
 export type ViewName = View['name'];

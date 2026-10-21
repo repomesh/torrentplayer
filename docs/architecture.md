@@ -61,7 +61,7 @@ including the player controls overlaid on the video.
 | `lumen-media`              | Track probe of container headers; subtitle matching and parsing (pure Rust); ffprobe and seek thumbnails (Phase 2)       | No                    | 1, 2  |
 | `lumen-player`             | libmpv wrapper and fallback player; **only crate with `unsafe`**                                                         | FFI                   | 2     |
 | `lumen-course`             | Video detection, filtering, natural sort, course grouping; no I/O                                                        | No                    | 3     |
-| `lumen-library`            | Play queue (versioned JSON, atomic writes); SQLite library, progress, resume positions (Phase 4)                         | No                    | 1, 4  |
+| `lumen-library`            | Play queue (versioned JSON, atomic writes); SQLite library, progress, resume positions                                   | No                    | 1, 4  |
 | `lumen-search`             | Search: emberglow event stream (fan-out fallback), strict parsing, merging, relevance and watch-score ranking, best pick | No                    | 4     |
 | `lumen-net`                | Network modes, WireGuard, SOCKS5, kill switch                                                                            | No                    | 5     |
 | `lumen-app` (`src-tauri/`) | Tauri shell: IPC commands, events, app state                                                                             | Tauri                 | 0     |
@@ -144,6 +144,15 @@ time. Every view stays reachable from the rail.
   `playback.autoplayNext` is off. The playlist panel beside the player collapses with Q, and
   Shift+N plays the next item. Fullscreen is requested on the stage that holds the player,
   not the player itself, so it stays on when the next video's player replaces the last one.
+- **Library and resume** (`lumen-library`, `src/lib/library.ts`) identify a playable file by
+  `(info hash, file index)` and store its safe replay link, display metadata, last position,
+  duration, and completion state in `library.sqlite3`. Ordinary playback is checkpointed every
+  five seconds; the first report, seeks, completion, stream stop, and app shutdown force a save.
+  Checkpoints carry a process-local revision so blocking writes cannot move the saved playhead
+  backward if they finish out of order. An unavailable database disables history for that run,
+  never playback. The `library-changed` event updates the Library and queue without polling.
+  Reopening an unfinished item at least 10 seconds in (and not within the final 10 seconds) offers
+  Resume or Start over when `playback.resumePosition` is on.
 - **One queue, in Playing.** The playlist panel beside the player is the queue (there is no
   separate Queue page); Playing is reachable with nothing playing, showing a placeholder. Its
   ⋯ menu holds "Play ready videos first", "Keep course order", "Clear played", and "Clear all".

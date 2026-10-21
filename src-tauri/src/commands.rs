@@ -10,12 +10,12 @@ use lumen_prioritize::{Anchor, Purpose};
 use lumen_stream::StreamId;
 use lumen_torrent::{FileKind, TorrentInfo, TorrentSource, TorrentState, magnet_link};
 use serde::{Deserialize, Serialize};
-use tauri::State;
 use tauri::ipc::{InvokeBody, Request};
+use tauri::{AppHandle, State};
 use ts_rs::TS;
 
 use crate::audio::TrackProbe;
-use crate::core::{ActiveStream, AppState, Core, PlayerMetrics};
+use crate::core::{ActiveStream, AppState, Core, PlayerMetrics, ProgressTracker};
 use crate::error::IpcError;
 
 /// Longest a torrent may take to load (link resolved, metadata found, added). A dead magnet
@@ -232,14 +232,18 @@ pub(crate) struct StreamInfo {
     pub file_name: String,
     /// Size in bytes.
     pub length: u64,
+    /// Saved position worth offering to resume, if the preference is enabled.
+    pub resume_position_secs: Option<f64>,
 }
 
 /// Starts streaming one video file: selects it for download, starts prioritization, and
 /// publishes it on the loopback server.
 #[tauri::command]
 pub(crate) async fn start_stream(
+    app: AppHandle,
     state: State<'_, AppState>,
     downloads: State<'_, crate::downloads::DownloadsState>,
+    library: State<'_, crate::library::LibraryState>,
     settings: State<'_, crate::settings::SettingsState>,
     torrent_id: usize,
     file_index: usize,
@@ -257,6 +261,24 @@ pub(crate) async fn start_stream(
             "Only video and audio files can be streamed.",
         ));
     }
+    let file_name = entry
+        .path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&entry.path)
+        .to_owned();
+    let library_media = lumen_library::Media {
+        info_hash: info.info_hash.to_ascii_lowercase(),
+        file_index: u32::try_from(file_index)
+            .map_err(|_| IpcError::invalid("fileIndex is out of range."))?,
+        source: core
+            .engine
+            .magnet_link(torrent_id)
+            .unwrap_or_else(|_| magnet_link(&info.info_hash, &info.name, &[])),
+        title: library_text(&file_name),
+        torrent_name: library_text(&info.name),
+        size_bytes: i64::try_from(entry.len).ok().map(|_| entry.len),
+    };
     crate::cache::mark_unfinished(&settings.active_download_dir(), &info.info_hash);
     // The queue downloader may have paused or limited this torrent in the background; what is
     // watched always gets the whole link.
@@ -287,6 +309,8 @@ pub(crate) async fn start_stream(
                 file: file_index,
                 session,
                 metrics: PlayerMetrics::default(),
+                media: library_media.clone(),
+                progress: ProgressTracker::default(),
                 tracks,
             },
         );
@@ -297,23 +321,31 @@ pub(crate) async fn start_stream(
         %engine,
         "stream started"
     );
+    let resume_position_secs = match library.opened(&app, library_media).await {
+        Ok(item) if settings.current().playback.resume_position => {
+            lumen_library::resume_position(&item)
+        }
+        Ok(_) => None,
+        Err(error) => {
+            tracing::warn!(%error, "could not add the stream to playback history");
+            None
+        }
+    };
     Ok(StreamInfo {
         stream_id: published.id,
         url: published.url,
-        file_name: entry
-            .path
-            .rsplit('/')
-            .next()
-            .unwrap_or(&entry.path)
-            .to_owned(),
+        file_name,
         length: entry.len,
+        resume_position_secs,
     })
 }
 
 /// Reports the player's position. Call on every seek and about once a second during playback.
 #[tauri::command]
 pub(crate) async fn report_playback(
+    app: AppHandle,
     state: State<'_, AppState>,
+    library: State<'_, crate::library::LibraryState>,
     settings: State<'_, crate::settings::SettingsState>,
     stream_id: u64,
     position_secs: f64,
@@ -327,10 +359,27 @@ pub(crate) async fn report_playback(
     let duration_secs =
         duration_secs.filter(|d| d.is_finite() && *d > 0.0 && *d <= MAX_DURATION_SECS);
     let core = state.core().await?;
-    let torrent = core.with_stream(stream_id, |s| {
+    let (torrent, progress) = core.with_stream(stream_id, |s| {
         s.session.update(position_secs, duration_secs);
-        s.torrent
+        let save = s.progress.update(position_secs, duration_secs);
+        (
+            s.torrent,
+            save.then(|| {
+                (
+                    s.media.clone(),
+                    s.progress.duration_secs,
+                    library.revision(),
+                )
+            }),
+        )
     })?;
+    if let Some((media, known_duration, revision)) = progress
+        && let Err(error) = library
+            .record(&app, media, position_secs, known_duration, revision)
+            .await
+    {
+        tracing::warn!(%error, "could not save playback progress");
+    }
     if let Some(duration) = duration_secs
         && let (Ok(info), Ok(backend)) = (core.engine.info(torrent), core.engine.backend(torrent))
     {
@@ -544,7 +593,9 @@ fn piece_map(have: &[bool], range: std::ops::Range<u64>, cells: usize) -> Vec<u8
 /// Stops a stream: unpublishes it and ends prioritization. Downloaded data is kept.
 #[tauri::command]
 pub(crate) async fn stop_stream(
+    app: AppHandle,
     state: State<'_, AppState>,
+    library: State<'_, crate::library::LibraryState>,
     stream_id: StreamId,
 ) -> Result<(), IpcError> {
     let core = state.core().await?;
@@ -555,13 +606,52 @@ pub(crate) async fn stop_stream(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(&stream_id);
-    if removed.is_none() {
+    let Some(removed) = removed else {
         return Err(IpcError::new(
             crate::error::ErrorKind::NotFound,
             "Unknown stream.",
         ));
+    };
+    if let Some(position) = removed.progress.position_secs
+        && let Err(error) = library
+            .record(
+                &app,
+                removed.media,
+                position,
+                removed.progress.duration_secs,
+                library.revision(),
+            )
+            .await
+    {
+        tracing::warn!(%error, "could not save final playback progress");
     }
     Ok(())
+}
+
+/// Plain single-line text for the library. Torrent metadata is untrusted and can be much longer
+/// than a useful label.
+fn library_text(value: &str) -> String {
+    let clean: String = value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let trimmed = clean.trim();
+    let mut chars = trimmed.chars();
+    let clipped: String = chars
+        .by_ref()
+        .take(lumen_library::MAX_TITLE_CHARS)
+        .collect();
+    if clipped.is_empty() {
+        "Untitled".to_owned()
+    } else {
+        clipped
+    }
 }
 
 /// Development-only automation: a torrent to add and play on start-up, from the
@@ -646,5 +736,17 @@ mod tests {
         assert_eq!(piece_map(&have, 2..4, 10), vec![0, 0]);
         assert_eq!(piece_map(&have, 20..30, 10), vec![0]);
         assert_eq!(piece_map(&[], 0..0, 10), vec![0]);
+    }
+
+    #[test]
+    fn library_labels_are_plain_bounded_text() {
+        assert_eq!(library_text("  Lecture\n2\t "), "Lecture 2");
+        assert_eq!(library_text("\0\n"), "Untitled");
+        assert_eq!(
+            library_text(&"x".repeat(lumen_library::MAX_TITLE_CHARS + 5))
+                .chars()
+                .count(),
+            lumen_library::MAX_TITLE_CHARS
+        );
     }
 }

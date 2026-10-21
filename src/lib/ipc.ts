@@ -13,6 +13,7 @@ import type { AppInfo } from './bindings/AppInfo';
 import type { DevAutoplay } from './bindings/DevAutoplay';
 import type { IpcError } from './bindings/IpcError';
 import type { PlayerMetricKind } from './bindings/PlayerMetricKind';
+import type { LibraryItem } from './bindings/LibraryItem';
 import type { StreamAudio } from './bindings/StreamAudio';
 import type { StreamInfo } from './bindings/StreamInfo';
 import type { StreamStats } from './bindings/StreamStats';
@@ -22,6 +23,7 @@ export type {
   AppInfo,
   DevAutoplay,
   IpcError,
+  LibraryItem,
   PlayerMetricKind,
   StreamAudio,
   StreamInfo,
@@ -109,6 +111,16 @@ export function parseSubtitles(bytes: Uint8Array): Promise<SubtitleCues> {
 /** Stops a stream. Downloaded data is kept. */
 export function stopStream(streamId: number): Promise<void> {
   return invoke<undefined>('stop_stream', { streamId });
+}
+
+// --- Library ------------------------------------------------------------------------------
+
+/** Event carrying one item whose playback history changed. */
+export const LIBRARY_CHANGED_EVENT = 'library-changed';
+
+/** Saved playback history, most recently used first. */
+export function libraryItems(): Promise<LibraryItem[]> {
+  return invoke<LibraryItem[]>('library_items');
 }
 
 /** Development builds only: a torrent to add and play automatically, if configured. */

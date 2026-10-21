@@ -35,6 +35,7 @@ fn main() {
             "preload_next",
             "queue_readiness",
             "queue_downloads",
+            "library_items",
             "preview_file",
             "get_settings",
             "update_settings",

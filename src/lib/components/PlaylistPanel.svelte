@@ -5,6 +5,7 @@
    * collapses to a slim strip (Q toggles it), and is hidden in fullscreen.
    */
   import type { FileSummary } from '../bindings/FileSummary';
+  import type { LibraryItem } from '../bindings/LibraryItem';
   import type { ReadinessState } from '../bindings/ReadinessState';
   import { byId, describeLink, fastestItem, type DownloadsSnapshot } from '../downloads';
   import {
@@ -49,6 +50,8 @@
     onClear: () => void;
     /** Background downloads of the queue (`queue_downloads`), once known. */
     downloads?: DownloadsSnapshot | null;
+    /** Saved watch progress, keyed by torrent info hash and file index. */
+    watchProgress?: ReadonlyMap<string, LibraryItem>;
     /** Pauses or resumes background downloading of items. */
     onTogglePause?: (ids: readonly string[], paused: boolean) => void;
     /** Skips (unticks) or restores items. */
@@ -83,6 +86,7 @@
     onKeepCourseOrder,
     onClear,
     downloads = null,
+    watchProgress = new Map(),
     onTogglePause,
     onToggleSkip,
     onOrder,
@@ -332,6 +336,7 @@
           {onChooseFiles}
           downloads={byItem}
           {fastest}
+          {watchProgress}
           {onTogglePause}
           {onToggleSkip}
         />
