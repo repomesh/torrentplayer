@@ -117,6 +117,6 @@ panic = "unwind" # Required so FFI callbacks can catch panics at the C boundary.
 strip = "symbols"
 
 [patch.crates-io]
-# librqbit's DHT node, vendored so a single bad UDP datagram on Windows cannot end it (see
+# librqbit's DHT node, vendored for scoped transports and Windows datagram-error handling (see
 # vendor/librqbit-dht/LUMEN.md). Used by librqbit and lumen-swarm alike.
 librqbit-dht = { path = "vendor/librqbit-dht" }

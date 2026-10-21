@@ -9,6 +9,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- DHT peer discovery now uses bound VPN sockets and the built-in WireGuard tunnel. SOCKS5
+  proxies with UDP ASSOCIATE support carry DHT and UDP trackers, including magnet metadata
+  discovery, without falling back to direct UDP or target DNS.
 - lumen-swarm now uploads verified pieces with cancellable, bounded reads, reports per-torrent
   and total upload rates, and shares the global upload limit with librqbit.
 - Seeding can continue after playback until a ratio or time target is reached, and the configured

@@ -976,8 +976,40 @@ fn datagram_error(e: &std::io::Error) -> bool {
     ) || (cfg!(windows) && e.raw_os_error() == Some(WSAEMSGSIZE))
 }
 
+enum DhtSocket {
+    Native(UdpSocket),
+    Scoped(Arc<dyn crate::DhtTransport>),
+}
+
+impl DhtSocket {
+    fn bind_addr(&self) -> SocketAddr {
+        match self {
+            Self::Native(s) => s.bind_addr(),
+            Self::Scoped(s) => s.local_addr(),
+        }
+    }
+    async fn send_to(&self, bytes: &[u8], target: SocketAddr) -> std::io::Result<usize> {
+        match self {
+            Self::Native(s) => s.send_to(bytes, target).await,
+            Self::Scoped(s) => s.send_to(bytes, target).await,
+        }
+    }
+    async fn recv_from(&self, bytes: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        match self {
+            Self::Native(s) => s.recv_from(bytes).await,
+            Self::Scoped(s) => s.recv_from(bytes).await,
+        }
+    }
+    async fn resolve(&self, host: &str) -> std::io::Result<Vec<SocketAddr>> {
+        match self {
+            Self::Native(_) => Ok(tokio::net::lookup_host(host).await?.collect()),
+            Self::Scoped(s) => s.resolve(host).await,
+        }
+    }
+}
+
 struct DhtWorker {
-    socket: UdpSocket,
+    socket: DhtSocket,
     dht: Arc<DhtState>,
 }
 
@@ -991,10 +1023,11 @@ impl DhtWorker {
     }
 
     async fn bootstrap_hostname(&self, hostname: &str) -> crate::Result<()> {
-        let addrs = tokio::net::lookup_host(hostname)
+        let addrs = self
+            .socket
+            .resolve(hostname)
             .await
-            .map_err(|err| Error::lookup(hostname, err))?
-            .collect::<Vec<_>>();
+            .map_err(|err| Error::lookup(hostname, err))?;
         let v4 = RecursiveRequest::find_node_for_routing_table(
             self.dht.clone(),
             self.dht.id,
@@ -1159,7 +1192,7 @@ impl DhtWorker {
 
     async fn framer(
         &self,
-        socket: &UdpSocket,
+        socket: &DhtSocket,
         mut input_rx: UnboundedReceiver<WorkerSendRequest>,
         output_tx: Sender<(Message<ByteBufOwned>, SocketAddr)>,
     ) -> crate::Result<()> {
@@ -1295,6 +1328,8 @@ impl DhtWorker {
 
 #[derive(Default)]
 pub struct DhtConfig<'a> {
+    /// If supplied, no native UDP socket or system bootstrap DNS lookup is created.
+    pub transport: Option<Arc<dyn crate::DhtTransport>>,
     pub peer_id: Option<Id20>,
     pub bootstrap_addrs: Option<Vec<String>>,
     pub routing_table: Option<RoutingTable>,
@@ -1319,15 +1354,21 @@ impl DhtState {
             let addr = config
                 .listen_addr
                 .unwrap_or((Ipv6Addr::UNSPECIFIED, 0).into());
-            let socket = UdpSocket::bind_udp(
-                addr,
-                librqbit_dualstack_sockets::BindOpts {
-                    request_dualstack: true,
-                    reuseport: false,
-                    device: config.bind_device,
-                },
-            )
-            .map_err(|e| Error::Bind(Box::new(e)))?;
+            let socket = if let Some(transport) = config.transport.take() {
+                DhtSocket::Scoped(transport)
+            } else {
+                DhtSocket::Native(
+                    UdpSocket::bind_udp(
+                        addr,
+                        librqbit_dualstack_sockets::BindOpts {
+                            request_dualstack: true,
+                            reuseport: false,
+                            device: config.bind_device,
+                        },
+                    )
+                    .map_err(|e| Error::Bind(Box::new(e)))?,
+                )
+            };
 
             let listen_addr = socket.bind_addr();
             info!("DHT listening on {:?}", listen_addr);
@@ -1360,6 +1401,9 @@ impl DhtState {
                 {
                     let state = state.clone();
                     async move {
+                        // Added for Lumen: a failed scoped transport must not leave a cached,
+                        // apparently live node. Notify callers when the worker exits too.
+                        let _finished = state.cancellation_token.clone().drop_guard();
                         let worker = DhtWorker { socket, dht: state };
                         worker.start(in_rx, &bootstrap_addrs).await
                     }

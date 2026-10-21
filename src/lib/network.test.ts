@@ -40,7 +40,7 @@ function status(overrides: Partial<NetworkStatus> = {}): NetworkStatus {
 const socks = {
   mode: 'socks5',
   endpoint: '10.64.0.1:1080',
-  udpAllowed: false,
+  udpAllowed: true,
 } satisfies Partial<NetworkStatus>;
 
 beforeEach(() => {
@@ -64,7 +64,7 @@ describe('describeNetwork', () => {
     expect(s).toMatchObject({ tone: 'protected', label: 'Protected · 10.64.0.1' });
     expect(s.details).toContain('Endpoint: 10.64.0.1:1080');
     expect(s.details).toContain('Connected for 2 h 5 min');
-    expect(s.details).toContain('DHT and UDP trackers are off in this mode.');
+    expect(s.details).not.toContain('DHT and UDP trackers are off in this mode.');
 
     const bound = describeNetwork(
       status({

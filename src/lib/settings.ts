@@ -242,9 +242,8 @@ const LATER = new Set([
   'search.sources.academicTorrents',
   'search.openLicenseOnly',
   'search.resultsPerSearch',
-  // Neither engine implements protocol encryption, and the DHT is off behind a proxy.
+  // Neither engine implements protocol encryption.
   'network.encryption',
-  'network.socks5.proxyDht',
 ]);
 
 /** When the setting at `path` takes effect. */

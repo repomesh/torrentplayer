@@ -140,6 +140,7 @@ fn through(proxy: &TestProxy) -> NetworkConfig {
             password: Some(Secret::new("hunter2")),
             remote_dns: true,
             proxy_trackers: true,
+            proxy_dht: true,
         }),
         allow_ipv6: false,
     }

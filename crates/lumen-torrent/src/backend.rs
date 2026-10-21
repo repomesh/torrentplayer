@@ -686,7 +686,7 @@ impl StreamEngine {
         Ok((resolved.torrent_bytes, peers))
     }
 
-    /// Peers from a magnet's UDP trackers through a bound VPN interface or WireGuard.
+    /// Peers from scoped DHT and UDP trackers through an interface, WireGuard, or SOCKS5 relay.
     /// librqbit's unbound UDP stays disabled; TorrentStream hands it peers from scoped sockets.
     async fn protected_udp_peers(&self, link: &str) -> Vec<SocketAddr> {
         let Some(network) = self.network.as_ref() else {
@@ -707,16 +707,33 @@ impl StreamEngine {
             .filter(|(key, _)| key == "tr")
             .filter_map(|(_, value)| url::Url::parse(&value).ok())
             .collect();
-        let peers = lumen_swarm::udp_tracker::announce_all(
-            Some(network),
-            &trackers,
-            info_hash,
-            Duration::from_secs(12),
-        )
-        .await;
+        let tracker_peers = async {
+            if !self.config.public_discovery || !policy.trackers_allowed {
+                return Vec::new();
+            }
+            lumen_swarm::udp_tracker::announce_all(
+                Some(network),
+                &trackers,
+                info_hash,
+                Duration::from_secs(12),
+            )
+            .await
+        };
+        let dht_peers = async {
+            if !self.config.public_discovery || !policy.dht_allowed {
+                return Vec::new();
+            }
+            lumen_swarm::dht_bootstrap_peers(network.clone(), info_hash, Duration::from_secs(12))
+                .await
+        };
+        tokio::pin!(tracker_peers, dht_peers);
+        let peers = tokio::select! {
+            peers = &mut tracker_peers => if peers.is_empty() { dht_peers.await } else { peers },
+            peers = &mut dht_peers => if peers.is_empty() { tracker_peers.await } else { peers },
+        };
         info!(
             peers = peers.len(),
-            "UDP tracker bootstrap completed through the protected network"
+            "Peer discovery bootstrap completed through the protected network"
         );
         peers
     }

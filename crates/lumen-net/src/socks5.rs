@@ -3,7 +3,8 @@
 //! A strict SOCKS5 handshake: the client side (RFC 1928, with RFC 1929 username/password
 //! authentication) and the server side used by TorrentStream's loopback bridge.
 //!
-//! Only `CONNECT` is implemented. Every length and version byte is checked, nothing past the
+//! The client supports CONNECT and UDP ASSOCIATE; the loopback server accepts only CONNECT.
+//! Every length and version byte is checked, nothing past the
 //! handshake is read from the stream, and credentials are wiped from memory after sending.
 
 use std::fmt;
@@ -176,6 +177,24 @@ where
     let request = encode_request(target)?;
     negotiate(stream, credentials).await?;
     stream.write_all(&request).await?;
+    read_reply(stream).await.map(|_| ())
+}
+
+/// Requests a UDP relay after authentication; the TCP stream must stay open for its lifetime.
+///
+/// # Errors
+/// Returns handshake, authentication, or relay refusal errors, without a direct fallback.
+pub async fn udp_associate<S>(
+    stream: &mut S,
+    credentials: Option<(&str, &str)>,
+) -> Result<Target, Socks5Error>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    negotiate(stream, credentials).await?;
+    stream
+        .write_all(&[VERSION, 3, 0, ATYP_V4, 0, 0, 0, 0, 0, 0])
+        .await?;
     read_reply(stream).await
 }
 
@@ -248,7 +267,7 @@ where
     Ok(())
 }
 
-fn encode_request(target: &Target) -> Result<Vec<u8>, Socks5Error> {
+pub(crate) fn encode_request(target: &Target) -> Result<Vec<u8>, Socks5Error> {
     let mut out = vec![VERSION, CMD_CONNECT, 0];
     let port = match target {
         Target::Addr(SocketAddr::V4(a)) => {
@@ -276,7 +295,7 @@ fn encode_request(target: &Target) -> Result<Vec<u8>, Socks5Error> {
     Ok(out)
 }
 
-async fn read_reply<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(), Socks5Error> {
+async fn read_reply<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Target, Socks5Error> {
     let mut head = [0u8; 4];
     stream.read_exact(&mut head).await?;
     if head[0] != VERSION {
@@ -289,13 +308,12 @@ async fn read_reply<S: AsyncRead + Unpin>(stream: &mut S) -> Result<(), Socks5Er
     if head[2] != 0 {
         return Err(Socks5Error::Protocol("reserved byte is not zero"));
     }
-    // The bound address is not needed, but it must be consumed exactly.
-    read_address(stream, head[3]).await?;
-    Ok(())
+    // CONNECT consumes this address; UDP ASSOCIATE also uses it to locate the relay.
+    read_address(stream, head[3]).await
 }
 
 /// Reads an address of type `atyp` and a port. Unknown types are a protocol error.
-async fn read_address<S: AsyncRead + Unpin>(
+pub(crate) async fn read_address<S: AsyncRead + Unpin>(
     stream: &mut S,
     atyp: u8,
 ) -> Result<Target, Socks5Error> {
@@ -514,6 +532,30 @@ mod tests {
     }
 
     const OK_REPLY_V4: [u8; 10] = [5, 0, 0, 1, 10, 0, 0, 1, 0x1F, 0x90];
+
+    #[tokio::test]
+    async fn udp_associate_authenticates_and_reads_the_relay() {
+        let (mut client, mut server) = duplex(1024);
+        let task = tokio::spawn(async move {
+            for (expect, respond) in [
+                (vec![5, 2, 0, 2], vec![5, 2]),
+                (b"\x01\x05alice\x06secret".to_vec(), vec![1, 0]),
+                (vec![5, 3, 0, 1, 0, 0, 0, 0, 0, 0], OK_REPLY_V4.to_vec()),
+            ] {
+                let mut got = vec![0; expect.len()];
+                server.read_exact(&mut got).await.unwrap();
+                assert_eq!(got, expect);
+                server.write_all(&respond).await.unwrap();
+            }
+        });
+        assert_eq!(
+            udp_associate(&mut client, Some(("alice", "secret")))
+                .await
+                .unwrap(),
+            Target::Addr(addr("10.0.0.1:8080"))
+        );
+        task.await.unwrap();
+    }
 
     #[tokio::test]
     async fn connects_without_auth_to_an_ipv4_address() {

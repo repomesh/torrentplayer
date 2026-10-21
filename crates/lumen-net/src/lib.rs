@@ -13,9 +13,9 @@
 //!   It requires no system adapter or administrator rights and never falls back to direct.
 //!
 //! In every mode except direct, the kill switch applies: until the mode is verified, and
-//! whenever a health check fails, connections are refused and existing ones are closed. UDP
-//! trackers can use sockets scoped to the selected interface or WireGuard tunnel. Unbound
-//! UDP (including DHT and uTP) stays disabled in protected modes; SOCKS5 refuses UDP.
+//! whenever a health check fails, connections are refused and existing ones are closed. DHT and UDP
+//! trackers use sockets scoped to the selected interface, WireGuard tunnel, or SOCKS5 UDP relay.
+//! Unbound native UDP (including uTP) stays disabled in protected modes.
 //!
 //! HTTP clients and librqbit reach the network through a loopback SOCKS5 bridge that applies the
 //! same rules ([`Network::configure_http`], [`Network::bridge_proxy_url`]). See
@@ -32,6 +32,7 @@ mod mode;
 mod network;
 mod secret;
 pub mod socks5;
+mod socks_udp;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_util;
 #[cfg(test)]

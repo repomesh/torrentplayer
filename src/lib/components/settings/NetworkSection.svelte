@@ -279,10 +279,12 @@
             : ''}{status.trafficAllowed && !status.udpAllowed
             ? ' · DHT and UDP off in this mode'
             : ''}{status.trafficAllowed && status.udpAllowed && status.mode === 'bindInterface'
-            ? ' · UDP trackers through the interface; DHT off'
+            ? ' · DHT and UDP trackers through the interface'
             : status.trafficAllowed && status.udpAllowed && status.mode === 'wireGuard'
-              ? ' · UDP trackers through WireGuard; DHT off'
-              : ''}
+              ? ' · DHT and UDP trackers through WireGuard'
+              : status.trafficAllowed && status.mode === 'socks5'
+                ? ' · UDP relay when supported by the proxy'
+                : ''}
         </dd>
         {#if status.lastCheckMs !== null}
           <dt>Last checked</dt>
@@ -493,11 +495,17 @@
     <Field
       id="network-proxy-dht"
       label="DHT through the proxy"
-      help="Always off behind a proxy: TorrentStream cannot send DHT (UDP) traffic through SOCKS5 yet, and never sends it around the proxy."
+      path="network.socks5.proxyDht"
+      help="Find peers through SOCKS5 UDP ASSOCIATE. Requires a proxy with UDP support; never falls back to direct traffic."
     >
-      <output id="network-proxy-dht" class="fixed" aria-describedby="network-proxy-dht-help">
-        Off
-      </output>
+      <Toggle
+        id="network-proxy-dht"
+        checked={n.socks5.proxyDht}
+        describedby="network-proxy-dht-help"
+        onchange={(v) => {
+          update('network.socks5.proxyDht', v);
+        }}
+      />
     </Field>
   {/if}
 

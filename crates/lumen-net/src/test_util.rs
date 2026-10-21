@@ -13,6 +13,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::socks5::{self, Reply, ServerAuth, Target};
+#[path = "test_udp_proxy.rs"]
+mod udp;
+pub use udp::TestUdpProxy;
 
 /// One connection relayed by a [`TestProxy`].
 #[derive(Debug, Clone, PartialEq, Eq)]

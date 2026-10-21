@@ -216,8 +216,7 @@ async fn apply(app: &AppHandle, network: &Network, config: NetworkConfig) {
 /// back to a direct connection.
 ///
 /// There is no kill-switch setting: every mode except direct always fails closed. `proxy_dht`
-/// has no effect yet: the DHT is off in every protected mode, because TorrentStream cannot send UDP
-/// through a proxy (no UDP ASSOCIATE) and never sends it around one. `encryption` is not
+/// controls DHT through SOCKS5 UDP ASSOCIATE, without a direct fallback. `encryption` is not
 /// implemented by either engine.
 pub(crate) fn config_from_settings(
     settings: &NetworkSettings,
@@ -241,6 +240,7 @@ pub(crate) fn config_from_settings(
                 password,
                 remote_dns: s.proxy_dns,
                 proxy_trackers: s.proxy_trackers,
+                proxy_dht: s.proxy_dht,
             })
         }
         lumen_settings::NetworkMode::WireGuard => {

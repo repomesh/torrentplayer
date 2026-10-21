@@ -127,6 +127,7 @@ describe('availability', () => {
     expect(availability('playback.defaultSpeed')).toBe('live');
     expect(availability('search.hideAdult')).toBe('live');
     expect(availability('network.socks5.proxyDns')).toBe('live');
+    expect(availability('network.socks5.proxyDht')).toBe('live');
     expect(availability('network.encryption')).toBe('later');
   });
 });

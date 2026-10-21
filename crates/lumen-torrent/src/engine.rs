@@ -361,7 +361,7 @@ impl Engine {
             .collect();
         if !has_peers && !pairs.iter().any(|(key, _)| key == "tr") {
             return Err(EngineError::Unsupported(
-                "This magnet link has no trackers TorrentStream can use through a VPN or proxy (UDP                  trackers and the DHT are off in this mode). Try a .torrent file instead.",
+                "No peers or usable HTTP trackers were found through the selected network. The proxy may not support UDP; try another tracker or a .torrent file.",
             ));
         }
         url.query_pairs_mut().clear().extend_pairs(pairs);
