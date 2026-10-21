@@ -5,6 +5,9 @@ look for. By participating, you agree to follow the [Code of Conduct](CODE_OF_CO
 
 ## Ways to contribute
 
+- **Come talk** on the [TorrentStream Discord server](https://discord.gg/fVkWSZAafp): ask questions, share ideas,
+  and help other users. Decisions are still made in issues and pull requests, so anything worth
+  keeping ends up there.
 - **Report bugs or performance regressions** with the issue templates. For streaming problems,
   include the metrics from the debug overlay (press <kbd>D</kbd>) and, if possible, a link to
   the openly licensed torrent you were watching.

@@ -3,6 +3,6 @@ contact_links:
   - name: Report a security vulnerability
     url: https://github.com/torrent-stream/torrentstream/security/advisories/new
     about: Please report vulnerabilities privately, never in a public issue.
-  - name: Ask a question
-    url: https://github.com/torrent-stream/torrentstream/discussions
-    about: Questions and ideas are welcome in Discussions.
+  - name: Ask a question or come talk
+    url: https://discord.gg/fVkWSZAafp
+    about: Questions, ideas, and help with setup are welcome on the TorrentStream Discord server.
