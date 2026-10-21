@@ -14,6 +14,7 @@ made and saved automatically about half a second later.
 | Settings                | `settings.json` in the app config folder (see below)                        |
 | Passwords and keys      | The OS credential store, never in `settings.json` (see [Secrets](#secrets)) |
 | Downloaded lecture data | `TorrentPlayer` in your Downloads folder, unless you choose another folder  |
+| DHT routing tables      | `dht` in the app data folder (see below), from Direct mode only             |
 
 The app config folder is `%APPDATA%\io.torrentplayer.desktop` on Windows,
 `~/Library/Application Support/io.torrentplayer.desktop` on macOS, and
@@ -25,6 +26,14 @@ unless you chose a folder yourself, they are moved to the new default at start-u
 `torrentplayer-swarm` holds TorrentPlayer's engine cache (one `pieces.dat` per torrent, not playable
 files) and `librqbit` holds downloads made with the librqbit engine (the `rqbit` engine
 choice) as their own files.
+
+The app data folder is the same as the config folder on Windows and macOS, and
+`~/.local/share/io.torrentplayer.desktop` on Linux. Its `dht` folder keeps the DHT nodes each
+engine knew (`swarm.json`, `librqbit.json`), so after a restart magnet links find peers without
+starting the search from the bootstrap servers. They are saved every minute and when the node
+stops, and only in Direct mode: a protected mode starts with a fresh node id and saves nothing,
+so the id seen over a VPN or proxy is never the one seen from your own address. Deleting the
+folder is safe; TorrentPlayer starts from the bootstrap servers again.
 
 Versions from before the rename to TorrentPlayer used `io.torrentstream.desktop` (and, earlier
 still, `io.github.lumen-app.lumen`) for these folders, `TorrentStream` in the Downloads folder,

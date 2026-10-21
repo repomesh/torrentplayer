@@ -150,6 +150,9 @@ pub struct StreamEngineConfig {
     pub upload_limit_bps: Option<NonZeroU32>,
     /// Maximum connected peers per torrent.
     pub peer_limit: usize,
+    /// Folder where each engine keeps its DHT routing tables between runs (direct mode only),
+    /// so magnet links find peers sooner after a restart. `None` keeps nothing.
+    pub dht_state_dir: Option<PathBuf>,
 }
 
 impl StreamEngineConfig {
@@ -163,6 +166,7 @@ impl StreamEngineConfig {
             download_limit_bps: None,
             upload_limit_bps: None,
             peer_limit: 40,
+            dht_state_dir: None,
         }
     }
 }
@@ -361,6 +365,7 @@ impl StreamEngine {
         // Magnet links come here too, and their trackers are often dead: the DHT finds their
         // peers (and runs only while the network policy allows UDP, as for librqbit).
         swarm_config.enable_dht = config.public_discovery;
+        swarm_config.dht_state_file = config.dht_state_dir.as_ref().map(|d| d.join("swarm.json"));
         swarm_config.network.clone_from(&network);
         // The main engine serves peers that connect to us, when that is turned on (see
         // `StreamEngine::set_incoming`); the thumbnail engine never does.
@@ -454,6 +459,12 @@ impl StreamEngine {
         }
         let mut c = EngineConfig::new(self.config.download_dir.join("librqbit"));
         c.enable_dht = self.config.public_discovery;
+        // A file of its own: the two engines run separate nodes, which must not share an id.
+        c.dht_state_file = self
+            .config
+            .dht_state_dir
+            .as_ref()
+            .map(|d| d.join("librqbit.json"));
         c.enable_trackers = self.config.public_discovery;
         c.network.clone_from(&self.network);
         c.peer_limit = Some(self.config.peer_limit);
