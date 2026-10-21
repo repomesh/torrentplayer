@@ -7,6 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `torrentplayer-bench` measures streaming with incoming peers only (`local --inbound`), how
+  closely an engine holds a download limit that changes mid-transfer (`limit`), and start-up
+  from a saved DHT state (`--dht-state`, `--no-trackers`). See `docs/performance.md`.
+
 ## [0.3.0] - 2026-10-21
 
 ### Changed

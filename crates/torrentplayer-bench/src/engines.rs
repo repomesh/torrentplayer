@@ -3,12 +3,14 @@
 //! The two engines under test, behind one interface so both are measured identically.
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 use futures_util::future::BoxFuture;
+use torrentplayer_net::{IncomingConfig, Network, NetworkConfig, NetworkOptions};
 use torrentplayer_stream::{MediaReader, MediaSource};
 use torrentplayer_swarm::{Metainfo, Swarm, SwarmConfig, Torrent};
 use torrentplayer_torrent::{
@@ -35,6 +37,18 @@ impl std::str::FromStr for EngineKind {
             "rqbit" | "librqbit" => Ok(Self::Rqbit),
             "swarm" | "torrentplayer" => Ok(Self::Swarm),
             other => bail!("unknown engine {other:?}; expected `rqbit` or `swarm`"),
+        }
+    }
+}
+
+impl EngineKind {
+    /// The engine's DHT state file in [`BenchConfig::dht_state_dir`], named as in the app's
+    /// data folder; `None` for librqbit, which the app gives no saved state.
+    #[must_use]
+    pub fn dht_state_file(self) -> Option<&'static str> {
+        match self {
+            Self::Rqbit => None,
+            Self::Swarm => Some("swarm.json"),
         }
     }
 }
@@ -84,6 +98,9 @@ pub(crate) enum BenchEngine {
     Swarm {
         swarm: Swarm,
         torrent: Option<Torrent>,
+        /// The network manager whose listener takes incoming peers, with
+        /// [`BenchConfig::incoming`].
+        network: Option<Network>,
     },
 }
 
@@ -97,9 +114,15 @@ impl BenchEngine {
             EngineKind::Rqbit => {
                 let mut c = EngineConfig::new(dir);
                 c.enable_dht = config.public_swarm && config.dht;
-                c.enable_trackers = config.public_swarm || config.local_tracker;
+                c.enable_trackers =
+                    (config.public_swarm && config.trackers) || config.local_tracker;
                 c.download_limit_bps = config.download_limit_bps;
                 c.peer_limit = config.peer_limit;
+                // librqbit runs its own listener, on every interface as in the app (direct mode
+                // only). It announces no port for a loopback listener.
+                if config.incoming {
+                    c.listen_addr = Some((Ipv6Addr::UNSPECIFIED, 0).into());
+                }
                 Self::Rqbit {
                     engine: Engine::start(c).await?,
                     id: None,
@@ -108,8 +131,31 @@ impl BenchEngine {
             EngineKind::Swarm => {
                 let mut c = SwarmConfig::new(dir);
                 c.scheduler = config.scheduler.clone();
-                c.enable_trackers = config.public_swarm || config.local_tracker;
+                c.enable_trackers =
+                    (config.public_swarm && config.trackers) || config.local_tracker;
                 c.enable_dht = config.public_swarm && config.dht;
+                c.dht_state_file = config
+                    .dht_state_dir
+                    .as_ref()
+                    .zip(kind.dht_state_file())
+                    .map(|(d, f)| d.join(f));
+                // As in the app: the network manager listens (direct mode: every interface, a
+                // random port) and hands accepted connections to the engine, which announces
+                // the port to trackers.
+                let network = if config.incoming {
+                    let network =
+                        Network::start(NetworkConfig::default(), NetworkOptions::default()).await?;
+                    network.set_incoming(IncomingConfig {
+                        enabled: true,
+                        port: 0,
+                        upnp: false,
+                    });
+                    c.network = Some(network.clone());
+                    c.accept_incoming = true;
+                    Some(network)
+                } else {
+                    None
+                };
                 c.allow_local_web_seeds = config.local_web_seeds;
                 c.enable_web_seeds = config.web_seeds;
                 c.download_limit_bps = config.download_limit_bps;
@@ -122,6 +168,7 @@ impl BenchEngine {
                 Self::Swarm {
                     swarm: Swarm::start(c).await?,
                     torrent: None,
+                    network,
                 }
             }
         })
@@ -149,7 +196,7 @@ impl BenchEngine {
                     .collect();
                 Ok((info.name, files))
             }
-            Self::Swarm { swarm, torrent } => {
+            Self::Swarm { swarm, torrent, .. } => {
                 let TorrentSource::File(bytes) = source else {
                     bail!("the swarm engine needs a .torrent file (magnet links arrive in M3)");
                 };
@@ -249,6 +296,15 @@ impl BenchEngine {
         })
     }
 
+    /// Changes the engine's download limit (bytes per second), as the app does when the
+    /// setting changes.
+    pub(crate) fn set_download_limit(&self, limit: Option<NonZeroU32>) {
+        match self {
+            Self::Rqbit { engine, .. } => engine.set_rate_limits(limit, None),
+            Self::Swarm { swarm, .. } => swarm.set_download_limit(limit),
+        }
+    }
+
     /// Removes the torrent and stops the engine.
     pub(crate) async fn finish(self) -> anyhow::Result<()> {
         match self {
@@ -258,11 +314,18 @@ impl BenchEngine {
                 }
                 engine.shutdown().await;
             }
-            Self::Swarm { swarm, torrent } => {
+            Self::Swarm {
+                swarm,
+                torrent,
+                network,
+            } => {
                 if let Some(t) = torrent {
                     t.stop();
                 }
                 swarm.shutdown();
+                if let Some(network) = network {
+                    network.shutdown();
+                }
             }
         }
         Ok(())

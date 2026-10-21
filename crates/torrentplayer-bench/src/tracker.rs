@@ -2,6 +2,8 @@
 
 //! A minimal HTTP tracker on the loopback interface, so benchmarks can model peers that join a
 //! swarm late: each peer is announced only once its [`PeerProfile::announce_after`] has passed.
+//! It also remembers where the viewer said it accepts connections, so seeders can connect to
+//! the viewer instead (see [`crate::link::Dialers`]).
 //!
 //! [`PeerProfile::announce_after`]: crate::link::PeerProfile::announce_after
 
@@ -12,6 +14,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 
 use crate::link::Clock;
 
@@ -25,6 +28,7 @@ pub struct LocalTracker {
     pub url: String,
     peers: Listing,
     announces: Arc<AtomicU64>,
+    announcer: watch::Sender<Option<SocketAddr>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -46,14 +50,16 @@ impl LocalTracker {
         let url = format!("http://{}/announce", listener.local_addr()?);
         let peers: Listing = Arc::default();
         let announces = Arc::new(AtomicU64::new(0));
-        let (listing, count) = (Arc::clone(&peers), Arc::clone(&announces));
+        let viewer = watch::Sender::new(None);
+        let (listing, count, seen) = (Arc::clone(&peers), Arc::clone(&announces), viewer.clone());
         let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
+            while let Ok((stream, from)) = listener.accept().await {
                 let listing = Arc::clone(&listing);
                 let clock = clock.clone();
+                let seen = seen.clone();
                 count.fetch_add(1, Ordering::Relaxed);
                 tokio::spawn(async move {
-                    let _ = answer(stream, interval, &listing, &clock).await;
+                    let _ = answer(stream, from, interval, &listing, &clock, &seen).await;
                 });
             }
         });
@@ -61,6 +67,7 @@ impl LocalTracker {
             url,
             peers,
             announces,
+            announcer: viewer,
             task,
         })
     }
@@ -75,15 +82,42 @@ impl LocalTracker {
     pub fn announces(&self) -> u64 {
         self.announces.load(Ordering::Relaxed)
     }
+
+    /// Where the client that last announced (other than to leave) accepts connections: the
+    /// address it announced from, with the port it announced. Only the viewer announces; the
+    /// seeders never do.
+    #[must_use]
+    pub fn announcer(&self) -> watch::Receiver<Option<SocketAddr>> {
+        self.announcer.subscribe()
+    }
+}
+
+/// The listening address in an announce request head: `from`'s IP with the `port` parameter.
+/// `None` for a `stopped` event or a request without a port.
+fn announced_addr(head: &[u8], from: SocketAddr) -> Option<SocketAddr> {
+    let line = head.split(|&b| b == b'\r').next()?;
+    let target = std::str::from_utf8(line).ok()?.split(' ').nth(1)?;
+    let (_, query) = target.split_once('?')?;
+    let mut port = None;
+    for (key, value) in query.split('&').filter_map(|kv| kv.split_once('=')) {
+        match key {
+            "port" => port = value.parse::<u16>().ok().filter(|p| *p != 0),
+            "event" if value == "stopped" => return None,
+            _ => {}
+        }
+    }
+    Some(SocketAddr::new(from.ip(), port?))
 }
 
 async fn answer(
     mut stream: TcpStream,
+    from: SocketAddr,
     interval: Duration,
     listing: &Listing,
     clock: &Clock,
+    announcer: &watch::Sender<Option<SocketAddr>>,
 ) -> std::io::Result<()> {
-    // Read the request head; its contents do not matter.
+    // Read the request head; only the announced port matters.
     let mut head = Vec::new();
     let mut buf = [0u8; 2048];
     while !head.windows(4).any(|w| w == b"\r\n\r\n") && head.len() < 16 * 1024 {
@@ -92,6 +126,10 @@ async fn answer(
             return Ok(());
         }
         head.extend_from_slice(&buf[..n]);
+    }
+    if let Some(addr) = announced_addr(&head, from) {
+        tracing::debug!(%addr, "announce");
+        announcer.send_if_modified(|last| last.replace(addr) != Some(addr));
     }
     let now = clock.elapsed();
     let compact: Vec<u8> = listing
@@ -123,4 +161,23 @@ async fn answer(
     response.extend_from_slice(&body);
     stream.write_all(&response).await?;
     stream.shutdown().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn announces_give_the_listening_address() {
+        let from: SocketAddr = "127.0.0.1:50000".parse().unwrap();
+        let head = b"GET /announce?info_hash=%01%02&peer_id=x&port=41234&left=0 HTTP/1.1\r\n\r\n";
+        assert_eq!(
+            announced_addr(head, from),
+            Some("127.0.0.1:41234".parse().unwrap())
+        );
+        let stopped = b"GET /announce?port=41234&event=stopped HTTP/1.1\r\n\r\n";
+        assert_eq!(announced_addr(stopped, from), None);
+        let portless = b"GET /announce?info_hash=%01 HTTP/1.1\r\n\r\n";
+        assert_eq!(announced_addr(portless, from), None);
+    }
 }

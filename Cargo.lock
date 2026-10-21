@@ -6022,6 +6022,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "torrentplayer-net",
  "torrentplayer-prioritize",
  "torrentplayer-stream",
  "torrentplayer-swarm",

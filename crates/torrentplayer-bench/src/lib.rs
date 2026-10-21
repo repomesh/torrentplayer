@@ -12,11 +12,15 @@
 //!
 //! These are *data-ready* latencies: the time until a player has the bytes it needs. Decoder
 //! start-up is measured separately in the app's debug overlay. See `docs/performance.md`.
+//!
+//! [`limit`] measures something else: how closely an engine holds a download limit that
+//! changes mid-transfer.
 
 #![forbid(unsafe_code)]
 
 mod engines;
 pub mod http;
+pub mod limit;
 pub mod link;
 pub mod seeder;
 pub mod tracker;
@@ -33,7 +37,7 @@ use serde::Serialize;
 use torrentplayer_stream::{ServerConfig, StreamServer};
 use torrentplayer_torrent::TorrentSource;
 
-use crate::engines::{BenchEngine, Playhead};
+use crate::engines::{BenchEngine, BenchFile, Playhead};
 use crate::http::{Player, Target, timed_range};
 
 /// What to measure.
@@ -68,6 +72,17 @@ pub struct BenchConfig {
     pub web_seeds: bool,
     /// Use the DHT when on a public swarm.
     pub dht: bool,
+    /// Use the torrent's trackers when on a public swarm; off finds peers through the DHT only,
+    /// as for a trackerless magnet link.
+    pub trackers: bool,
+    /// Keep the swarm engine's DHT routing tables in this folder between sessions, as the app
+    /// does in its data folder (`swarm.json`). librqbit keeps none, as in the app. `None` starts
+    /// every session from the bootstrap nodes.
+    pub dht_state_dir: Option<PathBuf>,
+    /// Accept incoming peer connections: the swarm engine through the network manager's
+    /// listener (direct mode, a random port), librqbit on its own listener, as in the app.
+    /// Both listen on every interface (librqbit announces no port for a loopback listener).
+    pub incoming: bool,
     /// Cap the download rate (bytes per second), to model a home connection and limit usage.
     pub download_limit_bps: Option<std::num::NonZeroU32>,
     /// Maximum connected peers.
@@ -103,6 +118,9 @@ impl Default for BenchConfig {
             local_web_seeds: false,
             web_seeds: true,
             dht: true,
+            trackers: true,
+            dht_state_dir: None,
+            incoming: false,
             download_limit_bps: None,
             peer_limit: None,
             max_connecting: None,
@@ -140,6 +158,14 @@ pub struct RunResult {
     pub file_bytes: u64,
     /// Adding the torrent, including fetching metadata for magnet links.
     pub metadata_ms: f64,
+    /// From adding the torrent until the first peer was connected, sampled every 20 ms until
+    /// start-up completed; `None` if no peer connected by then. librqbit adds a magnet link
+    /// only once it has the metadata (which needs a peer), so for magnet links sampling starts
+    /// after [`RunResult::metadata_ms`], the better measure there.
+    pub first_peer_ms: Option<f64>,
+    /// Whether a saved DHT state existed when the engine started (with
+    /// [`BenchConfig::dht_state_dir`]).
+    pub dht_state_loaded: Option<bool>,
     /// From pressing play until the first byte of the file arrived.
     pub first_byte_ms: f64,
     /// From pressing play until the head and tail were both available.
@@ -266,24 +292,18 @@ async fn run_in(
     source: TorrentSource,
     config: &BenchConfig,
 ) -> anyhow::Result<RunResult> {
+    let dht_state_loaded = config
+        .dht_state_dir
+        .as_ref()
+        .zip(kind.dht_state_file())
+        .map(|(d, f)| d.join(f).is_file());
     let mut engine = BenchEngine::start(kind, dir, config).await?;
 
     let started = Instant::now();
     let (name, files) = engine.add(source, config.peers.clone()).await?;
     let metadata_ms = ms(started.elapsed());
 
-    let entry = match config.file {
-        Some(index) => files
-            .iter()
-            .find(|f| f.index == index)
-            .context("no file with that index")?,
-        None => files
-            .iter()
-            .filter(|f| f.video)
-            .max_by_key(|f| f.len)
-            .context("the torrent has no video files")?,
-    }
-    .clone();
+    let entry = pick_file(&files, config.file)?;
     let len = entry.len;
 
     let server = StreamServer::start(ServerConfig::default()).await?;
@@ -305,7 +325,14 @@ async fn run_in(
         .max(1);
     let pace = byte_rate * 2;
 
-    tokio::time::sleep(config.warm).await;
+    let mut first_peer_ms = None;
+    sampling_first_peer(
+        &engine,
+        started,
+        &mut first_peer_ms,
+        tokio::time::sleep(config.warm),
+    )
+    .await;
     let peers_at_play = engine.stats()?.peers_live;
 
     // Start-up: the user presses play. The player reads from the start while the tail (the
@@ -317,10 +344,13 @@ async fn run_in(
     let tail_len = config.startup_bytes.min(len);
     let requested = play.elapsed();
     let (mut player, head_ready) = Player::start(target.clone(), 0, head_len, pace);
-    let (head, tail) = tokio::join!(
-        tokio::time::timeout(config.timeout, head_ready),
-        timed_range(&target, len - tail_len, tail_len, config.timeout),
-    );
+    let (head, tail) = sampling_first_peer(&engine, started, &mut first_peer_ms, async {
+        tokio::join!(
+            tokio::time::timeout(config.timeout, head_ready),
+            timed_range(&target, len - tail_len, tail_len, config.timeout),
+        )
+    })
+    .await;
     let head = head
         .context("start-up (head) timed out")?
         .context("player stopped")?
@@ -400,6 +430,8 @@ async fn run_in(
         file: entry.path,
         file_bytes: len,
         metadata_ms,
+        first_peer_ms,
+        dht_state_loaded,
         first_byte_ms,
         startup_ms,
         seeks,
@@ -422,6 +454,42 @@ async fn run_in(
         watch_ms,
         byte_rate,
     })
+}
+
+/// The file to play: `index`, or else the largest video.
+fn pick_file(files: &[BenchFile], index: Option<usize>) -> anyhow::Result<BenchFile> {
+    Ok(match index {
+        Some(index) => files
+            .iter()
+            .find(|f| f.index == index)
+            .context("no file with that index")?,
+        None => files
+            .iter()
+            .filter(|f| f.video)
+            .max_by_key(|f| f.len)
+            .context("the torrent has no video files")?,
+    }
+    .clone())
+}
+
+/// Runs `work` while checking every 20 ms for the engine's first connected peer, and records
+/// when it is first seen (since `added`) in `first_peer`.
+async fn sampling_first_peer<T>(
+    engine: &BenchEngine,
+    added: Instant,
+    first_peer: &mut Option<f64>,
+    work: impl Future<Output = T>,
+) -> T {
+    tokio::pin!(work);
+    loop {
+        if first_peer.is_none() && engine.stats().is_ok_and(|s| s.peers_live > 0) {
+            *first_peer = Some(ms(added.elapsed()));
+        }
+        tokio::select! {
+            out = &mut work => return out,
+            () = tokio::time::sleep(Duration::from_millis(20)), if first_peer.is_none() => {}
+        }
+    }
 }
 
 /// What one watch period saw.
@@ -549,6 +617,8 @@ impl Summary {
 pub struct Report {
     /// Individual runs.
     pub runs: Vec<RunResult>,
+    /// Time to the first connected peer, over the runs that had one.
+    pub first_peer: Option<Summary>,
     /// Time to metadata.
     pub metadata: Option<Summary>,
     /// Time to first byte after pressing play.
@@ -569,6 +639,12 @@ impl Report {
             .flat_map(|r| r.seeks.iter().map(|s| s.ready_ms))
             .collect();
         Self {
+            first_peer: Summary::of(
+                &runs
+                    .iter()
+                    .filter_map(|r| r.first_peer_ms)
+                    .collect::<Vec<_>>(),
+            ),
             metadata: Summary::of(&collect(&|r| r.metadata_ms)),
             first_byte: Summary::of(&collect(&|r| r.first_byte_ms)),
             startup: Summary::of(&collect(&|r| r.startup_ms)),

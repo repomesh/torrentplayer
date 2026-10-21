@@ -17,6 +17,9 @@
 //! its own, a longer round trip, only some of the pieces (its bitfield is rewritten), periodic
 //! choking (choke and unchoke messages are injected and piece data is dropped while choked), or
 //! times when it is offline. Times are measured from the last [`Clock::reset`].
+//!
+//! [`Dialers`] shape traffic the same way for seeders that connect to the viewer (incoming
+//! peers) instead of the other way round.
 
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -264,29 +267,255 @@ impl Link {
                     let Ok(server) = TcpStream::connect(upstream).await else {
                         return;
                     };
-                    let _ = client.set_nodelay(true);
-                    let _ = server.set_nodelay(true);
-                    let (client_read, client_write) = client.into_split();
-                    let (server_read, server_write) = server.into_split();
-                    let goes_offline = async {
-                        match profile.next_offline(clock.elapsed()) {
-                            Some(at) => tokio::time::sleep_until(clock.at(at).into()).await,
-                            None => std::future::pending().await,
-                        }
-                    };
-                    let filter = profile
-                        .rewrites()
-                        .then(|| Filter::new(Arc::clone(&profile), clock.clone()));
-                    tokio::select! {
-                        () = pump(client_read, server_write, one_way, Vec::new(), None) => {}
-                        () = pump(server_read, client_write, one_way, buckets, filter) => {}
-                        () = goes_offline => {}
-                    }
+                    relay(
+                        client,
+                        server,
+                        one_way,
+                        buckets,
+                        &profile,
+                        &clock,
+                        HANDSHAKE_LEN,
+                    )
+                    .await;
                 });
             }
         });
         Ok(Self { addr, task })
     }
+}
+
+/// Relays one connection between the leecher (`client`) and the seeder (`server`) until either
+/// side closes or the seeder goes offline. `handshake_left` bytes from the seeder pass through
+/// before the profile's filter parses frames (0 once the handshake was exchanged).
+async fn relay(
+    client: TcpStream,
+    server: TcpStream,
+    one_way: Duration,
+    buckets: Vec<Arc<Bucket>>,
+    profile: &Arc<PeerProfile>,
+    clock: &Clock,
+    handshake_left: usize,
+) {
+    let _ = client.set_nodelay(true);
+    let _ = server.set_nodelay(true);
+    let (client_read, client_write) = client.into_split();
+    let (server_read, server_write) = server.into_split();
+    let goes_offline = async {
+        match profile.next_offline(clock.elapsed()) {
+            Some(at) => tokio::time::sleep_until(clock.at(at).into()).await,
+            None => std::future::pending().await,
+        }
+    };
+    let filter = profile.rewrites().then(|| {
+        let mut f = Filter::new(Arc::clone(profile), clock.clone());
+        f.handshake_left = handshake_left;
+        f
+    });
+    tokio::select! {
+        () = pump(client_read, server_write, one_way, Vec::new(), None) => {}
+        () = pump(server_read, client_write, one_way, buckets, filter) => {}
+        () = goes_offline => {}
+    }
+}
+
+/// Seeders that connect to the viewer, as peers that learned its address from a tracker do,
+/// instead of waiting for it to connect to them. Stops when dropped.
+///
+/// Each seeder dials the address the viewer last announced (see
+/// [`crate::tracker::LocalTracker::announcer`]) once its [`PeerProfile::announce_after`] has
+/// passed and while it is online, and dials again a second after a connection ends, until the
+/// viewer stops answering. Traffic is shaped exactly as through a [`Link`]: the seeders share one
+/// downlink, and every chunk is delayed by half the round trip, the viewer's handshake included.
+///
+/// librqbit seeders only accept connections, so the dialer connects to both sides and joins
+/// them: it sends the viewer the seeder's own handshake (learned once from a probe connection),
+/// passes the viewer's answer on to the seeder, and then relays. Both sides see the other's real
+/// handshake, so they negotiate the same extensions as over a direct connection.
+#[derive(Debug)]
+pub struct Dialers {
+    tasks: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for Dialers {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+impl Dialers {
+    /// Starts one dialer per seeder, sharing a downlink of `down_bps`, for the torrent with
+    /// `info_hash`. `viewer` gives the address to dial.
+    #[must_use]
+    pub fn start(
+        peers: &[(SocketAddr, PeerProfile)],
+        down_bps: u64,
+        rtt: Duration,
+        clock: &Clock,
+        info_hash: [u8; 20],
+        viewer: &tokio::sync::watch::Receiver<Option<SocketAddr>>,
+    ) -> Self {
+        let bucket = Arc::new(Bucket::new(down_bps));
+        let tasks = peers
+            .iter()
+            .map(|(upstream, profile)| {
+                let buckets: Vec<Arc<Bucket>> = profile
+                    .up_bps
+                    .map(|bps| Arc::new(Bucket::new(bps)))
+                    .into_iter()
+                    .chain([Arc::clone(&bucket)])
+                    .collect();
+                tokio::spawn(dial_loop(
+                    *upstream,
+                    viewer.clone(),
+                    buckets,
+                    profile.rtt.unwrap_or(rtt) / 2,
+                    Arc::new(profile.clone()),
+                    clock.clone(),
+                    info_hash,
+                ))
+            })
+            .collect();
+        Self { tasks }
+    }
+}
+
+/// One seeder's dialer (see [`Dialers`]).
+async fn dial_loop(
+    upstream: SocketAddr,
+    mut viewer: tokio::sync::watch::Receiver<Option<SocketAddr>>,
+    buckets: Vec<Arc<Bucket>>,
+    one_way: Duration,
+    profile: Arc<PeerProfile>,
+    clock: Clock,
+    info_hash: [u8; 20],
+) {
+    let mut seeder_handshake = None;
+    let mut current = None;
+    loop {
+        // A viewer address not dialed yet (a new session).
+        let target = loop {
+            let latest = *viewer.borrow_and_update();
+            if let Some(addr) = latest.filter(|&a| Some(a) != current) {
+                break addr;
+            }
+            if viewer.changed().await.is_err() {
+                return;
+            }
+        };
+        current = Some(target);
+        loop {
+            // Listed by the tracker, and online.
+            let mut at = clock.elapsed().max(profile.announce_after);
+            while profile.offline_at(at) {
+                at = profile
+                    .offline
+                    .iter()
+                    .filter(|&&(from, until)| from <= at && at < until)
+                    .map(|&(_, until)| until)
+                    .max()
+                    .unwrap_or(at);
+            }
+            if interrupted(&mut viewer, tokio::time::sleep_until(clock.at(at).into())).await {
+                break;
+            }
+            let dialed = tokio::select! {
+                dialed = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    dial(target, upstream, info_hash, one_way, &mut seeder_handshake),
+                ) => dialed,
+                // A new session; a refused connection to the old one can take seconds to fail
+                // on Windows.
+                _ = viewer.changed() => break,
+            };
+            let (client, server) = match dialed {
+                Ok(Ok(pair)) => pair,
+                // The viewer stopped listening (its session ended).
+                Ok(Err(error)) => {
+                    tracing::debug!(%target, %error, "could not dial the viewer");
+                    break;
+                }
+                Err(_) => {
+                    tracing::debug!(%target, "dialing the viewer timed out");
+                    break;
+                }
+            };
+            tracing::debug!(%target, %upstream, "dialed the viewer");
+            relay(
+                client,
+                server,
+                one_way,
+                buckets.clone(),
+                &profile,
+                &clock,
+                0,
+            )
+            .await;
+            if interrupted(&mut viewer, tokio::time::sleep(Duration::from_secs(1))).await {
+                break;
+            }
+        }
+    }
+}
+
+/// Waits for `wait`; `true` if the viewer announced a new address (a new session) first, so
+/// the new session is dialed at once.
+async fn interrupted(
+    viewer: &mut tokio::sync::watch::Receiver<Option<SocketAddr>>,
+    wait: impl Future<Output = ()>,
+) -> bool {
+    tokio::select! {
+        () = wait => viewer.has_changed().unwrap_or(true),
+        _ = viewer.changed() => true,
+    }
+}
+
+/// Connects the seeder at `upstream` to the viewer at `viewer` and exchanges the handshakes
+/// (see [`Dialers`]). Returns the viewer's and the seeder's connections.
+async fn dial(
+    viewer: SocketAddr,
+    upstream: SocketAddr,
+    info_hash: [u8; 20],
+    one_way: Duration,
+    seeder_handshake: &mut Option<[u8; HANDSHAKE_LEN]>,
+) -> std::io::Result<(TcpStream, TcpStream)> {
+    let ours = if let Some(h) = *seeder_handshake {
+        h
+    } else {
+        let h = probe_handshake(upstream, info_hash).await?;
+        *seeder_handshake = Some(h);
+        h
+    };
+    let mut client = TcpStream::connect(viewer).await?;
+    client.write_all(&ours).await?;
+    let mut theirs = [0u8; HANDSHAKE_LEN];
+    client.read_exact(&mut theirs).await?;
+    let mut server = TcpStream::connect(upstream).await?;
+    // The viewer's handshake crosses the link like any other chunk.
+    tokio::time::sleep(one_way).await;
+    server.write_all(&theirs).await?;
+    let mut reply = [0u8; HANDSHAKE_LEN];
+    server.read_exact(&mut reply).await?;
+    Ok((client, server))
+}
+
+/// The handshake the seeder at `upstream` sends for `info_hash`.
+async fn probe_handshake(
+    upstream: SocketAddr,
+    info_hash: [u8; 20],
+) -> std::io::Result<[u8; HANDSHAKE_LEN]> {
+    let mut hello = Vec::with_capacity(HANDSHAKE_LEN);
+    hello.push(19);
+    hello.extend_from_slice(b"BitTorrent protocol");
+    hello.extend_from_slice(&[0; 8]);
+    hello.extend_from_slice(&info_hash);
+    hello.extend_from_slice(b"-BENCH0-probe0000000");
+    let mut stream = TcpStream::connect(upstream).await?;
+    stream.write_all(&hello).await?;
+    let mut reply = [0u8; HANDSHAKE_LEN];
+    stream.read_exact(&mut reply).await?;
+    Ok(reply)
 }
 
 /// Copies `from` to `to`, delaying each chunk by `delay` and shaping it to every bucket in turn;
@@ -640,5 +869,76 @@ mod tests {
             Some(Duration::from_secs(5))
         );
         assert_eq!(p.next_offline(Duration::from_secs(6)), None);
+    }
+
+    /// A handshake with `reserved` and `peer_id`.
+    fn handshake(reserved: u8, peer_id: u8) -> [u8; HANDSHAKE_LEN] {
+        let mut h = [0u8; HANDSHAKE_LEN];
+        h[0] = 19;
+        h[1..20].copy_from_slice(b"BitTorrent protocol");
+        h[25] = reserved;
+        h[28..48].fill(7);
+        h[48..].fill(peer_id);
+        h
+    }
+
+    /// Accepts connections and answers each handshake with `reply`, then sends `after` and
+    /// reports the handshake it received.
+    async fn peer(
+        reply: [u8; HANDSHAKE_LEN],
+        after: &'static [u8],
+    ) -> (SocketAddr, tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut theirs = [0u8; HANDSHAKE_LEN];
+                    stream.read_exact(&mut theirs).await.unwrap();
+                    stream.write_all(&reply).await.unwrap();
+                    stream.write_all(after).await.unwrap();
+                    let _ = tx.send(theirs.to_vec());
+                    let mut rest = Vec::new();
+                    let _ = stream.read_to_end(&mut rest).await;
+                });
+            }
+        });
+        (addr, rx)
+    }
+
+    #[tokio::test]
+    async fn dialers_join_the_seeder_to_the_viewer_with_real_handshakes() {
+        let seeder_hs = handshake(0x10, 1);
+        let viewer_hs = handshake(0x04, 2);
+        // The seeder sends an unchoke after its handshake; the viewer sends nothing.
+        let (seeder, mut seeder_got) = peer(seeder_hs, &[0, 0, 0, 1, 1]).await;
+        let viewer = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let (announced, rx) = tokio::sync::watch::channel(None);
+        let _dialers = Dialers::start(
+            &[(seeder, PeerProfile::default())],
+            100 * 1024 * 1024,
+            Duration::from_millis(2),
+            &Clock::default(),
+            [7; 20],
+            &rx,
+        );
+        announced.send_replace(Some(viewer.local_addr().unwrap()));
+
+        let (mut stream, _) = viewer.accept().await.unwrap();
+        // The viewer is dialed with the seeder's own handshake...
+        let mut theirs = [0u8; HANDSHAKE_LEN];
+        stream.read_exact(&mut theirs).await.unwrap();
+        assert_eq!(theirs, seeder_hs);
+        stream.write_all(&viewer_hs).await.unwrap();
+        // ...the seeder sees the probe's handshake and then the viewer's...
+        let probe = seeder_got.recv().await.unwrap();
+        assert_eq!(&probe[28..48], &[7; 20]);
+        assert_eq!(seeder_got.recv().await.unwrap(), viewer_hs.to_vec());
+        // ...and the seeder's messages reach the viewer without a second handshake.
+        let mut message = [0u8; 5];
+        stream.read_exact(&mut message).await.unwrap();
+        assert_eq!(message, [0, 0, 0, 1, 1]);
     }
 }
