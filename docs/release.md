@@ -22,15 +22,20 @@ distribution.
    git tag -s vx.y.z -m "TorrentPlayer vx.y.z"
    git push origin vx.y.z
    ```
-6. The workflow builds and signs installers for Windows, macOS, and Linux, then creates a
-   **draft** GitHub release with the installers, `SHA256SUMS.txt`, a CycloneDX SBOM, and build
-   provenance attestations.
+6. The workflow creates one **draft** GitHub release for the tag, builds and signs installers
+   for Windows, macOS, and Linux, then uploads them to the draft with `SHA256SUMS.txt`, a
+   CycloneDX SBOM, the FFmpeg source, and build provenance attestations. Every file on the
+   release, the macOS `.app.tar.gz` archives included, is listed in `SHA256SUMS.txt` and
+   attested. The build jobs cannot change the release; only the first and last jobs can. If a
+   run fails, re-run it: it reuses the draft and replaces its files. It stops if the tag's
+   release is already published.
 7. Review the draft (download and smoke-test at least one installer per OS), paste the changelog
    section into the notes, and publish.
 
 ## Required secrets
 
-Configure these in a protected `release` environment that requires maintainer approval:
+Configure these in the `release` environment (**Settings → Environments → release**), and add
+a maintainer there as a required reviewer, so no build can use the secrets without approval:
 
 | Secret                                                                      | Purpose                      |
 | --------------------------------------------------------------------------- | ---------------------------- |

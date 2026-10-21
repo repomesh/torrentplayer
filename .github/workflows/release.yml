@@ -1,8 +1,12 @@
 name: Release
 
-# Builds signed installers for every platform when a version tag is pushed, then publishes
-# checksums, an SBOM, and build provenance attestations to a draft GitHub release.
+# Builds signed installers for every platform when a version tag is pushed, then publishes them
+# with checksums, an SBOM, and build provenance attestations to a draft GitHub release.
 # See docs/release.md.
+#
+# One job creates the draft before the builds start, and one job uploads every file after they
+# finish, so the parallel builds never race to create a release (v0.2.0 got two drafts) and
+# every file on the release has a checksum and an attestation.
 on:
   push:
     tags: ['v*.*.*']
@@ -18,12 +22,55 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  create-release:
+    name: Create the draft release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create the draft release
+    steps:
+      # A re-run finds the draft its first attempt created. The tag must already be on GitHub
+      # (--verify-tag), so a release is never created for a new, unsigned tag by mistake.
+      - name: Create or find the draft
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # "<id> <draft>" for each release of the tag. Drafts are listed only to tokens that
+          # can write, and /releases/tags/{tag} skips them, so the whole list is read.
+          existing() {
+            gh api --paginate "repos/$GH_REPO/releases" --jq '.[] | [.tag_name, .id, .draft] | @tsv' |
+              awk -F '\t' -v tag="$TAG" '$1 == tag { print $2, $3 }'
+          }
+          found=$(existing)
+          if [ "$(printf '%s' "$found" | grep -c .)" -gt 1 ]; then
+            echo "::error::There is more than one release for $TAG; delete the extra drafts first."
+            exit 1
+          fi
+          if [ -z "$found" ]; then
+            prerelease=()
+            case "$TAG" in *-*) prerelease=(--prerelease) ;; esac
+            gh release create "$TAG" --draft --verify-tag "${prerelease[@]}" \
+              --title "TorrentPlayer $TAG" \
+              --notes "See CHANGELOG.md for what changed. Verify downloads as described in docs/release.md."
+            found=$(existing)
+          fi
+          case "$found" in
+            *" true") echo "Draft release $found for $TAG" ;;
+            *)
+              echo "::error::The release for $TAG is already published ($found); not changing it."
+              exit 1
+              ;;
+          esac
+
   build:
     name: Build (${{ matrix.name }})
+    needs: create-release
     # Signing secrets live in a protected environment that requires maintainer approval.
     environment: release
+    # The builds only build; they cannot change the release (the provenance job uploads).
     permissions:
-      contents: write # create the draft release and upload installers
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -31,12 +78,15 @@ jobs:
           - name: windows-x64
             os: windows-2025
             target: x86_64-pc-windows-msvc
+          # `arch` names the .app archive, as Tauri names the .dmg next to it.
           - name: macos-arm64
             os: macos-15
             target: aarch64-apple-darwin
+            arch: aarch64
           - name: macos-x64
             os: macos-15
             target: x86_64-apple-darwin
+            arch: x64
           # Built on the oldest supported Ubuntu so the AppImage runs on older glibc versions.
           - name: linux-x64
             os: ubuntu-22.04
@@ -123,19 +173,13 @@ jobs:
             printf '%s<<%s\n%s\n%s\n' "$name" "$delimiter" "${!name}" "$delimiter" >> "$GITHUB_ENV"
           done
 
-      - name: Build and upload installers
+      # Without a tag name or release id, tauri-action only builds; the provenance job uploads.
+      - name: Build installers
         id: tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           # The Tauri CLI is installed in ui/; its "tauri" script runs it from the repository root.
           tauriScript: npm --prefix ui run tauri
-          tagName: ${{ github.ref_name }}
-          releaseName: TorrentPlayer ${{ github.ref_name }}
-          releaseBody: See CHANGELOG.md for what changed. Verify downloads as described in docs/release.md.
-          releaseDraft: true
-          prerelease: ${{ contains(github.ref_name, '-') }}
           args: >-
             --target ${{ matrix.target }}
             --config src-tauri/tauri.sidecar.conf.json
@@ -148,12 +192,19 @@ jobs:
         shell: bash
         env:
           ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          ARCH: ${{ matrix.arch }}
+          TAG: ${{ github.ref_name }}
         run: |
           mkdir -p release-assets
           node -e 'for (const p of JSON.parse(process.env.ARTIFACT_PATHS)) console.log(p)' |
             while IFS= read -r path; do
-              # .app bundles are directories; their archives (.app.tar.gz) are uploaded instead.
-              if [ -f "$path" ]; then cp "$path" release-assets/; fi
+              if [ -f "$path" ]; then
+                cp "$path" release-assets/
+              elif [ -d "$path" ] && [ "${path%.app}" != "$path" ]; then
+                # An .app bundle is a directory: publish it as TorrentPlayer_x.y.z_<arch>.app.tar.gz.
+                app=$(basename "$path" .app)
+                tar -czf "release-assets/${app}_${TAG#v}_${ARCH}.app.tar.gz" -C "$(dirname "$path")" "$app.app"
+              fi
             done
           ls -l release-assets
 
@@ -164,11 +215,11 @@ jobs:
           if-no-files-found: error
 
   provenance:
-    name: Checksums, SBOM, and provenance
+    name: Checksums, SBOM, provenance, and upload
     needs: build
     runs-on: ubuntu-24.04
     permissions:
-      contents: write # upload checksums and SBOM to the release
+      contents: write # upload every file to the draft release
       id-token: write # sign attestations
       attestations: write
     steps:
@@ -215,9 +266,10 @@ jobs:
         with:
           subject-path: release-assets/*
 
-      - name: Upload checksums and SBOM to the draft release
+      # Exactly the files that were checksummed and attested, to the draft create-release made.
+      - name: Upload everything to the draft release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.ref_name }}
-        run: |
-          gh release upload "$TAG" release-assets/SHA256SUMS.txt release-assets/torrentplayer.cdx.json             release-assets/ffmpeg-*.tar.xz --clobber
+        run: gh release upload "$TAG" release-assets/* --clobber
