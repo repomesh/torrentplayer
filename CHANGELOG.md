@@ -7,12 +7,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Added
-
-- `torrentplayer-bench` measures streaming with incoming peers only (`local --inbound`), how
-  closely an engine holds a download limit that changes mid-transfer (`limit`), and start-up
-  from a saved DHT state (`--dht-state`, `--no-trackers`). See `docs/performance.md`.
-
 ## [0.3.0] - 2026-10-21
 
 ### Changed
@@ -62,6 +56,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Videos with Dolby (AC-3, E-AC-3, TrueHD) or DTS audio now play with sound: a bundled,
   playback-only LGPL FFmpeg converts the audio to AAC as the video plays, copying the video, and
   the player keeps the full seek bar and restarts the conversion on far seeks.
+- `torrentplayer-bench` measures streaming with incoming peers only (`local --inbound`), how
+  closely an engine holds a download limit that changes mid-transfer (`limit`), and start-up
+  from a saved DHT state (`--dht-state`, `--no-trackers`). See `docs/performance.md`.
 
 ### Fixed
 
