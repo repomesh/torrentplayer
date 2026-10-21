@@ -31,6 +31,7 @@ export const LIMITS = {
   cleanupDays: [1, 3650],
   results: [10, 500],
   port: [1, 65_535],
+  listenPort: [1024, 65_535],
 } as const;
 
 const MAX_TEXT = 1024;
@@ -140,6 +141,10 @@ const RULES: Record<string, Check> = {
       ? null
       : 'Enter a host name or IP address without a scheme or port (for example 10.0.0.1).',
   'network.socks5.port': range(LIMITS.port, 'Choose a port between 1 and 65535.'),
+  'network.incomingPeers.port': (v) =>
+    v === 0 || inRange(v, LIMITS.listenPort, true)
+      ? null
+      : 'Choose a port between 1024 and 65535, or 0 for a random one.',
   'network.socks5.username': optional((v) =>
     typeof v === 'string' && isLabel(v) && new TextEncoder().encode(v).length <= 255
       ? null

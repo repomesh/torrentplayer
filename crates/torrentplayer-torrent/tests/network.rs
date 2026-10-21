@@ -22,7 +22,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, UdpSocket};
 use torrentplayer_net::test_util::{RecordingRelay, TestProxy};
 use torrentplayer_net::{
-    Network, NetworkConfig, NetworkMode, NetworkOptions, Secret, Socks5Config,
+    IncomingConfig, IncomingStatus, Network, NetworkConfig, NetworkMode, NetworkOptions, Secret,
+    Socks5Config,
 };
 use torrentplayer_torrent::{
     BackendKind, EngineChoice, EngineError, StreamEngine, StreamEngineConfig, TorrentSource,
@@ -362,6 +363,84 @@ async fn turning_protection_on_replaces_the_librqbit_session() {
         later.iter().all(|p| from_proxy.contains(p)),
         "after the switch every connection came through the proxy: {later:?} vs {from_proxy:?}"
     );
+    engine.shutdown().await;
+    net.shutdown();
+}
+
+/// Whether anything accepts a TCP connection on `127.0.0.1:port`.
+async fn accepts_on_loopback(port: u16) -> bool {
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok())
+}
+
+async fn wait_for_incoming(net: &Network, want: impl Fn(&IncomingStatus) -> bool) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !want(&net.status().incoming) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("incoming status never matched: {:?}", net.status().incoming));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn librqbit_listens_for_incoming_peers_only_in_direct_mode() {
+    let seed = seeder().await;
+    let proxy = TestProxy::start(Some(("torrentplayer-test", "hunter2")))
+        .await
+        .unwrap();
+    let net = Network::start(NetworkConfig::default(), options())
+        .await
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let engine = StreamEngine::start_with_network(
+        StreamEngineConfig {
+            download_dir: dir.path().to_path_buf(),
+            choice: EngineChoice::Rqbit,
+            public_discovery: false,
+            download_limit_bps: None,
+            upload_limit_bps: None,
+            peer_limit: 40,
+        },
+        Some(net.clone()),
+    )
+    .await
+    .unwrap();
+    let port = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    engine
+        .set_incoming(IncomingConfig {
+            enabled: true,
+            port,
+            upnp: false,
+        })
+        .await;
+    // librqbit opens its port with its session, for the first torrent.
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Idle { .. })).await;
+    assert!(!accepts_on_loopback(port).await);
+    let magnet = format!("magnet:?xt=urn:btih:{}&dn=lecture", seed.info_hash);
+    engine
+        .add_with_peers(TorrentSource::parse_link(&magnet).unwrap(), vec![seed.addr])
+        .await
+        .unwrap();
+    wait_for_incoming(
+        &net,
+        |s| matches!(s, IncomingStatus::Listening { port: p, .. } if *p == port),
+    )
+    .await;
+    assert!(accepts_on_loopback(port).await);
+
+    // Protected: the session with its listener is replaced, and SOCKS5 never listens.
+    engine.apply_network(through(&proxy)).await.unwrap();
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Unsupported { .. })).await;
+    assert!(!accepts_on_loopback(port).await);
     engine.shutdown().await;
     net.shutdown();
 }

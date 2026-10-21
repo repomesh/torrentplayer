@@ -940,7 +940,10 @@ traffic.
 The mode, connection state, endpoint (proxy `host:port`, interface name, or WireGuard endpoint;
 never secrets), whether traffic, UDP, and trackers are allowed, whether the kill switch is
 engaged, the bound interface and addresses, the time of the last check, while connected the time
-it connected (`connectedSinceMs`, for the uptime), and the last 50 events (oldest first). `state.kind` is one of `direct`, `connecting`, `connected`, `reconnecting`,
+it connected (`connectedSinceMs`, for the uptime), the last 50 events (oldest first), and
+`incoming`: whether incoming peer connections are accepted (`kind` `off`, `idle`, `paused`,
+`unsupported`, `failed` with a `reason`, or `listening` with `port`, `addresses`, and `upnp`;
+see [incoming peer connections](network.md#incoming-peer-connections)). `state.kind` is one of `direct`, `connecting`, `connected`, `reconnecting`,
 `killSwitchActive`, `error`, `disconnected`; `reconnecting`, `killSwitchActive`, and `error`
 carry a `reason`.
 

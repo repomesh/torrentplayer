@@ -52,5 +52,7 @@ search and peer traffic. Wrong keys or missing credentials fail closed. One peer
 address per family are supported. Configured DNS servers are required for host names.
 UDP tracker announces and their DNS lookups run inside the tunnel and bootstrap magnet metadata
 fetching. The follow-up for issue #19 also routes DHT and bootstrap DNS through scoped tunnel
-sockets. Incoming peers and uTP remain disabled in this mode. Throughput of the
+sockets. uTP remains disabled in this mode. Incoming peers (issue #21), when turned on, are
+accepted only on the tunnel address inside the userspace stack and relayed like outgoing
+connections. Throughput of the
 userspace stack remains a performance consideration for large numbers of peers.

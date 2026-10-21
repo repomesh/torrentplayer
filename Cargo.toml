@@ -54,6 +54,9 @@ librqbit-core = { version = "9.0.1", default-features = false, features = ["sha1
 # The DHT node librqbit uses (already built for it), for torrentplayer-swarm's own peer discovery.
 librqbit-dht = "9.0.1"
 librqbit-tracker-comms = "9.0.1"
+# UPnP IGD port mapping for incoming peers in direct mode. Already built for librqbit (same
+# version), so it adds no crate to the build.
+librqbit-upnp = "9.0.1"
 proptest = "1.7"
 # The system folder picker for choosing the download folder (Tauri v2 has none built in). GTK3 on
 # Linux, which Tauri already links, so no other toolkit or D-Bus client is added.

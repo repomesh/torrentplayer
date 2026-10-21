@@ -34,13 +34,18 @@ pub type TorrentId = usize;
 pub const MAX_FILES: usize = 50_000;
 
 /// Engine settings.
+// Independent switches, each passed to a different librqbit option.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     /// Where downloaded files are stored. Each multi-file torrent gets a sub-folder.
     pub download_dir: PathBuf,
-    /// Accept incoming peer connections on this address. `None` makes outgoing connections
-    /// only, which avoids firewall prompts but limits speed (configurable from Phase 5).
+    /// Accept incoming peer connections on this address (TCP only). `None`, the default, makes
+    /// outgoing connections only, which avoids firewall prompts but limits speed. Ignored in
+    /// protected network modes: librqbit's listener cannot be pinned to the protected path.
     pub listen_addr: Option<SocketAddr>,
+    /// Ask the router to forward the listening port (UPnP), with `listen_addr`.
+    pub enable_upnp: bool,
     /// Use the BitTorrent DHT to find peers (needed for most magnet links).
     pub enable_dht: bool,
     /// Announce to trackers listed in torrents.
@@ -76,6 +81,7 @@ impl EngineConfig {
         Self {
             download_dir,
             listen_addr: None,
+            enable_upnp: false,
             enable_dht: true,
             enable_trackers: true,
             enable_local_discovery: false,
@@ -273,7 +279,7 @@ impl Engine {
                 .filter(|_| !protected)
                 .map(|listen_addr| ListenerOptions {
                     listen_addr,
-                    enable_upnp_port_forwarding: false,
+                    enable_upnp_port_forwarding: config.enable_upnp,
                     ..ListenerOptions::default()
                 }),
             connect: config
@@ -366,6 +372,17 @@ impl Engine {
         }
         url.query_pairs_mut().clear().extend_pairs(pairs);
         Ok(url.into())
+    }
+
+    /// Where the session was asked to listen, and whether with UPnP; `None` if it was not
+    /// (always the case in a protected session).
+    #[must_use]
+    pub fn requested_listen(&self) -> Option<(SocketAddr, bool)> {
+        self.inner
+            .config
+            .listen_addr
+            .filter(|_| !self.inner.protected)
+            .map(|addr| (addr, self.inner.config.enable_upnp))
     }
 
     /// The address peers can connect to, if listening is enabled.

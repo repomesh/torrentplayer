@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -33,10 +33,11 @@ use bytes::Bytes;
 use futures_util::future::BoxFuture;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+use torrentplayer_net::{ExternalListener, IncomingConfig};
 use torrentplayer_prioritize::{FileSpan, PieceGeometry, buffered_bytes_from};
 use torrentplayer_stream::{MediaReader, MediaSource};
 use torrentplayer_swarm::{Metainfo, Swarm, SwarmConfig, SwarmError, Torrent};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::engine::http_for;
 use crate::engine::{
@@ -361,6 +362,9 @@ impl StreamEngine {
         // peers (and runs only while the network policy allows UDP, as for librqbit).
         swarm_config.enable_dht = config.public_discovery;
         swarm_config.network.clone_from(&network);
+        // The main engine serves peers that connect to us, when that is turned on (see
+        // `StreamEngine::set_incoming`); the thumbnail engine never does.
+        swarm_config.accept_incoming = network.is_some();
         swarm_config.download_limit_bps = config.download_limit_bps;
         swarm_config.upload_limit_bps = config.upload_limit_bps;
         swarm_config.peer_limit = config.peer_limit;
@@ -381,7 +385,7 @@ impl StreamEngine {
             network.as_ref(),
         )?;
         info!(choice = ?config.choice, "stream engine started");
-        Ok(Self {
+        let engine = Self {
             limits: Mutex::new((config.download_limit_bps, config.upload_limit_bps)),
             config,
             swarm,
@@ -394,7 +398,9 @@ impl StreamEngine {
             swarm_window,
             metadata: MetadataCache::default(),
             thumbnails: tokio::sync::OnceCell::new(),
-        })
+        };
+        engine.report_rqbit_listener(None);
+        Ok(engine)
     }
 
     /// The download and upload limits in force.
@@ -452,9 +458,84 @@ impl StreamEngine {
         c.network.clone_from(&self.network);
         c.peer_limit = Some(self.config.peer_limit);
         (c.download_limit_bps, c.upload_limit_bps) = self.limits();
-        let engine = Engine::start(c).await?;
+        let listen = self.rqbit_listen(protected);
+        c.listen_addr = listen.map(|(addr, _)| addr);
+        c.enable_upnp = listen.is_some_and(|(_, upnp)| upnp);
+        let engine = match Engine::start(c.clone()).await {
+            Ok(engine) => engine,
+            // Most likely the port is taken: run without listening rather than not at all.
+            Err(error) if c.listen_addr.is_some() => {
+                warn!(%error, "librqbit could not listen; continuing without incoming peers");
+                c.listen_addr = None;
+                c.enable_upnp = false;
+                Engine::start(c).await?
+            }
+            Err(error) => return Err(error),
+        };
         *slot = Some(engine.clone());
+        self.report_rqbit_listener(Some(&engine));
         Ok(engine)
+    }
+
+    /// Where librqbit should listen for incoming peers, and whether with UPnP. Only when
+    /// librqbit is the engine for every torrent (otherwise torrentplayer-swarm takes incoming
+    /// peers from the network manager), in direct mode (librqbit's listener cannot be pinned to
+    /// an interface or tunnel), and with incoming connections turned on.
+    fn rqbit_listen(&self, protected: bool) -> Option<(SocketAddr, bool)> {
+        if self.swarm.is_some() || protected {
+            return None;
+        }
+        let network = self.network.as_ref()?;
+        let port = network.incoming_port()?;
+        Some((
+            SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+            network.incoming_config().upnp,
+        ))
+    }
+
+    /// Tells the network manager about librqbit's own listener, for the status, when librqbit
+    /// is the engine for every torrent.
+    fn report_rqbit_listener(&self, engine: Option<&Engine>) {
+        let Some(network) = self.network.as_ref().filter(|_| self.swarm.is_none()) else {
+            return;
+        };
+        let report = if network.policy().protected {
+            ExternalListener::Idle(
+                "librqbit accepts incoming peers only in direct mode; choose the automatic \n                 engine to accept them through a VPN interface or WireGuard"
+                    .into(),
+            )
+        } else {
+            match engine.map(Engine::listen_addr) {
+                Some(Some(addr)) => ExternalListener::Listening(addr),
+                Some(None) if self.rqbit_listen(false).is_some() => {
+                    ExternalListener::Failed("librqbit could not open the port".into())
+                }
+                Some(None) => ExternalListener::Idle("librqbit is not listening".into()),
+                None => ExternalListener::Idle(
+                    "librqbit opens the port when its first torrent starts".into(),
+                ),
+            }
+        };
+        network.set_external_listener(Some(report));
+    }
+
+    /// Turns incoming peer connections on or off, or changes their port or UPnP mapping (see
+    /// `torrentplayer_net::Network::set_incoming`). torrentplayer-swarm follows by itself;
+    /// librqbit, when it is the engine for every torrent, fixes its listener when its session
+    /// starts, so a running session whose listener no longer matches is stopped (its torrents
+    /// are dropped) and the next torrent starts a new one.
+    pub async fn set_incoming(&self, config: IncomingConfig) {
+        let Some(network) = &self.network else {
+            return;
+        };
+        let mut slot = self.rqbit.lock().await;
+        network.set_incoming(config);
+        if let Some(engine) = slot.as_ref()
+            && engine.requested_listen() != self.rqbit_listen(engine.protected())
+        {
+            self.stop_rqbit(&mut slot).await;
+        }
+        self.report_rqbit_listener(slot.as_ref());
     }
 
     /// Stops librqbit and forgets its torrents, whose ids would otherwise point into the next
@@ -469,8 +550,9 @@ impl StreamEngine {
             torrents.retain(|_, b| !matches!(b, Backed::Rqbit { .. }));
             before - torrents.len()
         };
-        info!(dropped, "network mode changed: stopping librqbit");
+        info!(dropped, "network settings changed: stopping librqbit");
         engine.shutdown().await;
+        self.report_rqbit_listener(None);
     }
 
     /// Switches the network mode (see [`torrentplayer_net::Network::apply`]). librqbit's DHT, listening
@@ -497,7 +579,9 @@ impl StreamEngine {
         {
             self.stop_rqbit(&mut slot).await;
         }
-        network.apply(config)
+        let status = network.apply(config);
+        self.report_rqbit_listener(slot.as_ref());
+        status
     }
 
     fn torrents(&self) -> std::sync::MutexGuard<'_, HashMap<TorrentId, Backed>> {

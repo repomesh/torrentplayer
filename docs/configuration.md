@@ -51,6 +51,8 @@ Every problem is logged and shown at the top of the Settings page. Older files a
 `network.killSwitch` (the kill switch is always on in protected modes, see [Network](#network));
 a version 1 file loads normally and the field is dropped the next time settings are saved.
 Version 3 added the optional seeding time target; older files keep ratio-only seeding.
+`network.incomingPeers` was added later without a version change: files without it load with
+incoming connections off, and an out-of-range port is reset to 0 (random).
 
 ## Settings
 
@@ -158,19 +160,22 @@ turns the metadata prefetch of the other results on screen on or off (see
 The network layer (`torrentplayer-net`) applies these as soon as they are saved; see
 [Network modes and kill switch](network.md).
 
-| Setting                        | Default   | Valid values                                          | Applies                    |
-| ------------------------------ | --------- | ----------------------------------------------------- | -------------------------- |
-| `network.mode`                 | `direct`  | `direct`, `bindInterface`, `socks5`, `wireGuard`      | now                        |
-| `network.interface`            | `null`    | an interface name (for `bindInterface`)               | now                        |
-| `network.socks5.host`          | `""`      | a host name or IP address, without scheme or port     | now                        |
-| `network.socks5.port`          | `1080`    | 1–65535                                               | now                        |
-| `network.socks5.username`      | `null`    | 1–255 bytes                                           | now                        |
-| `network.socks5.proxyDns`      | `true`    | on: the proxy resolves names; off: TorrentPlayer does | now                        |
-| `network.socks5.proxyTrackers` | `true`    | on: trackers through the proxy; off: none at all      | now                        |
-| `network.socks5.proxyDht`      | `true`    | DHT through UDP ASSOCIATE; requires proxy UDP support | now                        |
-| `network.wireguard`            | empty     | set by importing a `.conf` file (non-secret parts)    | now in WireGuard mode      |
-| `network.encryption`           | `prefer`  | `prefer`, `require`, `off`                            | later                      |
-| `network.ipv6`                 | `disable` | `disable`, `tunnel`                                   | now (protected modes only) |
+| Setting                         | Default   | Valid values                                          | Applies                    |
+| ------------------------------- | --------- | ----------------------------------------------------- | -------------------------- |
+| `network.mode`                  | `direct`  | `direct`, `bindInterface`, `socks5`, `wireGuard`      | now                        |
+| `network.interface`             | `null`    | an interface name (for `bindInterface`)               | now                        |
+| `network.socks5.host`           | `""`      | a host name or IP address, without scheme or port     | now                        |
+| `network.socks5.port`           | `1080`    | 1–65535                                               | now                        |
+| `network.socks5.username`       | `null`    | 1–255 bytes                                           | now                        |
+| `network.socks5.proxyDns`       | `true`    | on: the proxy resolves names; off: TorrentPlayer does | now                        |
+| `network.socks5.proxyTrackers`  | `true`    | on: trackers through the proxy; off: none at all      | now                        |
+| `network.socks5.proxyDht`       | `true`    | DHT through UDP ASSOCIATE; requires proxy UDP support | now                        |
+| `network.wireguard`             | empty     | set by importing a `.conf` file (non-secret parts)    | now in WireGuard mode      |
+| `network.encryption`            | `prefer`  | `prefer`, `require`, `off`                            | later                      |
+| `network.ipv6`                  | `disable` | `disable`, `tunnel`                                   | now (protected modes only) |
+| `network.incomingPeers.enabled` | `false`   | on: accept incoming peer connections                  | now (never in SOCKS5 mode) |
+| `network.incomingPeers.port`    | `0`       | 0 (random 10000–49151, kept per run), 1024–65535      | now                        |
+| `network.incomingPeers.upnp`    | `false`   | on: ask the router to forward the port (UPnP)         | now (direct mode only)     |
 
 **Kill switch:** always on when a VPN or proxy mode is selected, so there is no setting for it.
 If the interface or proxy stops working, torrent traffic pauses and searches are refused; traffic
@@ -191,6 +196,14 @@ credential store and the remaining fields in `network.wireguard`, then connects.
 or failed handshake blocks traffic. No external VPN app or administrator rights are required.
 The file must contain a `DNS` server to resolve search, trackers, and other host names inside
 the tunnel. UDP trackers and DHT use the tunnel too. See [Network modes](network.md).
+
+**Incoming peers:** off by default, so TorrentPlayer only connects out and no firewall prompt
+appears. Turned on, it listens on every interface in direct mode (expect a firewall prompt;
+forward the port on your router or turn on UPnP), only on the VPN adapter in VPN mode, and only
+inside the tunnel in WireGuard mode; behind a VPN, peers reach the port only if the provider
+forwards it. A SOCKS5 proxy cannot accept incoming connections, so TorrentPlayer does not
+listen at all in that mode. Settings shows whether it is listening. See
+[Incoming peer connections](network.md#incoming-peer-connections).
 
 The SOCKS5 password and the WireGuard private and preshared keys are [secrets](#secrets).
 

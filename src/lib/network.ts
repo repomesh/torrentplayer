@@ -7,6 +7,7 @@
  */
 
 import { listen } from '@tauri-apps/api/event';
+import type { IncomingPeersStatus } from './bindings/IncomingPeersStatus';
 import type { NetworkModeKind } from './bindings/NetworkModeKind';
 import {
   NETWORK_STATUS_EVENT,
@@ -258,6 +259,48 @@ export function followPublicIp(onIp: (ip: PublicIp | null) => void): () => void 
     stopped = true;
     unlisten?.();
   };
+}
+
+/**
+ * What the incoming-peers setting does in each mode: where TorrentPlayer listens, and what the user
+ * may need to do for peers to reach it.
+ */
+export const INCOMING_HELP: Record<NetworkModeKind, string> = {
+  direct:
+    'Listens on every network interface, so your firewall may ask to allow TorrentPlayer. Behind a router, forward the port or turn on UPnP.',
+  bindInterface:
+    'Listens only on the VPN adapter, never on your other networks. Peers reach it only if your VPN provider forwards this port to you.',
+  socks5:
+    'Not available with a SOCKS5 proxy: it cannot accept incoming connections, so TorrentPlayer does not listen at all in this mode.',
+  wireGuard:
+    'Listens only inside the WireGuard tunnel, never on your own networks. Peers reach it only if your VPN provider forwards this port to your tunnel address.',
+};
+
+/** Whether every address is a wildcard (`0.0.0.0:6881`, `[::]:6881`). */
+function everyInterface(addresses: string[]): boolean {
+  return addresses.every((a) => a.startsWith('0.0.0.0:') || a.startsWith('[::]:'));
+}
+
+/** One line for the incoming-connection listener's state, for the status view. */
+export function describeIncoming(status: IncomingPeersStatus): string {
+  switch (status.kind) {
+    case 'off':
+      return 'Off';
+    case 'idle':
+      return `Not listening: ${status.reason}`;
+    case 'paused':
+      return 'Closed while traffic is paused';
+    case 'unsupported':
+      return `Not available: ${status.reason}`;
+    case 'failed':
+      return `Could not open the port: ${status.reason}`;
+    case 'listening': {
+      const where = everyInterface(status.addresses)
+        ? 'all interfaces'
+        : status.addresses.join(', ');
+      return `Listening on port ${String(status.port)} (${where})${status.upnp ? ' · UPnP requested' : ''}`;
+    }
+  }
 }
 
 /** Guidance for local virtual switches and mesh VPNs that do not imply internet routing. */

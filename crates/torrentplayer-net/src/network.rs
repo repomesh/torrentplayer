@@ -29,6 +29,7 @@ use crate::addr::is_public_ip;
 use crate::bind::{self, BoundInterface};
 use crate::bridge;
 use crate::error::NetError;
+use crate::incoming::{IncomingState, IncomingStatus};
 use crate::mode::{ModeKind, NetworkMode, Socks5Config};
 use crate::secret::Secret;
 use crate::socks5::{self, Target};
@@ -183,6 +184,8 @@ pub struct NetworkStatus {
     pub connected_since_ms: Option<u64>,
     /// Recent events, oldest first.
     pub events: Vec<NetEvent>,
+    /// Whether incoming peer connections are accepted, and where.
+    pub incoming: IncomingStatus,
 }
 
 /// What connections may do right now. Published on every change; see [`Network::subscribe`].
@@ -266,8 +269,12 @@ pub struct Network {
 
 pub(crate) struct Inner {
     state: Mutex<State>,
-    policy: watch::Sender<Policy>,
+    pub(crate) policy: watch::Sender<Policy>,
     wake: Arc<Notify>,
+    /// Wakes the incoming-connection listener (see [`crate::incoming`]).
+    pub(crate) incoming_wake: Arc<Notify>,
+    /// Increases whenever [`Network::status`] changes.
+    status_seq: watch::Sender<u64>,
     pub(crate) options: NetworkOptions,
     bridge_addr: SocketAddr,
     pub(crate) bridge_token: Secret,
@@ -289,18 +296,20 @@ impl Drop for Inner {
     }
 }
 
-struct State {
-    config: NetworkConfig,
-    conn: ConnectionState,
+pub(crate) struct State {
+    pub(crate) config: NetworkConfig,
+    pub(crate) conn: ConnectionState,
     bound: Option<BoundInterface>,
     tunnel: Option<Tunnel>,
     /// Increases on every `apply`, so results of checks started under old settings are dropped.
     generation: u64,
-    epoch: u64,
+    pub(crate) epoch: u64,
     last_check: Option<SystemTime>,
     /// When the state last became [`ConnectionState::Connected`]; meaningful only while it is.
     connected_since: Option<SystemTime>,
     events: VecDeque<NetEvent>,
+    /// Incoming peer connections.
+    pub(crate) incoming: IncomingState,
 }
 
 impl State {
@@ -323,7 +332,7 @@ impl State {
         }
     }
 
-    fn log(&mut self, level: EventLevel, message: String) {
+    pub(crate) fn log(&mut self, level: EventLevel, message: String) {
         match level {
             EventLevel::Info => tracing::info!(target: "torrentplayer_net", "{message}"),
             EventLevel::Warn => tracing::warn!(target: "torrentplayer_net", "{message}"),
@@ -340,7 +349,12 @@ impl State {
     }
 
     fn blocked(&self) -> NetError {
-        let reason = match &self.conn {
+        NetError::KillSwitch(self.blocked_reason())
+    }
+
+    /// Why traffic is blocked, for users.
+    pub(crate) fn blocked_reason(&self) -> String {
+        match &self.conn {
             ConnectionState::Connecting => {
                 "the connection is being verified; traffic waits until it is".to_owned()
             }
@@ -349,13 +363,12 @@ impl State {
             | ConnectionState::Error { reason } => reason.clone(),
             ConnectionState::Disconnected => "the network is stopped".to_owned(),
             ConnectionState::Direct | ConnectionState::Connected => "unknown".to_owned(),
-        };
-        NetError::KillSwitch(reason)
+        }
     }
 }
 
 /// Where a connection goes.
-enum Route {
+pub(crate) enum Route {
     Direct,
     Bind(BoundInterface),
     Socks(Socks5Config),
@@ -411,12 +424,21 @@ impl std::fmt::Debug for Network {
 }
 
 impl Inner {
-    fn state(&self) -> MutexGuard<'_, State> {
+    pub(crate) fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn publish(&self, st: &State) {
         self.policy.send_replace(st.policy());
+        self.status_changed();
+        // The listener follows the policy (see `crate::incoming`).
+        self.incoming_wake.notify_one();
+    }
+
+    /// Tells [`Network::status_changes`] watchers that the status changed.
+    pub(crate) fn status_changed(&self) {
+        self.status_seq
+            .send_modify(|seq| *seq = seq.wrapping_add(1));
     }
 
     /// Applies the result of a health check started under `generation`; returns when to check
@@ -532,6 +554,7 @@ impl Network {
             last_check: None,
             connected_since: None,
             events: VecDeque::new(),
+            incoming: IncomingState::default(),
         };
         let message = format!("Network mode: {}", describe(&st.config.mode));
         st.log(EventLevel::Info, message);
@@ -546,13 +569,20 @@ impl Network {
             state: Mutex::new(st),
             policy,
             wake: Arc::clone(&wake),
+            incoming_wake: Arc::new(Notify::new()),
+            status_seq: watch::channel(0).0,
             options,
             bridge_addr,
             bridge_token: token,
             cancel: cancel.clone(),
         });
         tokio::spawn(monitor(Arc::downgrade(&inner), wake, cancel.clone()));
-        tokio::spawn(bridge::serve(listener, Arc::downgrade(&inner), cancel));
+        tokio::spawn(bridge::serve(
+            listener,
+            Arc::downgrade(&inner),
+            cancel.clone(),
+        ));
+        tokio::spawn(crate::incoming::serve(Arc::downgrade(&inner), cancel));
         Ok(Self { inner })
     }
 
@@ -640,6 +670,7 @@ impl Network {
                 .skip(st.events.len().saturating_sub(STATUS_EVENTS))
                 .cloned()
                 .collect(),
+            incoming: st.incoming.status.clone(),
         }
     }
 
@@ -653,6 +684,13 @@ impl Network {
     #[must_use]
     pub fn subscribe(&self) -> watch::Receiver<Policy> {
         self.inner.policy.subscribe()
+    }
+
+    /// Notified whenever [`Network::status`] may have changed: every policy change, and changes
+    /// of the incoming-connection listener.
+    #[must_use]
+    pub fn status_changes(&self) -> watch::Receiver<u64> {
+        self.inner.status_seq.subscribe()
     }
 
     /// Waits until the state is no longer [`ConnectionState::Connecting`], or `timeout` passes,
@@ -919,7 +957,7 @@ impl Network {
         }))
     }
 
-    fn route(&self) -> Result<(Route, Lease, bool), NetError> {
+    pub(crate) fn route(&self) -> Result<(Route, Lease, bool), NetError> {
         let st = self.inner.state();
         if !st.conn.allows_traffic() {
             return Err(st.blocked());

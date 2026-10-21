@@ -229,6 +229,30 @@ pub(crate) async fn connect(
     Ok(socket.connect(target).await?)
 }
 
+/// A listening socket on `addr`. With `iface`, it is pinned to that interface as [`connect`]
+/// pins connections, so it accepts only connections that arrive through it (on Windows, the
+/// strong host model drops packets for the interface's address that arrive elsewhere).
+pub(crate) fn listen(
+    iface: Option<&BoundInterface>,
+    addr: SocketAddr,
+) -> Result<std::net::TcpListener, NetError> {
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(true)?;
+    }
+    // Elsewhere this only allows rebinding over connections in TIME_WAIT; on Windows it would
+    // let the socket share a port another program is listening on.
+    #[cfg(not(windows))]
+    socket.set_reuse_address(true)?;
+    if let Some(iface) = iface {
+        pin_to_device(&socket, iface, &addr)?;
+    }
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
+}
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn pin_to_device(
     socket: &Socket,
@@ -362,5 +386,32 @@ mod tests {
             Err(NetError::InterfaceUnavailable(_))
         ));
         drop(listener);
+    }
+
+    #[tokio::test]
+    async fn listeners_bind_only_the_given_address() {
+        let iface = BoundInterface {
+            name: "lo".into(),
+            v4: Some(Ipv4Addr::LOCALHOST),
+            v6: None,
+            index: None,
+        };
+        // As above, pinning to a device needs a real interface outside Windows.
+        let pinned = cfg!(not(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos",
+            target_os = "ios"
+        )))
+        .then_some(&iface);
+        let listener = listen(pinned, SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (_accepted, from) = listener.accept().await.unwrap();
+        assert_eq!(from, client.local_addr().unwrap());
+        // The same port cannot be opened twice.
+        assert!(listen(None, addr).is_err());
     }
 }

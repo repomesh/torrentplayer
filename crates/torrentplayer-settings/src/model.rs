@@ -33,6 +33,8 @@ pub const CLEANUP_RANGE_DAYS: (u32, u32) = (1, 3650);
 pub const RESULTS_RANGE: (u32, u32) = (10, 500);
 /// Longest accepted path, host name, interface name, or label.
 pub const MAX_TEXT: usize = 1024;
+/// Lowest port accepted for incoming peer connections (0 means a random port).
+pub const LISTEN_PORT_MIN: u16 = 1024;
 
 /// All of TorrentPlayer's settings. Secrets (passwords, private keys) are never part of this struct;
 /// they live in the OS credential store (see [`crate::SecretKey`]).
@@ -250,6 +252,8 @@ pub struct NetworkSettings {
     /// Show the public IPv4 and IPv6 addresses in the status bar, asked of icanhazip.com
     /// through the current mode when the connection changes and every 10 minutes.
     pub show_public_ip: bool,
+    /// Incoming peer connections (off by default).
+    pub incoming_peers: IncomingPeersSettings,
 }
 
 impl Default for NetworkSettings {
@@ -262,8 +266,26 @@ impl Default for NetworkSettings {
             encryption: EncryptionMode::Prefer,
             ipv6: Ipv6Policy::Disable,
             show_public_ip: true,
+            incoming_peers: IncomingPeersSettings::default(),
         }
     }
+}
+
+/// Incoming peer connections. Off by default, so TorrentPlayer opens no listening port and causes
+/// no firewall prompt; turning it on finds more peers and helps uploads. Files from before this
+/// setting existed load with it off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", default)]
+#[ts(export)]
+pub struct IncomingPeersSettings {
+    /// Accept incoming peer connections: in direct mode on every interface, with a VPN
+    /// interface only on that interface, with WireGuard only inside the tunnel, and never in
+    /// SOCKS5 mode.
+    pub enabled: bool,
+    /// TCP port, 1024–65535; 0 picks a random port (10000–49151) once per run.
+    pub port: u16,
+    /// In direct mode, ask the router to forward the port with UPnP. Ignored in other modes.
+    pub upnp: bool,
 }
 
 /// Connection mode.
@@ -552,6 +574,10 @@ impl Settings {
                     self.network.socks5.username = None;
                     true
                 }
+                "network.incomingPeers.port" => {
+                    self.network.incoming_peers.port = 0;
+                    true
+                }
                 field if field.starts_with("network.wireguard") => {
                     self.network.wireguard = WireGuardSettings::default();
                     true
@@ -582,6 +608,12 @@ impl Settings {
                 warnings.push("Import a WireGuard configuration.".to_owned());
             }
             _ => {}
+        }
+        if net.incoming_peers.enabled && net.mode == NetworkMode::Socks5 {
+            warnings.push(
+                "A SOCKS5 proxy cannot accept incoming peer connections, so TorrentPlayer does not \n                 listen in this mode."
+                    .to_owned(),
+            );
         }
         warnings
     }
@@ -713,6 +745,13 @@ impl NetworkSettings {
             errors.push(FieldError::new(
                 "network.socks5.username",
                 "User names are 1–255 bytes without control characters.",
+            ));
+        }
+        let port = self.incoming_peers.port;
+        if port != 0 && port < LISTEN_PORT_MIN {
+            errors.push(FieldError::new(
+                "network.incomingPeers.port",
+                "Choose a port between 1024 and 65535, or 0 for a random one.",
             ));
         }
         let wg = &self.wireguard;
@@ -956,6 +995,66 @@ mod tests {
         s.network.mode = NetworkMode::Socks5;
         assert_eq!(s.warnings().len(), 1);
         s.network.socks5.host = "10.0.0.1".into();
+        assert!(s.warnings().is_empty());
+    }
+
+    #[test]
+    fn incoming_peers_are_off_by_default_and_for_older_files() {
+        let defaults = Settings::default().network.incoming_peers;
+        assert!(
+            !defaults.enabled && !defaults.upnp,
+            "no listening port unless chosen"
+        );
+        assert_eq!(defaults.port, 0);
+        // A version 3 network section, saved before the setting existed.
+        let old: NetworkSettings =
+            serde_json::from_str(r#"{"mode": "direct", "showPublicIp": false}"#).unwrap();
+        assert_eq!(old.incoming_peers, IncomingPeersSettings::default());
+        let json = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(
+            json["network"]["incomingPeers"],
+            serde_json::json!({"enabled": false, "port": 0, "upnp": false})
+        );
+    }
+
+    #[test]
+    fn incoming_peer_ports_are_checked() {
+        let mut s = Settings::default();
+        for good in [0, 1024, 6881, 65535] {
+            s.network.incoming_peers.port = good;
+            assert_eq!(s.validate(), Ok(()), "{good}");
+        }
+        for bad in [1, 80, 1023] {
+            s.network.incoming_peers.port = bad;
+            let errors = s.validate().unwrap_err();
+            assert_eq!(errors[0].field, "network.incomingPeers.port", "{bad}");
+        }
+        let fixes = s.sanitize();
+        assert_eq!(fixes.len(), 1, "{fixes:?}");
+        assert_eq!(s.network.incoming_peers.port, 0, "reset to a random port");
+        // Through the Settings page: out of range, or the wrong type, is refused.
+        let current = Settings::default();
+        let patch = serde_json::json!({"network": {"incomingPeers": {"port": 80}}});
+        assert!(crate::apply_patch(&current, &patch).is_err());
+        let patch = serde_json::json!({"network": {"incomingPeers": {"port": 70000}}});
+        assert!(crate::apply_patch(&current, &patch).is_err());
+        let patch =
+            serde_json::json!({"network": {"incomingPeers": {"enabled": true, "port": 51413}}});
+        let next = crate::apply_patch(&current, &patch).unwrap();
+        assert!(next.network.incoming_peers.enabled);
+        assert_eq!(next.network.incoming_peers.port, 51413);
+    }
+
+    #[test]
+    fn incoming_peers_warn_in_socks5_mode() {
+        let mut s = Settings::default();
+        s.network.mode = NetworkMode::Socks5;
+        s.network.socks5.host = "10.0.0.1".into();
+        assert!(s.warnings().is_empty());
+        s.network.incoming_peers.enabled = true;
+        assert_eq!(s.warnings().len(), 1);
+        assert!(s.warnings()[0].contains("SOCKS5"));
+        s.network.mode = NetworkMode::Direct;
         assert!(s.warnings().is_empty());
     }
 

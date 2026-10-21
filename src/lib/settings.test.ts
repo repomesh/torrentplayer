@@ -49,6 +49,12 @@ describe('validate', () => {
     expect(validate('network.socks5.host', '')).toBeNull();
     expect(validate('network.socks5.username', 'x'.repeat(256))).not.toBeNull();
     expect(validate('network.socks5.proxyDns', false)).toBeNull();
+    for (const port of [0, 1024, 51_413, 65_535]) {
+      expect(validate('network.incomingPeers.port', port)).toBeNull();
+    }
+    for (const port of [1, 80, 1023, 65_536, 6881.5, Number.NaN]) {
+      expect(validate('network.incomingPeers.port', port)).toMatch(/1024 and 65535/);
+    }
   });
 
   it('accepts hosts without schemes or ports', () => {

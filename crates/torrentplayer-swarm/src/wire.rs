@@ -42,6 +42,17 @@ pub(crate) fn supports_extensions(h: &[u8; HANDSHAKE_LEN]) -> bool {
     h[EXTENSION_BYTE] & EXTENSION_BIT != 0
 }
 
+/// The info hash a peer's handshake names, if it is a BitTorrent handshake. A peer that connects
+/// to us sends it first, which tells which torrent the connection is for.
+pub(crate) fn handshake_info_hash(h: &[u8; HANDSHAKE_LEN]) -> Option<[u8; 20]> {
+    if h[0] != 19 || &h[1..20] != PROTOCOL {
+        return None;
+    }
+    let mut hash = [0u8; 20];
+    hash.copy_from_slice(&h[28..48]);
+    Some(hash)
+}
+
 /// Checks a peer's handshake and returns its peer id.
 pub(crate) fn check_handshake(
     h: &[u8; HANDSHAKE_LEN],
@@ -286,6 +297,9 @@ mod tests {
             check_handshake(&bad, &[7; 20]),
             Err(WireError::NotBitTorrent)
         );
+        assert_eq!(handshake_info_hash(&h), Some([7; 20]));
+        assert_eq!(handshake_info_hash(&bad), None);
+        assert_eq!(handshake_info_hash(&[0; HANDSHAKE_LEN]), None);
     }
 
     #[test]
