@@ -1,5 +1,6 @@
 # cargo-about configuration: generates THIRD_PARTY_NOTICES.md.
-# Regenerate with: cargo about generate --workspace about.hbs -o THIRD_PARTY_NOTICES.md
+# Regenerate with (from the repository root):
+#   cargo about generate --workspace --locked -c .cargo/about.toml .cargo/about.hbs -o THIRD_PARTY_NOTICES.md
 accepted = [
   "MIT",
   "MIT-0",

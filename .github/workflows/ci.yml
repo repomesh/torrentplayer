@@ -38,9 +38,9 @@ jobs:
       - name: Check generated IPC bindings are committed
         shell: bash
         run: |
-          if ! git diff --exit-code -- src/lib/bindings \
-            || [ -n "$(git ls-files --others --exclude-standard -- src/lib/bindings)" ]; then
-            echo "::error::IPC bindings are out of date. Run 'cargo test -p torrentplayer-app' and commit src/lib/bindings."
+          if ! git diff --exit-code -- ui/src/lib/bindings \
+            || [ -n "$(git ls-files --others --exclude-standard -- ui/src/lib/bindings)" ]; then
+            echo "::error::IPC bindings are out of date. Run 'cargo test -p torrentplayer-app' and commit ui/src/lib/bindings."
             exit 1
           fi
 
@@ -100,15 +100,18 @@ jobs:
           tool: cargo-about
       - name: Check THIRD_PARTY_NOTICES.md is up to date
         run: |
-          cargo about generate --workspace --locked about.hbs -o THIRD_PARTY_NOTICES.md
+          cargo about generate --workspace --locked -c .cargo/about.toml .cargo/about.hbs -o THIRD_PARTY_NOTICES.md
           if ! git diff --exit-code -- THIRD_PARTY_NOTICES.md; then
-            echo "::error::THIRD_PARTY_NOTICES.md is out of date. Regenerate it with the command in about.toml."
+            echo "::error::THIRD_PARTY_NOTICES.md is out of date. Regenerate it with the command in .cargo/about.toml."
             exit 1
           fi
 
   frontend:
     name: Frontend
     runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ui
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -117,7 +120,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: ui/package-lock.json
       - run: npm ci
+      # Covers the whole repository (Markdown, YAML, JSON), not only ui/.
       - name: Formatting
         run: npm run format:check
       - name: Lint
@@ -177,7 +182,7 @@ jobs:
           missing=0
           for sha in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
             if ! git show -s --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
-              echo "::error::Commit $sha is missing a 'Signed-off-by:' line. See CONTRIBUTING.md#developer-certificate-of-origin."
+              echo "::error::Commit $sha is missing a 'Signed-off-by:' line. See .github/CONTRIBUTING.md#developer-certificate-of-origin."
               missing=1
             fi
           done

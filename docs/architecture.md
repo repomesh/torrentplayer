@@ -107,14 +107,14 @@ See [ADR 0002](adr/0002-workspace-layout.md).
 
 ## Frontend
 
-The UI lives in `src/` (Svelte 5 + TypeScript, built by Vite into `dist/`). It talks to the
-backend only through `src/lib/ipc.ts`, using types generated from Rust (see
+The UI lives in `ui/src/` (Svelte 5 + TypeScript, built by Vite into `ui/dist/`). It talks to the
+backend only through `ui/src/lib/ipc.ts`, using types generated from Rust (see
 [IPC contract](ipc.md)). The webview loads only bundled assets: no remote content, no inline
 scripts, and a strict Content Security Policy (see [Threat model](threat-model.md)).
 
 ### Navigation
 
-`src/App.svelte` is the shell: a narrow rail at the left (`NavRail.svelte`) and one view at a
+`ui/src/App.svelte` is the shell: a narrow rail at the left (`NavRail.svelte`) and one view at a
 time. Every view stays reachable from the rail.
 
 ```text
@@ -134,19 +134,19 @@ time. Every view stays reachable from the rail.
 └──────┴────────────────────────────────────────────────┘
 ```
 
-- **History** (`src/lib/nav.ts`) is browser-style back and forward over small view
+- **History** (`ui/src/lib/nav.ts`) is browser-style back and forward over small view
   descriptors. Each search is its own entry, so Back moves between recent searches.
 - **State survives navigation.** The search page stays mounted (hidden), so the query,
   results, filters, and preload are as they were. Scroll positions and focus are remembered
   per view. Leaving the player unmounts it but keeps the stream open (it keeps downloading).
   Coming back resumes at the same position. Playing something else, or a failed start, closes
   the stream.
-- **Queue** (`src/lib/queue.ts`, persisted by `torrentplayer-library`) is a playlist with a cursor.
+- **Queue** (`ui/src/lib/queue.ts`, persisted by `torrentplayer-library`) is a playlist with a cursor.
   At the end of a video an "Up next" card counts down 5 s (cancel with Esc), unless
   `playback.autoplayNext` is off. The playlist panel beside the player collapses with Q, and
   Shift+N plays the next item. Fullscreen is requested on the stage that holds the player,
   not the player itself, so it stays on when the next video's player replaces the last one.
-- **Library and resume** (`torrentplayer-library`, `src/lib/library.ts`) identify a playable file by
+- **Library and resume** (`torrentplayer-library`, `ui/src/lib/library.ts`) identify a playable file by
   `(info hash, file index)` and store its safe replay link, display metadata, last position,
   duration, and completion state in `library.sqlite3`. Ordinary playback is checkpointed every
   five seconds; the first report, seeks, completion, stream stop, and app shutdown force a save.
@@ -165,7 +165,7 @@ time. Every view stays reachable from the rail.
   name plays one now, the tick queues or removes it. ↑/↓ move, ←/→ collapse and expand,
   Enter plays, Space ticks, Alt+↑/↓ (or dragging the torrent row) moves the whole torrent.
   "Choose files…" (`FileChooser.svelte`) is there for bulk changes.
-- **Files** (`FileExplorer.svelte`, `src/lib/explorer.ts`) lists the torrents in the queue
+- **Files** (`FileExplorer.svelte`, `ui/src/lib/explorer.ts`) lists the torrents in the queue
   and those opened this session; a torrent only in the queue is added when chosen (details
   only). The chosen torrent's videos fill the top half (lecture order, Play and + Queue), its
   other files the bottom half by folder, and the selected file's preview sits beside them
@@ -207,7 +207,7 @@ time. Every view stays reachable from the rail.
   of a torrent already added (the course playing) is prefetched inside it: torrentplayer-swarm wants
   its start and end at background priority (`Torrent::select_range`), behind the playhead;
   librqbit selects the file and prioritizes its ends in the last minute of playback.
-- **Search filters** (`src/lib/filters.ts`) are client-side over the results on screen and
+- **Search filters** (`ui/src/lib/filters.ts`) are client-side over the results on screen and
   stay set for the session. The category menu sits in the search box, and the search service
   is asked for that category (Torznab ids, `categoryIds`). The best pick's preload
   does not follow the filters, so tweaking them never churns downloads; when the filters hide

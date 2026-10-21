@@ -3,7 +3,7 @@
 
 # Frontend
 node_modules/
-/dist/
+/ui/dist/
 
 # Tauri generated files
 /src-tauri/gen/

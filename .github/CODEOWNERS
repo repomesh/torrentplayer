@@ -1,7 +1,7 @@
 # Default reviewers for everything. Replace with the real maintainer team or handles.
 * @torrentplayer
 
-# Sensitive areas: GOVERNANCE.md requires two maintainer approvals for changes here.
+# Sensitive areas: .github/GOVERNANCE.md requires two maintainer approvals for changes here.
 /crates/torrentplayer-player/ @torrentplayer
 /crates/torrentplayer-net/    @torrentplayer
 /.github/workflows/   @torrentplayer

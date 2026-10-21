@@ -1,0 +1,9 @@
+# `npm run format` checks the whole repository, so this file is read together with the root
+# .gitignore. Patterns are relative to ui/; "../" reaches the repository root.
+dist/
+src/lib/bindings/
+package-lock.json
+../src-tauri/icons/
+../CHANGELOG.md
+../THIRD_PARTY_NOTICES.md
+../.cargo/about.hbs

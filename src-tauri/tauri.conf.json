@@ -4,10 +4,10 @@
   "identifier": "io.torrentplayer.desktop",
   "mainBinaryName": "TorrentPlayer",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": { "script": "npm run dev", "cwd": "../ui" },
+    "beforeBuildCommand": { "script": "npm run build", "cwd": "../ui" }
   },
   "app": {
     "withGlobalTauri": false,

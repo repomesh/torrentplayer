@@ -8,7 +8,7 @@ that changes gets a new ADR that supersedes the old one.
 
 1. Copy [`template.md`](template.md) to `NNNN-short-title.md` using the next free number.
 2. Open a pull request with status **Proposed**. Leave it open for comment for at least 7 days
-   (see [GOVERNANCE.md](../../GOVERNANCE.md)).
+   (see [GOVERNANCE.md](../../.github/GOVERNANCE.md)).
 3. On merge, set the status to **Accepted**.
 
 ## Index

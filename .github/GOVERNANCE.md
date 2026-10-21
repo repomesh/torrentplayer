@@ -18,7 +18,7 @@ TorrentPlayer is a community project. This document describes how decisions are 
   one maintainer, or two for changes to `unsafe` code, the network and kill-switch logic, or the
   release pipeline.
 - Significant technical decisions (architecture, new major dependencies, licensing, data formats)
-  are proposed as an [Architecture Decision Record](docs/adr/) in a pull request and left open
+  are proposed as an [Architecture Decision Record](../docs/adr/) in a pull request and left open
   for comment for at least 7 days.
 - Maintainers aim for consensus. If consensus cannot be reached, maintainers decide by simple
   majority vote.

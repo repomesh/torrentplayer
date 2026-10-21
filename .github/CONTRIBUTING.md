@@ -14,14 +14,14 @@ look for. By participating, you agree to follow the [Code of Conduct](CODE_OF_CO
 - **Suggest features** with the feature request template. Explain the problem before the solution.
 - **Improve documentation.** Docs PRs are always welcome.
 - **Write code.** For anything bigger than a small fix, open an issue first so we can agree on the
-  approach. Significant design decisions are recorded as [ADRs](docs/adr/).
+  approach. Significant design decisions are recorded as [ADRs](../docs/adr/).
 
 Security vulnerabilities must be reported privately; see [SECURITY.md](SECURITY.md).
 
 ## Development setup
 
-Follow [Building from source](README.md#building-from-source) and
-[docs/building.md](docs/building.md). Run every CI check locally before opening a PR:
+Follow [Building from source](../README.md#building-from-source) and
+[docs/building.md](../docs/building.md). Run every CI check locally before opening a PR:
 
 ```sh
 # Rust
@@ -31,7 +31,8 @@ cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo deny check
 
-# Frontend
+# Frontend (in ui/; format:check covers the whole repository)
+cd ui
 npm run format:check
 npm run lint
 npm run check
@@ -46,7 +47,7 @@ npm test
       targets where they handle untrusted input.
 - [ ] Public Rust items have rustdoc comments, with `# Errors`, `# Panics`, and `# Safety`
       sections where they apply.
-- [ ] User-facing changes are noted under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md).
+- [ ] User-facing changes are noted under `## [Unreleased]` in [CHANGELOG.md](../CHANGELOG.md).
 - [ ] Docs in `docs/` are updated if behavior, configuration, or the IPC contract changed.
 - [ ] Any new dependency is justified in the PR description (why it is needed, its license,
       and its maintenance status), and `cargo deny check` passes.
@@ -85,7 +86,7 @@ The rules are enforced by tooling, so in most cases you only need to run the for
 
 ### Rust
 
-- Formatting: `rustfmt` with the settings in [`rustfmt.toml`](rustfmt.toml).
+- Formatting: `rustfmt` with the settings in [`rustfmt.toml`](../rustfmt.toml).
 - Linting: Clippy with `pedantic` enabled and warnings denied. If you must allow a lint, put the
   `#[allow(...)]` on the smallest possible item with a comment explaining why.
 - Follow the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/).
@@ -103,8 +104,8 @@ The rules are enforced by tooling, so in most cases you only need to run the for
 ### Frontend
 
 - TypeScript in strict mode, formatted by Prettier and linted by ESLint.
-- All backend calls go through `src/lib/ipc.ts`. IPC payload types are generated from Rust by
-  `ts-rs` into `src/lib/bindings/` (run `cargo test -p torrentplayer-app` to regenerate) and must not be
+- All backend calls go through `ui/src/lib/ipc.ts`. IPC payload types are generated from Rust by
+  `ts-rs` into `ui/src/lib/bindings/` (run `cargo test -p torrentplayer-app` to regenerate) and must not be
   edited by hand.
 
 ### File headers

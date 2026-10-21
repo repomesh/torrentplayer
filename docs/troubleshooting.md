@@ -16,8 +16,8 @@ target; make sure you have not replaced its `WindowsAttributes` settings, then r
 
 ### `frontendDist ... doesn't exist`
 
-Tauri embeds the built frontend at compile time. Run `npm ci && npm run build` before building
-`torrentplayer-app` with `cargo`.
+Tauri embeds the built frontend (`ui/dist/`) at compile time. Run `npm ci && npm run build`
+in `ui/` before building `torrentplayer-app` with `cargo`.
 
 ### Linux: `webkit2gtk-4.1` not found
 
@@ -28,7 +28,7 @@ Install the system packages listed in the [README](../README.md#building-from-so
 ### Enable debug logging
 
 ```sh
-RUST_LOG=debug npm run tauri dev
+RUST_LOG=debug npm run tauri dev   # in ui/
 ```
 
 ### A video plays without sound

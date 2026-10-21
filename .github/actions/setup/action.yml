@@ -1,11 +1,11 @@
 name: Set up TorrentPlayer build environment
 description: >-
   Installs the pinned Rust toolchain, Node.js, Tauri system dependencies, and frontend
-  packages, then builds the frontend (Tauri embeds dist/ at compile time).
+  packages, then builds the frontend (Tauri embeds ui/dist/ at compile time).
 
 inputs:
   build-frontend:
-    description: Whether to run `npm run build`.
+    description: Whether to run `npm run build` in ui/.
     default: 'true'
   rust-cache:
     description: Whether to cache Cargo build output. Never enable this in release workflows.
@@ -37,12 +37,15 @@ runs:
       with:
         node-version: 22
         cache: npm
+        cache-dependency-path: ui/package-lock.json
 
     - name: Install frontend dependencies
       shell: bash
+      working-directory: ui
       run: npm ci
 
     - name: Build frontend
       if: inputs.build-frontend == 'true'
       shell: bash
+      working-directory: ui
       run: npm run build

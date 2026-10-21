@@ -8,7 +8,7 @@ import ts from 'typescript-eslint';
 
 export default ts.config(
   {
-    ignores: ['dist/', 'docs/book/', 'src-tauri/', 'target/', 'node_modules/'],
+    ignores: ['dist/', 'node_modules/'],
   },
   js.configs.recommended,
   ...ts.configs.strictTypeChecked,
@@ -35,6 +35,8 @@ export default ts.config(
     files: ['**/*.js'],
     ...ts.configs.disableTypeChecked,
   },
+  // The repository's scripts/ folder, linted by a second run from the root (see "lint" in
+  // package.json), where this pattern resolves.
   {
     files: ['scripts/*.mjs'],
     ...ts.configs.disableTypeChecked,

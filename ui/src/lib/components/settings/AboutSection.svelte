@@ -15,7 +15,7 @@
     loadingNotices = true;
     try {
       // A separate chunk, loaded only when asked for.
-      notices = (await import('../../../../THIRD_PARTY_NOTICES.md?raw')).default;
+      notices = (await import('../../../../../THIRD_PARTY_NOTICES.md?raw')).default;
     } finally {
       loadingNotices = false;
     }
