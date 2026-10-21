@@ -248,7 +248,7 @@
             }}
           />
         {:else if active === 'advanced'}
-          <AdvancedSection settings={local} {view} {update} />
+          <AdvancedSection settings={local} {view} {errors} {update} />
         {:else}
           <AboutSection />
         {/if}

@@ -254,3 +254,49 @@ async fn published_url_is_redacted_in_debug_output() {
     assert!(!format!("{published:?}").contains(token));
     assert!(!format!("{:?}", f.server).contains(token));
 }
+
+#[tokio::test]
+async fn private_tokens_open_only_their_own_stream() {
+    let f = fixture().await;
+    let addr = f.server.local_addr();
+    let private = f
+        .server
+        .publish_private(Arc::new(Memory(Arc::clone(&f.data))))
+        .unwrap();
+    let path = &private.url[private.url.find("/s/").unwrap()..];
+    let token = path.split("t=").nth(1).unwrap();
+    assert!(!f.path.contains(token), "not the session token");
+
+    let r = send(
+        addr,
+        &get(
+            path,
+            &f.host,
+            "Range: bytes=0-9
+",
+        ),
+    )
+    .await;
+    assert_eq!(r.status, 206);
+    assert_eq!(r.body, f.data[..10]);
+    // The session token opens it too.
+    let session = &f.path[f.path.find('?').unwrap()..];
+    let r = send(
+        addr,
+        &get(&format!("/s/{}{session}", private.id), &f.host, ""),
+    )
+    .await;
+    assert_eq!(r.status, 200);
+
+    // Its token opens neither the other stream nor an unknown one.
+    for other in ["/s/1", "/s/999", "/other"] {
+        let r = send(addr, &get(&format!("{other}?t={token}"), &f.host, "")).await;
+        assert_eq!(r.status, 403, "{other}");
+    }
+
+    // Unpublished, its token opens nothing (and does not tell that it existed).
+    f.server.unpublish(private.id);
+    let r = send(addr, &get(path, &f.host, "")).await;
+    assert_eq!(r.status, 403);
+    assert!(!format!("{private:?}").contains(token));
+}

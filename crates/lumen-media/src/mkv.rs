@@ -4,13 +4,13 @@
 //!
 //! `Tracks` normally comes before the first `Cluster`, within the first few kilobytes. If a
 //! `Cluster` comes first, the `SeekHead` says where `Tracks` is. Elements are skipped by their
-//! size without reading their contents.
+//! size without reading their contents. The `Info` element before `Tracks` gives the duration.
 
 use crate::audio::{AudioCodec, AudioTrack, MAX_AUDIO_TRACKS};
 use crate::sparse::{Sparse, Stop};
 use crate::tracks::{
-    Container, MAX_SUBTITLE_TRACKS, SubtitleCodec, SubtitleTrack, TrackReport, language_tag,
-    track_name,
+    Container, MAX_SUBTITLE_TRACKS, SubtitleCodec, SubtitleTrack, TrackReport, duration_ms,
+    language_tag, track_name,
 };
 
 const EBML: u32 = 0x1A45_DFA3;
@@ -19,6 +19,9 @@ const SEEK_HEAD: u32 = 0x114D_9B74;
 const SEEK: u32 = 0x4DBB;
 const SEEK_ID: u32 = 0x53AB;
 const SEEK_POSITION: u32 = 0x53AC;
+const INFO: u32 = 0x1549_A966;
+const TIMESTAMP_SCALE: u32 = 0x2A_D7B1;
+const DURATION: u32 = 0x4489;
 const TRACKS: u32 = 0x1654_AE6B;
 const TRACK_ENTRY: u32 = 0xAE;
 const TRACK_TYPE: u32 = 0x83;
@@ -169,13 +172,15 @@ pub(crate) fn parse(data: &Sparse) -> Result<TrackReport, Stop> {
 fn segment(data: &Sparse, start: u64, end: u64) -> Result<TrackReport, Stop> {
     let mut at = start;
     let mut tracks_at = None;
+    let mut duration = None;
     for _ in 0..MAX_SEGMENT_CHILDREN {
         if at >= end {
             break;
         }
         let el = element(data, at, end)?;
         match el.id {
-            TRACKS => return tracks(data, el),
+            TRACKS => return tracks(data, el, duration),
+            INFO if duration.is_none() => duration = info_duration(data, el)?,
             SEEK_HEAD if tracks_at.is_none() => tracks_at = seek_tracks(data, el, start)?,
             CLUSTER => match tracks_at.take() {
                 // Positions only move forward, so the walk ends.
@@ -215,7 +220,42 @@ fn seek_tracks(data: &Sparse, head: Element, segment_start: u64) -> Result<Optio
     Ok(None)
 }
 
-fn tracks(data: &Sparse, el: Element) -> Result<TrackReport, Stop> {
+/// The segment's duration in `Info`, in milliseconds. A malformed `Info` gives `None` rather
+/// than failing the probe: the tracks matter more.
+fn info_duration(data: &Sparse, info: Element) -> Result<Option<u64>, Stop> {
+    let fields = match children(data, info) {
+        Ok(fields) => fields,
+        Err(Stop::Invalid(_)) => return Ok(None),
+        Err(other) => return Err(other),
+    };
+    // Matroska's default: one timestamp unit is a millisecond.
+    let (mut scale, mut duration) = (1_000_000, None);
+    for field in fields {
+        match field.id {
+            TIMESTAMP_SCALE => scale = uint(data, field).unwrap_or(0),
+            DURATION => duration = float(data, field)?,
+            _ => {}
+        }
+    }
+    // Precision loss is irrelevant at millisecond resolution.
+    #[allow(clippy::cast_precision_loss)]
+    let ms = duration.and_then(|d| duration_ms(d * scale as f64, 1e9));
+    Ok(ms)
+}
+
+/// A float element (4 or 8 bytes); `None` for any other size.
+fn float(data: &Sparse, field: Element) -> Result<Option<f64>, Stop> {
+    let Some(end) = field.end else {
+        return Ok(None);
+    };
+    Ok(match end - field.body {
+        4 => Some(f64::from(f32::from_be_bytes(data.array(field.body)?))),
+        8 => Some(f64::from_be_bytes(data.array(field.body)?)),
+        _ => None,
+    })
+}
+
+fn tracks(data: &Sparse, el: Element, duration_ms: Option<u64>) -> Result<TrackReport, Stop> {
     let mut audio = Vec::new();
     let mut subtitles = Vec::new();
     for entry in children(data, el)? {
@@ -247,6 +287,7 @@ fn tracks(data: &Sparse, el: Element) -> Result<TrackReport, Stop> {
         container: Container::Matroska,
         audio,
         subtitles,
+        duration_ms,
     })
 }
 
@@ -439,6 +480,41 @@ pub(crate) mod tests {
             report.playable_alternative().unwrap().codec,
             AudioCodec::Aac
         );
+    }
+
+    #[test]
+    fn reads_the_duration_from_info() {
+        let with_info = |info: Vec<u8>| {
+            let f = file(&[info, el(TRACKS, &track(2, "A_AAC", None))]);
+            parse_all(f).unwrap().duration_ms
+        };
+        let scale = |ns: u32| el(TIMESTAMP_SCALE, &ns.to_be_bytes());
+        let f64_duration = |d: f64| el(DURATION, &d.to_be_bytes());
+        let f32_duration = |d: f32| el(DURATION, &d.to_be_bytes());
+        assert_eq!(
+            with_info(el(INFO, &f64_duration(5_400_000.0))),
+            Some(5_400_000)
+        );
+        assert_eq!(
+            with_info(el(
+                INFO,
+                &[scale(1_000_000), f32_duration(95_500.0)].concat()
+            )),
+            Some(95_500)
+        );
+        // Microsecond units.
+        assert_eq!(
+            with_info(el(INFO, &[scale(1000), f64_duration(2_000_000.0)].concat())),
+            Some(2000)
+        );
+        assert_eq!(with_info(info()), None, "no Duration");
+        assert_eq!(with_info(el(INFO, &f64_duration(f64::NAN))), None);
+        assert_eq!(
+            with_info(el(INFO, &el(DURATION, &[1, 2, 3]))),
+            None,
+            "bad size"
+        );
+        assert_eq!(with_info(el(INFO, &[0xFF; 3])), None, "malformed Info");
     }
 
     #[test]

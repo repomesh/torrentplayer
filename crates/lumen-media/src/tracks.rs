@@ -10,6 +10,9 @@ pub(crate) const MAX_SUBTITLE_TRACKS: usize = 64;
 const MAX_NAME_CHARS: usize = 100;
 /// Longest language tag kept (`zh-Hant-TW` is 10).
 const MAX_LANGUAGE_CHARS: usize = 16;
+/// Longest duration believed, in milliseconds (about 11 days); longer ones are reported as
+/// unknown.
+pub const MAX_DURATION_MS: u64 = 1_000_000_000;
 
 /// The container format that was probed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -86,6 +89,9 @@ pub struct TrackReport {
     pub audio: Vec<AudioTrack>,
     /// Enabled subtitle tracks in container order (at most 64).
     pub subtitles: Vec<SubtitleTrack>,
+    /// The duration the header gives (MP4 `mvhd`, Matroska `Info`), in milliseconds, if it
+    /// gives a plausible one. Fragmented MP4 and live Matroska files often give none.
+    pub duration_ms: Option<u64>,
 }
 
 impl TrackReport {
@@ -122,6 +128,19 @@ pub(crate) fn language_tag(raw: &[u8]) -> Option<String> {
     plausible.then(|| tag.to_owned())
 }
 
+/// `units` at `per_second` units per second as whole milliseconds, if plausible: more than
+/// zero and at most [`MAX_DURATION_MS`].
+pub(crate) fn duration_ms(units: f64, per_second: f64) -> Option<u64> {
+    let ms = (units / per_second * 1000.0).round();
+    // The range check makes the conversion exact.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    (ms.is_finite() && ms >= 1.0 && ms <= MAX_DURATION_MS as f64).then_some(ms as u64)
+}
+
 /// A track name from the container as plain text: control characters dropped, whitespace
 /// collapsed, at most 100 characters.
 pub(crate) fn track_name(raw: &[u8]) -> Option<String> {
@@ -154,6 +173,7 @@ mod tests {
             container: Container::Matroska,
             audio,
             subtitles: Vec::new(),
+            duration_ms: None,
         }
     }
 
@@ -208,6 +228,13 @@ mod tests {
         assert_eq!(track_name(b"\0\0"), None);
         assert_eq!(track_name(&[b'a'; 500]).map(|n| n.len()), Some(100));
         assert_eq!(SubtitleCodec::Image.id(), "image");
+        assert_eq!(duration_ms(90_000.0, 1000.0), Some(90_000));
+        assert_eq!(duration_ms(1.0, 3.0), Some(333));
+        assert_eq!(duration_ms(0.0, 1000.0), None);
+        assert_eq!(duration_ms(5.0, 0.0), None, "no time scale");
+        assert_eq!(duration_ms(-5.0, 1.0), None);
+        assert_eq!(duration_ms(f64::NAN, 1.0), None);
+        assert_eq!(duration_ms(2e9, 1.0), None, "63 years");
         assert!(SubtitleCodec::Ass.is_text() && !SubtitleCodec::Image.is_text());
     }
 }

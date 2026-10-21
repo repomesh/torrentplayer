@@ -68,6 +68,7 @@ tags these "Coming in a later milestone").
 | `playback.optimizeQueue`      | `false` | on / off      | at once                        |
 | `playback.keepCourseOrder`    | `true`  | on / off      | at once                        |
 | `playback.subtitlesByDefault` | `false` | on / off      | when the next video starts     |
+| `playback.seekThumbnails`     | `true`  | on / off      | at once                        |
 
 The speed menu in the player changes the current video only; the default applies to each video
 as it starts. `subtitlesByDefault` ("Show subtitles automatically") turns on the video's own
@@ -79,6 +80,9 @@ moving the video playing; with `keepCourseOrder`, files of one torrent keep thei
 saved before these two existed read them as their defaults. With `resumePosition`, reopening an
 unfinished video at least 10 seconds in offers its saved position or a fresh start. Positions are
 kept even while this preference is off, so the Library can still show watch progress.
+`seekThumbnails` ("Seek bar
+previews") shows a frame above the seek bar where the pointer is, for the parts already
+downloaded; it needs FFmpeg (see `advanced.ffmpegDir`).
 
 ### Downloads and storage
 
@@ -195,11 +199,20 @@ The SOCKS5 password and the WireGuard private and preshared keys are [secrets](#
 | `advanced.engine`       | `auto`  | `auto`, `swarm`, `rqbit`                  | next start |
 | `advanced.debugOverlay` | `true`  | on / off                                  | now        |
 | `advanced.logLevel`     | `info`  | `error`, `warn`, `info`, `debug`, `trace` | now        |
+| `advanced.ffmpegDir`    | `null`  | `null` (look on `PATH`) or a full path    | now        |
 
 `auto` and `swarm` use TorrentStream's engine (lumen-swarm) for every source. For a magnet link,
 librqbit fetches only the metadata, then hands the torrent and the peers it found to lumen-swarm.
 `rqbit` is the compatibility choice that uses librqbit for the download too. The environment variables below override `engine` and
 `logLevel`, and the Settings page says so when they do.
+
+FFmpeg is optional and not bundled yet. With `ffprobe` and `ffmpeg` in `ffmpegDir` (or its
+`bin` folder), or on `PATH` when it is `null`, TorrentStream finds the duration of videos whose
+header gives none, so read-ahead and the buffer estimate work for them, and shows seek-bar
+previews. The Settings page shows what was found and its version. An LGPL build is enough (for
+example the `lgpl` builds at <https://github.com/BtbN/FFmpeg-Builds/releases>, or a package
+manager's `ffmpeg`). The programs only ever read what is already downloaded, through the local
+stream server; see [IPC](ipc.md#ffmpeg-optional).
 
 ## Secrets
 

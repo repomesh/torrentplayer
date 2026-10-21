@@ -21,6 +21,7 @@
     parseSubtitles,
     recordPlayerMetric,
     reportPlayback,
+    seekThumbnail,
     streamAudio,
     streamStats,
     streamSubtitles,
@@ -43,6 +44,7 @@
   import { PlaybackTimer } from '../metrics';
   import { followNetwork, pausedMessage } from '../network';
   import { SeekGate } from '../seekgate';
+  import { thumbnailSource } from '../seekbar';
   import type { SettingsSection } from '../settings';
   import { Ewma, bufferHealth, bufferedSeconds, etaSeconds, type StatusInfo } from '../stats';
   import Controls from './Controls.svelte';
@@ -122,6 +124,15 @@
   let muted = $state(false);
   let volume = $state(1);
   let fullscreen = $state(false);
+  // Seek-bar pictures of this video (not of audio). The duration is read when one is asked
+  // for, so it learning the duration does not forget the pictures.
+  const thumbnails = $derived.by(() => {
+    if (audio !== null) {
+      return null;
+    }
+    const streamId = stream.streamId;
+    return thumbnailSource((secs) => seekThumbnail(streamId, secs, duration).catch(() => null));
+  });
   // Muted only because the autoplay policy refused sound; an "unmute" button shows meanwhile.
   let autoMuted = $state(false);
 
@@ -950,6 +961,7 @@
     {currentTime}
     {duration}
     pieceMap={stats?.pieceMap ?? []}
+    {thumbnails}
     {rate}
     {muted}
     {volume}

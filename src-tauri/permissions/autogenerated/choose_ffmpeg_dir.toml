@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-choose-ffmpeg-dir"
+description = "Enables the choose_ffmpeg_dir command without any pre-configured scope."
+commands.allow = ["choose_ffmpeg_dir"]
+
+[[permission]]
+identifier = "deny-choose-ffmpeg-dir"
+description = "Denies the choose_ffmpeg_dir command without any pre-configured scope."
+commands.deny = ["choose_ffmpeg_dir"]

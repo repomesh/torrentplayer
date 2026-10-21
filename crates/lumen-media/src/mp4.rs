@@ -11,7 +11,8 @@
 use crate::audio::{AudioCodec, AudioTrack, MAX_AUDIO_TRACKS};
 use crate::sparse::{Sparse, Stop};
 use crate::tracks::{
-    Container, MAX_SUBTITLE_TRACKS, SubtitleCodec, SubtitleTrack, TrackReport, language_tag,
+    Container, MAX_SUBTITLE_TRACKS, SubtitleCodec, SubtitleTrack, TrackReport, duration_ms,
+    language_tag,
 };
 
 /// Top-level boxes visited before giving up on finding `moov`.
@@ -117,8 +118,11 @@ pub(crate) fn parse(data: &Sparse) -> Result<TrackReport, Stop> {
 
 fn moov(data: &Sparse, moov: Bx) -> Result<TrackReport, Stop> {
     let (mut audio, mut subtitles) = (Vec::new(), Vec::new());
+    let mut duration = None;
     walk(data, moov.body, moov.end, |b| {
-        if &b.kind == b"trak" {
+        if &b.kind == b"mvhd" {
+            duration = movie_duration(data, b)?;
+        } else if &b.kind == b"trak" {
             match track(data, b)? {
                 Some(Track::Audio(t)) if audio.len() < MAX_AUDIO_TRACKS => audio.push(t),
                 Some(Track::Subtitle(t)) if subtitles.len() < MAX_SUBTITLE_TRACKS => {
@@ -133,7 +137,44 @@ fn moov(data: &Sparse, moov: Bx) -> Result<TrackReport, Stop> {
         container: Container::Mp4,
         audio,
         subtitles,
+        duration_ms: duration,
     })
+}
+
+/// The movie's duration in `mvhd`, in milliseconds. A short box, a zero time scale, or the
+/// all-ones "unknown" duration (as in fragmented files) gives `None`.
+fn movie_duration(data: &Sparse, mvhd: Bx) -> Result<Option<u64>, Stop> {
+    // FullBox, creation and modification times, time scale, then the duration: 32-bit times
+    // and duration in version 0, 64-bit ones in version 1.
+    let version = if mvhd.body_len() >= 1 {
+        data.u8_at(mvhd.body)?
+    } else {
+        return Ok(None);
+    };
+    let (scale_at, wide) = match version {
+        0 => (12, false),
+        1 => (20, true),
+        _ => return Ok(None),
+    };
+    if mvhd.body_len() < scale_at + if wide { 12 } else { 8 } {
+        return Ok(None);
+    }
+    let scale = data.u32_at(mvhd.body + scale_at)?;
+    let duration = if wide {
+        data.u64_at(mvhd.body + scale_at + 4)?
+    } else {
+        match data.u32_at(mvhd.body + scale_at + 4)? {
+            u32::MAX => u64::MAX,
+            d => u64::from(d),
+        }
+    };
+    if duration == u64::MAX {
+        return Ok(None);
+    }
+    // Precision loss is irrelevant at millisecond resolution.
+    #[allow(clippy::cast_precision_loss)]
+    let ms = duration_ms(duration as f64, f64::from(scale));
+    Ok(ms)
 }
 
 /// A track this probe reports.
@@ -440,6 +481,52 @@ pub(crate) mod tests {
 
     fn codecs(report: &TrackReport) -> Vec<(AudioCodec, bool)> {
         report.audio.iter().map(|t| (t.codec, t.default)).collect()
+    }
+
+    /// An `mvhd` box of `version` with a time scale and duration.
+    fn mvhd(version: u8, scale: u32, duration: u64) -> Vec<u8> {
+        let mut body = vec![version, 0, 0, 0];
+        let time_len = if version == 1 { 8 } else { 4 };
+        body.extend_from_slice(&vec![0; 2 * time_len]);
+        body.extend_from_slice(&scale.to_be_bytes());
+        if version == 1 {
+            body.extend_from_slice(&duration.to_be_bytes());
+        } else {
+            body.extend_from_slice(&u32::try_from(duration).unwrap().to_be_bytes());
+        }
+        body.extend_from_slice(&[0; 80]);
+        bx(b"mvhd", &body)
+    }
+
+    fn duration_of(mvhd: Vec<u8>) -> Option<u64> {
+        let audio = trak(b"soun", true, &sound_entry(b"ac-3", &[]), 100);
+        let file = [ftyp(), boxes(b"moov", &[mvhd, audio])].concat();
+        let report = parse_all(file).unwrap();
+        assert_eq!(codecs(&report), [(AudioCodec::Ac3, true)]);
+        report.duration_ms
+    }
+
+    #[test]
+    fn reads_the_movie_duration() {
+        assert_eq!(duration_of(mvhd(0, 600, 600 * 95)), Some(95_000));
+        assert_eq!(
+            duration_of(mvhd(1, 90_000, 90_000 * 3_600)),
+            Some(3_600_000)
+        );
+        assert_eq!(duration_of(mvhd(0, 0, 1000)), None, "no time scale");
+        assert_eq!(duration_of(mvhd(0, 1000, 0)), None, "fragmented");
+        assert_eq!(
+            duration_of(mvhd(0, 1000, u64::from(u32::MAX))),
+            None,
+            "unknown"
+        );
+        assert_eq!(duration_of(mvhd(1, 1000, u64::MAX)), None, "unknown");
+        assert_eq!(
+            duration_of(bx(b"mvhd", &[1, 0, 0, 0, 0])),
+            None,
+            "short box"
+        );
+        assert_eq!(duration_of(mvhd(2, 1000, 1000)), None, "bad version");
     }
 
     #[test]

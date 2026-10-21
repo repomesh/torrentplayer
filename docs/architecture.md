@@ -41,7 +41,9 @@ including the player controls overlaid on the video.
    lecture videos; **lumen-torrent**'s `StreamEngine` routes the torrent to an engine (below)
    and selects only the files being watched or queued.
 2. When playback starts, **lumen-prioritize** asks for the file head and tail first (container
-   metadata), then a read-ahead window sized from the bitrate that **lumen-media** probed.
+   metadata), then a read-ahead window sized from the media's average bitrate (its length over
+   the duration the player reports, or that **lumen-media** read from the container header or,
+   with FFmpeg installed, `ffprobe`).
 3. **lumen-player** reads bytes through **lumen-stream**: directly via libmpv's `stream_cb`
    callback, or through the loopback HTTP range server for the fallback player. Every read and
    seek is reported back to the prioritizer, so a seek immediately reprioritizes pieces.
@@ -52,19 +54,19 @@ including the player controls overlaid on the video.
 
 ## Crates
 
-| Crate                      | Responsibility                                                                                                           | Depends on Tauri/FFI? | Phase |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------ | --------------------- | ----- |
-| `lumen-torrent`            | `StreamEngine` facade over both engines; librqbit session, file selection, path validation, source limits                | No                    | 1     |
-| `lumen-swarm`              | TorrentStream's streaming-first BitTorrent engine: deadline scheduler, adaptive queues, cancel on seek, piece store      | No                    | 1     |
-| `lumen-prioritize`         | Piece prioritization decisions; no I/O                                                                                   | No                    | 1     |
-| `lumen-stream`             | `stream_cb` adapter and loopback HTTP range server                                                                       | No                    | 1     |
-| `lumen-media`              | Track probe of container headers; subtitle matching and parsing (pure Rust); ffprobe and seek thumbnails (Phase 2)       | No                    | 1, 2  |
-| `lumen-player`             | libmpv wrapper and fallback player; **only crate with `unsafe`**                                                         | FFI                   | 2     |
-| `lumen-course`             | Video detection, filtering, natural sort, course grouping; no I/O                                                        | No                    | 3     |
-| `lumen-library`            | Play queue (versioned JSON, atomic writes); SQLite library, progress, resume positions                                   | No                    | 1, 4  |
-| `lumen-search`             | Search: emberglow event stream (fan-out fallback), strict parsing, merging, relevance and watch-score ranking, best pick | No                    | 4     |
-| `lumen-net`                | Network modes, WireGuard, SOCKS5, kill switch                                                                            | No                    | 5     |
-| `lumen-app` (`src-tauri/`) | Tauri shell: IPC commands, events, app state                                                                             | Tauri                 | 0     |
+| Crate                      | Responsibility                                                                                                                                                                      | Depends on Tauri/FFI? | Phase |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | ----- |
+| `lumen-torrent`            | `StreamEngine` facade over both engines; librqbit session, file selection, path validation, source limits                                                                           | No                    | 1     |
+| `lumen-swarm`              | TorrentStream's streaming-first BitTorrent engine: deadline scheduler, adaptive queues, cancel on seek, piece store                                                                 | No                    | 1     |
+| `lumen-prioritize`         | Piece prioritization decisions; no I/O                                                                                                                                              | No                    | 1     |
+| `lumen-stream`             | `stream_cb` adapter and loopback HTTP range server                                                                                                                                  | No                    | 1     |
+| `lumen-media`              | Track and duration probe of container headers; subtitle matching and parsing (pure Rust); the user's optional `ffprobe` (durations) and `ffmpeg` (seek-bar thumbnails), locked down | No                    | 1, 2  |
+| `lumen-player`             | libmpv wrapper and fallback player; **only crate with `unsafe`**                                                                                                                    | FFI                   | 2     |
+| `lumen-course`             | Video detection, filtering, natural sort, course grouping; no I/O                                                                                                                   | No                    | 3     |
+| `lumen-library`            | Play queue (versioned JSON, atomic writes); SQLite library, progress, resume positions                                                                                              | No                    | 1, 4  |
+| `lumen-search`             | Search: emberglow event stream (fan-out fallback), strict parsing, merging, relevance and watch-score ranking, best pick                                                            | No                    | 4     |
+| `lumen-net`                | Network modes, WireGuard, SOCKS5, kill switch                                                                                                                                       | No                    | 5     |
+| `lumen-app` (`src-tauri/`) | Tauri shell: IPC commands, events, app state                                                                                                                                        | Tauri                 | 0     |
 
 ### Engine choice
 

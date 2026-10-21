@@ -142,7 +142,10 @@ and the final 10 seconds are not offered.
 Reports the player's position, on every seek and about once a second. Seeks re-prioritize
 immediately. Playback history is persisted on the first report, after a seek, at completion,
 every five seconds during ordinary playback, on stream stop, and at shutdown. Database failures
-are logged but never interrupt playback.
+are logged but never interrupt playback. Without `durationSecs` (the player cannot tell, for
+example a Matroska file with no
+duration in its header), the duration from the container header or `ffprobe` is used, once
+known (see [FFmpeg](#ffmpeg-optional)).
 
 |            |                                                                            |
 | ---------- | -------------------------------------------------------------------------- |
@@ -724,6 +727,61 @@ A file that does not arrive within 20 s gives a `note` ("Still downloading…").
 | Returns    | [`FilePreviewDto`](../src/lib/bindings/FilePreviewDto.ts): `kind`, `image`, `text`, `truncated`, `video`, `note` |
 | Errors     | `not-found` (torrent or file, or the engine has not started)                                                     |
 | Permission | `allow-preview-file`                                                                                             |
+
+### FFmpeg (optional)
+
+`ffprobe` and `ffmpeg` are used when the user has them installed (in `advanced.ffmpegDir`, or on
+`PATH`). They read a stream through the loopback server under a token of its own
+(`StreamServer::publish_private`), withdrawn as soon as the call ends, from a source that serves
+only what is already downloaded (`StreamEngine::stored_media`): they download nothing, change no
+priorities, and fail at once on a missing part. Each run is locked down to that URL
+(`-protocol_whitelist http,tcp` and a `-format_whitelist` of media containers), has no console
+window or standard input, a time limit, and bounded output. See `lumen_media::FfmpegTools`.
+
+`start_stream` starts a duration probe: the container header's duration (MP4 `mvhd`, Matroska
+`Info`), or, if it has none, `ffprobe` (up to six tries, 5 s apart, while the header downloads).
+`report_playback` uses it when the player reports no duration.
+
+#### `seek_thumbnail`
+
+A frame of the playing video for the seek bar: the key frame at or before `positionSecs`, 320
+pixels wide, as a `data:image/jpeg;base64,` URL. `null` when there is none to show: the
+`playback.seekThumbnails` setting is off, `ffmpeg` is not installed, the piece at that position
+(estimated from `durationSecs`) is not downloaded, `ffmpeg` failed or took more than 8 s, or a
+newer call replaced this one (one runs at a time). Only a whole JPEG is returned.
+
+|            |                                                                                               |
+| ---------- | --------------------------------------------------------------------------------------------- |
+| Arguments  | `{ streamId: number, positionSecs: number, durationSecs: number }`                            |
+| Returns    | `string` or `null`                                                                            |
+| Errors     | `invalid-argument` (times not finite, negative, or over 1 000 000 s; duration 0), `not-found` |
+| Permission | `allow-seek-thumbnail`                                                                        |
+
+#### `media_tools`
+
+Looks for `ffprobe` and `ffmpeg` again (in `advanced.ffmpegDir` or its `bin` folder, otherwise on
+`PATH`; relative `PATH` entries are skipped) and reports each one's path and the version it
+prints, for the Settings page.
+
+|            |                                                                                                                     |
+| ---------- | ------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | none                                                                                                                |
+| Returns    | [`MediaToolsDto`](../src/lib/bindings/MediaToolsDto.ts): `ffprobe` and `ffmpeg`, each `{ path, version }` or `null` |
+| Errors     | none                                                                                                                |
+| Permission | `allow-media-tools`                                                                                                 |
+
+#### `choose_ffmpeg_dir`
+
+Opens the system folder picker for the FFmpeg folder and returns the chosen path, or `null` if
+the user cancelled. Nothing is saved: the Settings page passes it to `update_settings` as
+`advanced.ffmpegDir`.
+
+|            |                           |
+| ---------- | ------------------------- |
+| Arguments  | none                      |
+| Returns    | `string` or `null`        |
+| Errors     | none                      |
+| Permission | `allow-choose-ffmpeg-dir` |
 
 ### Settings
 

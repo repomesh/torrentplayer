@@ -136,9 +136,15 @@ struct Inner {
     addr: SocketAddr,
     host: String,
     token: SessionToken,
-    sources: RwLock<HashMap<StreamId, Arc<dyn MediaSource>>>,
+    sources: RwLock<HashMap<StreamId, Published>>,
     next_id: AtomicU64,
     config: ServerConfig,
+}
+
+/// A published source, and the token of its own that also opens it, if any.
+struct Published {
+    source: Arc<dyn MediaSource>,
+    token: Option<SessionToken>,
 }
 
 impl fmt::Debug for Inner {
@@ -184,19 +190,42 @@ impl StreamServer {
 
     /// Makes `source` available and returns its URL.
     pub fn publish(&self, source: Arc<dyn MediaSource>) -> PublishedStream {
+        let url_token = self.inner.token.as_str().to_owned();
+        self.insert(source, None, &url_token)
+    }
+
+    /// Makes `source` available under a token of its own, which opens nothing else, and
+    /// returns its URL. For URLs handed to other programs (on a command line, where other
+    /// local programs can read them): the session token stays private, and the stream's token
+    /// stops working when it is unpublished.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the token cannot be generated.
+    pub fn publish_private(
+        &self,
+        source: Arc<dyn MediaSource>,
+    ) -> Result<PublishedStream, ServerError> {
+        let token = SessionToken::generate().map_err(ServerError::Token)?;
+        let url_token = token.as_str().to_owned();
+        Ok(self.insert(source, Some(token), &url_token))
+    }
+
+    fn insert(
+        &self,
+        source: Arc<dyn MediaSource>,
+        token: Option<SessionToken>,
+        url_token: &str,
+    ) -> PublishedStream {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
         self.inner
             .sources
             .write()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(id, source);
+            .insert(id, Published { source, token });
         PublishedStream {
             id,
-            url: format!(
-                "http://{}/s/{id}?t={}",
-                self.inner.host,
-                self.inner.token.as_str()
-            ),
+            url: format!("http://{}/s/{id}?t={url_token}", self.inner.host),
         }
     }
 
@@ -273,12 +302,30 @@ async fn respond(inner: &Inner, req: &Request<Incoming>) -> Result<Response<Body
         .headers()
         .get(HOST)
         .is_some_and(|h| h.as_bytes() == inner.host.as_bytes());
-    let token_ok = req
+    let presented = req
         .uri()
         .query()
         .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("t=")))
-        .is_some_and(|t| inner.token.matches(t.as_bytes()));
-    if !host_ok || !token_ok {
+        .map(str::as_bytes);
+    let session_ok = presented.is_some_and(|t| inner.token.matches(t));
+    let id: Option<StreamId> = req
+        .uri()
+        .path()
+        .strip_prefix("/s/")
+        .and_then(|s| s.parse().ok());
+    let published = id.and_then(|id| {
+        inner
+            .sources
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|p| (Arc::clone(&p.source), p.token.clone()))
+    });
+    // A stream's own token opens only that stream.
+    let stream_ok = presented
+        .zip(published.as_ref().and_then(|(_, token)| token.as_ref()))
+        .is_some_and(|(presented, token)| token.matches(presented));
+    if !host_ok || !(session_ok || stream_ok) {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -294,18 +341,8 @@ async fn respond(inner: &Inner, req: &Request<Incoming>) -> Result<Response<Body
         }
     };
 
-    let id: StreamId = req
-        .uri()
-        .path()
-        .strip_prefix("/s/")
-        .and_then(|s| s.parse().ok())
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let source = inner
-        .sources
-        .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .get(&id)
-        .cloned()
+    let (id, source) = id
+        .zip(published.map(|(source, _)| source))
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let len = source.byte_len();

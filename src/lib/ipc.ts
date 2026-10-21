@@ -490,3 +490,33 @@ export type { FilePreviewDto, PreviewKind };
 export function previewFile(torrentId: number, fileIndex: number): Promise<FilePreviewDto> {
   return invoke<FilePreviewDto>('preview_file', { torrentId, fileIndex });
 }
+
+// --- FFmpeg (optional) --------------------------------------------------------------------
+
+import type { MediaToolDto } from './bindings/MediaToolDto';
+import type { MediaToolsDto } from './bindings/MediaToolsDto';
+
+export type { MediaToolDto, MediaToolsDto };
+
+/**
+ * A frame of the playing video near `positionSecs` (of `durationSecs`) for the seek bar, as a
+ * `data:image/jpeg` URL, or null when there is none: the setting is off, FFmpeg is not
+ * installed, that part is not downloaded yet, or a newer call replaced this one.
+ */
+export function seekThumbnail(
+  streamId: number,
+  positionSecs: number,
+  durationSecs: number,
+): Promise<string | null> {
+  return invoke<string | null>('seek_thumbnail', { streamId, positionSecs, durationSecs });
+}
+
+/** Looks for ffprobe and ffmpeg again (in `advanced.ffmpegDir`, or on PATH). */
+export function mediaTools(): Promise<MediaToolsDto> {
+  return invoke<MediaToolsDto>('media_tools');
+}
+
+/** Opens the system folder picker for the FFmpeg folder; null if cancelled. Saves nothing. */
+export function chooseFfmpegDir(): Promise<string | null> {
+  return invoke<string | null>('choose_ffmpeg_dir');
+}
