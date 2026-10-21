@@ -248,7 +248,8 @@ impl Rate {
         self.bytes_since += bytes;
     }
 
-    /// Folds in the bytes received over `elapsed` (at least [`RATE_WINDOW`]).
+    /// Folds in the bytes received over `elapsed` (at least [`RATE_WINDOW`]). The first
+    /// sample with data is taken whole, so a new peer's queue follows its rate at once.
     fn update(&mut self, elapsed: Duration) {
         let secs = elapsed.as_secs_f64();
         if secs <= 0.0 {
@@ -343,6 +344,11 @@ pub(crate) struct Scheduler {
     /// Interests in their critical phase.
     critical_interests: HashSet<InterestId>,
     last_rate_update: Option<Instant>,
+    /// The whole torrent's download rate, for [`SchedStats::download_bps`]. Not the sum of the
+    /// peers' rates: a peer's first sample is taken whole (see [`Rate::update`]) and a
+    /// departing peer takes its average with it, so that sum overstates the rate whenever
+    /// peers come and go, as they do while a download limit holds them back.
+    total_rate: Rate,
     duplicate_requests: u64,
     cancelled_requests: u64,
     wasted_bytes: u64,
@@ -373,6 +379,10 @@ impl Scheduler {
             interests: HashMap::new(),
             critical_interests: HashSet::new(),
             last_rate_update: None,
+            total_rate: Rate {
+                measured: true,
+                ..Rate::default()
+            },
             duplicate_requests: 0,
             cancelled_requests: 0,
             wasted_bytes: 0,
@@ -402,7 +412,7 @@ impl Scheduler {
             wasted_bytes: self.wasted_bytes,
             peers: self.peers.len(),
             unchoked: self.peers.values().filter(|p| !p.choked).count(),
-            download_bps: self.peers.values().map(|p| p.rate.bytes_per_sec).sum(),
+            download_bps: self.total_rate.bytes_per_sec,
             have_pieces: self.have_count,
             outstanding: self.peers.values().map(|p| p.outstanding.len()).sum(),
         }
@@ -1160,6 +1170,7 @@ impl Scheduler {
         let mut outcome = BlockOutcome::default();
         if let Some(peer) = self.peers.get_mut(&key) {
             peer.rate.add(data.len() as u64);
+            self.total_rate.add(data.len() as u64);
             peer.last_progress = Some(now);
         }
         if !begin.is_multiple_of(BLOCK_LEN) || piece >= self.meta.piece_count() {
@@ -1292,6 +1303,7 @@ impl Scheduler {
                 for peer in self.peers.values_mut() {
                     peer.rate.update(elapsed);
                 }
+                self.total_rate.update(elapsed);
                 if tracing::enabled!(tracing::Level::TRACE) {
                     for (key, peer) in &self.peers {
                         tracing::trace!(
@@ -1458,6 +1470,37 @@ mod tests {
 
     fn deliver(s: &mut Scheduler, key: PeerKey, r: Request) -> BlockOutcome {
         s.on_block(key, r.piece, r.begin, &vec![0u8; r.len as usize])
+    }
+
+    #[test]
+    fn the_download_rate_counts_what_arrives_while_peers_come_and_go() {
+        // As under a download limit: peers keep joining, each delivers a burst, then leaves.
+        let mut s = sched(1000, SchedulerConfig::default());
+        let t0 = Instant::now();
+        let step = Duration::from_millis(100);
+        s.tick(t0, true);
+        let (mut delivered, mut reported) = (0u64, 0.0);
+        for i in 1..=300u32 {
+            let key = PeerKey::from(i / 10);
+            if i % 10 == 1 && i < 200 {
+                s.add_peer(key);
+                for block in 0..4 {
+                    s.on_block_at(key, i, block * BLOCK_LEN, &[0; BLOCK_LEN as usize], t0);
+                    delivered += u64::from(BLOCK_LEN);
+                }
+            }
+            if i % 10 == 5 {
+                s.remove_peer(key);
+            }
+            s.tick(t0 + step * i, false);
+            reported += s.stats().download_bps * step.as_secs_f64();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = reported / delivered as f64;
+        assert!(
+            (0.95..=1.0).contains(&ratio),
+            "reported {ratio:.2}× what arrived"
+        );
     }
 
     #[test]

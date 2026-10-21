@@ -57,11 +57,22 @@ impl RateLimiter {
         if rate == b.bytes_per_sec {
             return;
         }
+        let now = Instant::now();
+        let old = b.bytes_per_sec;
         b.bytes_per_sec = rate;
         b.burst = rate.map_or(0.0, |r| (r / 10.0).max(64.0 * 1024.0));
-        // A new rate starts with a full burst and no debt from the old one.
-        b.tokens = b.burst;
-        b.last = Instant::now();
+        b.tokens = match old {
+            // A changed limit keeps the debt for what was already received (waiters stop
+            // waiting for it, so new reads repay it); otherwise lowering the limit would let
+            // through everything the readers were holding back.
+            Some(old) => {
+                let refill = now.saturating_duration_since(b.last).as_secs_f64() * old;
+                (b.tokens + refill).min(b.burst)
+            }
+            // A new limit starts with a full burst.
+            None => b.burst,
+        };
+        b.last = now;
     }
 
     /// The current rate, if limited.
@@ -142,6 +153,23 @@ mod tests {
         // Removing the limit forgives the debt.
         limiter.set_rate(None);
         assert_eq!(limiter.take(10_000_000, t1), Duration::ZERO);
+    }
+
+    #[test]
+    fn a_changed_limit_keeps_the_debt() {
+        let limiter = RateLimiter::new(NonZeroU32::new(2_000_000).unwrap());
+        // 1 MB at once at 2 MB/s: about 0.4 s of debt after the 200 KB burst.
+        let wait = limiter.take(1_000_000, Instant::now());
+        assert!(wait > Duration::from_millis(350), "{wait:?}");
+        // At half the rate the same debt takes twice as long to repay.
+        limiter.set_rate(NonZeroU32::new(1_000_000));
+        let wait = limiter.take(0, Instant::now());
+        assert!(wait > Duration::from_millis(700), "{wait:?}");
+        // Raising the limit repays it faster.
+        limiter.set_rate(NonZeroU32::new(4_000_000));
+        let wait = limiter.take(0, Instant::now());
+        assert!(wait > Duration::from_millis(150), "{wait:?}");
+        assert!(wait < Duration::from_millis(250), "{wait:?}");
     }
 
     #[tokio::test]

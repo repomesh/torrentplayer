@@ -60,6 +60,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - A skipped queue item no longer says "Skipped" twice; its second line shows how much of it is
   already downloaded, if any.
+- The download speed shown for torrentplayer-swarm torrents no longer runs up to a quarter
+  above the real rate while peers come and go (as they do under a download limit), so the
+  queue's "in use" figure stays within the configured limit.
+- Lowering the download limit no longer lets through a burst of everything the peers had
+  already sent: what was received before the change still counts against the new limit.
 
 ## [0.2.0] - 2026-10-20
 
