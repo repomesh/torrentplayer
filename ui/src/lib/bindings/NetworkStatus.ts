@@ -17,7 +17,7 @@ mode: NetworkModeKind,
  */
 state: NetworkConnectionState, 
 /**
- * Proxy endpoint, interface name, or WireGuard endpoint; no secrets.
+ * Proxy endpoint or WireGuard endpoint; no secrets.
  */
 endpoint: string | null, 
 /**
@@ -29,18 +29,14 @@ trafficAllowed: boolean,
  */
 killSwitchEngaged: boolean, 
 /**
- * Whether scoped UDP is available: direct, bound, through WireGuard, or via a SOCKS5
- * UDP association. Proxy UDP support is negotiated per association, not by the health check.
+ * Whether scoped UDP is available: direct, through WireGuard, or via a SOCKS5 UDP
+ * association. Proxy UDP support is negotiated per association, not by the health check.
  */
 udpAllowed: boolean, 
 /**
  * Whether trackers may be contacted.
  */
 trackersAllowed: boolean, 
-/**
- * For interface binding: the interface and addresses in use.
- */
-bound: string | null, 
 /**
  * When the mode was last checked, in milliseconds since the Unix epoch.
  */

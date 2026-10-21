@@ -5,16 +5,15 @@
 //! Every outbound connection TorrentPlayer makes for torrents, trackers, and search goes through a
 //! [`Network`]:
 //!
-//! - [`NetworkMode::Direct`]: no VPN or proxy.
-//! - [`NetworkMode::BindInterface`]: only through one interface, usually the adapter of the
-//!   user's own VPN app (see [`bind`] for how each platform pins traffic to it).
+//! - [`NetworkMode::Direct`]: no VPN or proxy. Users of a system VPN app keep it connected and
+//!   use this mode.
 //! - [`NetworkMode::Socks5`]: through a SOCKS5 proxy, with host names resolved by the proxy.
 //! - [`NetworkMode::WireGuard`]: an application-local tunnel using an imported configuration.
 //!   It requires no system adapter or administrator rights and never falls back to direct.
 //!
 //! In every mode except direct, the kill switch applies: until the mode is verified, and
 //! whenever a health check fails, connections are refused and existing ones are closed. DHT and UDP
-//! trackers use sockets scoped to the selected interface, WireGuard tunnel, or SOCKS5 UDP relay.
+//! trackers use sockets scoped to the WireGuard tunnel or the SOCKS5 UDP relay.
 //! Unbound native UDP (including uTP) stays disabled in protected modes.
 //!
 //! Incoming peer connections are off by default. When turned on, the listener opens only on the
@@ -27,7 +26,6 @@
 #![forbid(unsafe_code)]
 
 mod addr;
-pub mod bind;
 mod bridge;
 mod datagram;
 mod error;
@@ -45,7 +43,6 @@ mod tunnel;
 pub mod wireguard;
 
 pub use addr::is_public_ip;
-pub use bind::{InterfaceInfo, list_interfaces};
 pub use datagram::DatagramSocket;
 pub use error::NetError;
 pub use incoming::{

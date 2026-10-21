@@ -3,4 +3,4 @@
 /**
  * The kind of a [`NetworkMode`], without its settings.
  */
-export type NetworkModeKind = "direct" | "bindInterface" | "socks5" | "wireGuard";
+export type NetworkModeKind = "direct" | "socks5" | "wireGuard";

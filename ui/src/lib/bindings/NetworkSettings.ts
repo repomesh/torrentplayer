@@ -19,10 +19,6 @@ export type NetworkSettings = {
  */
 mode: NetworkMode, 
 /**
- * Interface to bind to in [`NetworkMode::BindInterface`] (OS interface name).
- */
-interface: string | null, 
-/**
  * SOCKS5 proxy, used in [`NetworkMode::Socks5`].
  */
 socks5: Socks5Settings, 
@@ -51,4 +47,10 @@ incomingPeers: IncomingPeersSettings,
  * The user dismissed the note that recommends a VPN in Direct mode (shown in Settings →
  * Network, the status bar, and when seeding starts).
  */
-vpnHintDismissed: boolean, };
+vpnHintDismissed: boolean, 
+/**
+ * The settings used the VPN adapter mode, which was removed in 0.3.0, and were moved to
+ * Direct (see [`crate::migrate`]). While this is set and the mode is Direct, TorrentPlayer
+ * holds all traffic and shows a notice; dismissing the notice clears it.
+ */
+vpnAdapterModeRemoved: boolean, };

@@ -22,7 +22,7 @@ pub enum NetError {
     /// The selected mode cannot work on this platform.
     #[error("{0}")]
     Unsupported(String),
-    /// The chosen network interface is missing, down, or has no usable address.
+    /// The WireGuard tunnel is not working (for example, the server does not respond).
     #[error("network interface unavailable: {0}")]
     InterfaceUnavailable(String),
     /// The SOCKS5 proxy could not be reached.

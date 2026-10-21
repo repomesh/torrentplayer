@@ -589,6 +589,7 @@ mod tests {
                     proxy_dht: true,
                 }),
                 allow_ipv6: false,
+                hold: None,
             },
             NetworkOptions::default(),
         )

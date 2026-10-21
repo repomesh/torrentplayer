@@ -34,7 +34,7 @@ body:
     id: network-mode
     attributes:
       label: Network mode
-      options: [Direct, Bound interface, Built-in WireGuard, SOCKS5 proxy]
+      options: [Direct, Built-in WireGuard, SOCKS5 proxy]
     validations:
       required: true
   - type: textarea

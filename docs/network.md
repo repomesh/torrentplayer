@@ -1,19 +1,21 @@
 # Network modes and kill switch
 
-> **Status:** direct, VPN adapter binding, SOCKS5, and the built-in WireGuard tunnel work.
+> **Status:** direct, SOCKS5, and the built-in WireGuard tunnel work. The VPN adapter mode
+> (binding to a VPN app's interface) was removed in 0.3.0; see
+> [ADR 0009](adr/0009-remove-vpn-adapter-mode.md) and [Using a VPN app](#using-a-vpn-app).
 > Protected modes keep the kill switch engaged until their connection is verified.
 > Code: `crates/torrentplayer-net`.
 
 ## The invariant
 
-> If a VPN interface, proxy, or tunnel is selected, **no traffic leaves through any other path.**
+> If a proxy or tunnel is selected, **no traffic leaves through any other path.**
 > TorrentPlayer never falls back to a direct connection.
 
 Every outbound connection TorrentPlayer makes for torrents, trackers, `.torrent` downloads, search, and
 the connection check asks `torrentplayer_net::Network` first. In a protected mode (anything but
 direct), connections are refused until the mode is verified, and whenever a health check fails.
 Existing connections are closed at the same moment. DHT and UDP trackers use leased sockets
-through the selected interface, WireGuard tunnel, or SOCKS5 UDP ASSOCIATE relay
+through the WireGuard tunnel or the SOCKS5 UDP ASSOCIATE relay
 (`Network::udp_socket`). librqbit's own unscoped UDP (DHT, uTP, its UDP tracker client) stays
 off in protected modes. A separate scoped DHT transport supplies peers without opening a
 native socket. WireGuard datagrams and bootstrap DNS use the application-local tunnel.
@@ -25,32 +27,31 @@ environment.
 
 ## Modes
 
-| Mode                        | What happens                                                                                                                                                                                   | Verified by (every 5 s)                                                                                     |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| **Direct** (default)        | No VPN or proxy. No kill switch.                                                                                                                                                               | Nothing.                                                                                                    |
-| **VPN (bind to interface)** | Every TCP connection is pinned to one interface, usually the adapter of the user's own VPN provider app (OpenVPN-based ones included). See [platform support](#interface-binding-by-platform). | The interface exists, is up, and has a usable (non-loopback, non-link-local) address.                       |
-| **SOCKS5 proxy**            | Every TCP connection goes through the proxy (RFC 1928), with optional username and password (RFC 1929). Host names are resolved by the proxy unless "Resolve DNS through the proxy" is off.    | A TCP connection to the proxy plus the method negotiation and login. No connection is requested through it. |
-| **WireGuard**               | TCP and DNS run inside an application-local WireGuard tunnel using the imported configuration. No OS routes or adapters are changed.                                                           | A successful authenticated handshake less than 180 seconds old.                                             |
+| Mode                 | What happens                                                                                                                                                                                | Verified by (every 5 s)                                                                                     |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| **Direct** (default) | No proxy or tunnel. No kill switch. With a VPN app connected on the computer, traffic goes through it (see [Using a VPN app](#using-a-vpn-app)).                                            | Nothing.                                                                                                    |
+| **SOCKS5 proxy**     | Every TCP connection goes through the proxy (RFC 1928), with optional username and password (RFC 1929). Host names are resolved by the proxy unless "Resolve DNS through the proxy" is off. | A TCP connection to the proxy plus the method negotiation and login. No connection is requested through it. |
+| **WireGuard**        | TCP and DNS run inside an application-local WireGuard tunnel using the imported configuration. No OS routes or adapters are changed.                                                        | A successful authenticated handshake less than 180 seconds old.                                             |
 
 A protected mode with incomplete settings (a proxy without a host, a username whose password is
-missing from the credential store, no interface chosen) is also `Error`: blocked, with the reason
-shown, until the settings are fixed.
+missing from the credential store, no WireGuard configuration) is also `Error`: blocked, with the
+reason shown, until the settings are fixed.
 
 ## What each kind of traffic does
 
-| Traffic                                 | Direct                                                                    | Bind to interface                  | SOCKS5 proxy                                                           | Kill switch engaged   |
-| --------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------- | --------------------- |
-| Peers over TCP, torrentplayer-swarm     | direct                                                                    | bound to the interface             | through the proxy                                                      | refused, closed       |
-| Peers over TCP, librqbit (rqbit engine) | direct                                                                    | via the loopback bridge, bound     | via the loopback bridge, through the proxy                             | refused, closed       |
-| Peers over uTP (librqbit)               | when listening                                                            | **off**                            | **off**                                                                | off                   |
-| Incoming peer connections               | when turned on: every interface (see [below](#incoming-peer-connections)) | when turned on: the interface only | **never**                                                              | closed                |
-| HTTP(S) trackers                        | direct                                                                    | bound (system DNS)                 | through the proxy (proxy DNS for torrentplayer-swarm, see [DNS](#dns)) | refused               |
-| UDP trackers                            | direct                                                                    | TorrentPlayer's client, bound      | UDP ASSOCIATE relay                                                    | refused               |
-| DHT discovery                           | on                                                                        | bound sockets                      | UDP ASSOCIATE relay (when enabled)                                     | off                   |
-| Local peer discovery (multicast)        | off                                                                       | off                                | off                                                                    | off                   |
-| `.torrent` file downloads               | direct                                                                    | bound                              | through the proxy                                                      | refused               |
-| Search (search.emberglow.tech)          | direct                                                                    | bound                              | through the proxy                                                      | refused               |
-| Public-IP check (icanhazip.com)         | direct                                                                    | bound                              | through the proxy                                                      | refused, nothing sent |
+| Traffic                                 | Direct                                                                    | SOCKS5 proxy                                                           | Kill switch engaged   |
+| --------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------- | --------------------- |
+| Peers over TCP, torrentplayer-swarm     | direct                                                                    | through the proxy                                                      | refused, closed       |
+| Peers over TCP, librqbit (rqbit engine) | direct                                                                    | via the loopback bridge, through the proxy                             | refused, closed       |
+| Peers over uTP (librqbit)               | when listening                                                            | **off**                                                                | off                   |
+| Incoming peer connections               | when turned on: every interface (see [below](#incoming-peer-connections)) | **never**                                                              | closed                |
+| HTTP(S) trackers                        | direct                                                                    | through the proxy (proxy DNS for torrentplayer-swarm, see [DNS](#dns)) | refused               |
+| UDP trackers                            | direct                                                                    | UDP ASSOCIATE relay                                                    | refused               |
+| DHT discovery                           | on                                                                        | UDP ASSOCIATE relay (when enabled)                                     | off                   |
+| Local peer discovery (multicast)        | off                                                                       | off                                                                    | off                   |
+| `.torrent` file downloads               | direct                                                                    | through the proxy                                                      | refused               |
+| Search (search.emberglow.tech)          | direct                                                                    | through the proxy                                                      | refused               |
+| Public-IP check (icanhazip.com)         | direct                                                                    | through the proxy                                                      | refused, nothing sent |
 
 "Off" means the traffic is not sent at all, never sent around the mode. WireGuard also carries
 DHT and UDP trackers inside its tunnel. In protected modes, peers found by scoped DHT and UDP
@@ -83,30 +84,30 @@ the selected mode allows. The listener belongs to `torrentplayer_net::Network`
 (`Network::set_incoming`, `Network::incoming_peers`), so it follows the same kill switch and
 epochs as outgoing connections.
 
-| Mode                        | Where TorrentPlayer listens                                                                                                                                      |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Direct**                  | Every interface (`0.0.0.0` and `[::]`). Optionally a UPnP port mapping on the router.                                                                            |
-| **VPN (bind to interface)** | Only the adapter's own addresses, with the socket pinned to it as outgoing connections are (`SO_BINDTODEVICE`, `IP_BOUND_IF`, or the Windows strong host model). |
-| **WireGuard**               | Only the tunnel's own addresses, inside TorrentPlayer's userspace tunnel. Nothing listens on the machine's interfaces.                                           |
-| **SOCKS5 proxy**            | **Nowhere.** A proxy cannot accept arbitrary incoming connections for a client, and listening anywhere else would bypass it. The status says so.                 |
+| Mode             | Where TorrentPlayer listens                                                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Direct**       | Every interface (`0.0.0.0` and `[::]`). Optionally a UPnP port mapping on the router.                                                            |
+| **WireGuard**    | Only the tunnel's own addresses, inside TorrentPlayer's userspace tunnel. Nothing listens on the machine's interfaces.                           |
+| **SOCKS5 proxy** | **Nowhere.** A proxy cannot accept arbitrary incoming connections for a client, and listening anywhere else would bypass it. The status says so. |
 
 - **The kill switch closes it.** While traffic is blocked (connecting, reconnecting, kill switch,
-  error) nothing listens. Each new epoch (a mode change, the bound address changing, the kill
-  switch lifting) reopens it on the new path. Every accepted connection carries a `Lease` for
+  error) nothing listens. Each new epoch (a mode change, the kill switch lifting) reopens it on
+  the new path. Every accepted connection carries a `Lease` for
   its epoch and is closed with the outgoing ones. IPv6 is accepted in protected modes only with
   **IPv6 → Route through the tunnel**.
 - **Port.** 1024–65535, or 0 (the default) for a random port from 10000–49151, chosen once and
   kept while TorrentPlayer runs (another one is tried if it is taken). A port in use is
   reported and retried every 30 seconds. Changing the port reopens the listener without
   closing any connection. Peers behind a VPN reach the port only if the provider forwards it to
-  you; choose that forwarded port here.
+  you; choose that forwarded port here. With a VPN app in Direct mode, the listener is on every
+  interface, so the VPN app decides which networks reach it.
 - **Engines.** torrentplayer-swarm reads the handshake of each accepted connection (at most 32
   at once, within the handshake timeout), hands it to the torrent it names, and serves it like
   an outgoing peer. Unknown torrents, paused torrents, our own peer id, and torrents at their
   peer limit (connected plus connecting) are refused. Trackers are told the listening port.
   librqbit listens itself only when it is the engine for every torrent (`advanced.engine` =
   `rqbit`) and only in direct mode, TCP only, on `[::]` (dual stack); its listener cannot be
-  pinned to an interface or tunnel, so it never listens in a protected mode. With the automatic
+  moved into a tunnel, so it never listens in a protected mode. With the automatic
   engine librqbit only fetches magnet metadata and never listens.
 - **UPnP** (`network.incomingPeers.upnp`, off by default) asks the router to forward the port
   with UPnP IGD (`librqbit-upnp`), only in direct mode and only while listening. The mapping's
@@ -122,14 +123,13 @@ epochs as outgoing connections.
 stateDiagram-v2
     [*] --> Direct: direct mode
     [*] --> Connecting: protected mode selected
-    [*] --> Error: unsupported or incomplete
+    [*] --> Error: incomplete, or held after an update
     Connecting --> Connected: check passes
     Connecting --> KillSwitchActive: check fails
     Connected --> Reconnecting: check fails
     Reconnecting --> Connected: retry passes (after 1 s)
     Reconnecting --> KillSwitchActive: retry fails
     KillSwitchActive --> Connected: a later check passes
-    Connected --> Connected: bound address changed (new epoch)
 ```
 
 | State              | Traffic | Meaning                                                              |
@@ -139,14 +139,22 @@ stateDiagram-v2
 | `connected`        | allowed | The last check passed.                                               |
 | `reconnecting`     | blocked | A check just failed; one quick retry follows.                        |
 | `killSwitchActive` | blocked | The mode is not working. Checks continue; traffic resumes by itself. |
-| `error`            | blocked | The mode cannot work (incomplete settings or unsupported platform).  |
+| `error`            | blocked | The mode cannot work (incomplete settings), or traffic is held.      |
 | `disconnected`     | blocked | The app is closing.                                                  |
 
 A failed connection to the proxy also triggers an immediate check instead of waiting for the next
 interval.
 
+**Held traffic.** `NetworkConfig::hold` blocks all traffic, whatever the mode, with a reason:
+the state is `error`, and the policy counts as protected, so librqbit starts behind the bridge
+as it does in a protected mode. The app sets it in one case: settings migrated from the removed
+VPN adapter mode load as Direct with `network.vpnAdapterModeRemoved`, and traffic is held until
+the user dismisses the notice in Settings → Network or beside the status bar's indicator (or
+picks the SOCKS5 or WireGuard mode, whose own kill switch then applies). A user who chose to send
+nothing outside their VPN therefore never sends anything directly without confirming it first.
+
 **Epochs and leases.** Each change that could leave a connection on the wrong path (a new mode,
-the kill switch engaging, the bound interface changing address) starts a new epoch. Every
+the kill switch engaging) starts a new epoch. Every
 connection holds a `Lease` for the epoch it was made in and closes when it is revoked:
 torrentplayer-swarm peers, and every connection relayed by the loopback bridge (pooled HTTP connections
 included). A connection that finishes connecting after the epoch changed is dropped.
@@ -160,9 +168,9 @@ restarts tracker announces under the new rules. librqbit's peers reconnect throu
 `network-status` events.
 
 **In the UI.** The network indicator (bottom bar, and the player's status line) follows these
-events: gray `Direct · no VPN`; green `Protected · <proxy or WireGuard endpoint>` or `Bound · <VPN adapter>` when connected;
-yellow `Connecting…` or `Reconnecting…`; red `Kill switch: traffic paused (<reason>)` or
-`Network error: <reason>`. Its tooltip has the mode, endpoint, uptime (`connectedSinceMs`), and
+events: gray `Direct · no VPN`; green `Protected · <proxy or WireGuard endpoint>` when connected;
+yellow `Connecting…` or `Reconnecting…`; red `Kill switch: traffic paused (<reason>)`,
+`Network error: <reason>`, or (Direct mode, held) `Traffic paused: <reason>`. Its tooltip has the mode, endpoint, uptime (`connectedSinceMs`), and
 the latest events; clicking it opens Settings → Network, which shows the same state with a **Try
 again** button (`recheck_network`). When the kill switch pauses traffic and the video runs out
 of data, the player says "VPN/proxy disconnected — traffic paused" instead of "Buffering…".
@@ -176,7 +184,7 @@ flowchart LR
     Net --- Bridge["loopback SOCKS5 bridge<br/>127.0.0.1, random token"]
     Bridge --- Rqbit["librqbit (protected modes)"]
     Bridge --- Http["reqwest clients:<br/>trackers, .torrent, search, IP check"]
-    Net -->|direct / bound / SOCKS5| Internet((Internet))
+    Net -->|direct / SOCKS5 / WireGuard| Internet((Internet))
 ```
 
 - **torrentplayer-swarm** calls `Network::connect` for every peer and holds the lease.
@@ -198,26 +206,12 @@ flowchart LR
   connects, and re-applies them after every settings or secret change
   (`src-tauri/src/network.rs`). There is no separate apply command.
 
-## Interface binding by platform
-
-| Platform       | How a connection is pinned                                                                                                          | Notes                                                                                                                                                                           |
-| -------------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Windows        | Bind the socket to the interface's address. Windows uses the strong host model: such packets can leave only through that interface. | Interface names are adapter friendly names ("Wi-Fi", "WireGuard Tunnel", "ProtonVPN"). If the adapter has no route for a destination, the connection fails rather than leaking. |
-| Linux, Android | `SO_BINDTODEVICE`, plus the address.                                                                                                | Needs Linux 5.7+ or `CAP_NET_RAW`; without it the mode is `Error`, never unbound.                                                                                               |
-| macOS, iOS     | `IP_BOUND_IF` / `IPV6_BOUND_IF` by interface index, plus the address.                                                               |                                                                                                                                                                                 |
-| Others         | Not supported: the mode is `Error`.                                                                                                 |                                                                                                                                                                                 |
-
-All of this goes through `socket2` and Tokio; no `unsafe` code. Interfaces are listed with
-`if-addrs` (MIT OR BSD-3-Clause).
-
 ## DNS
 
-| Mode              | Who resolves host names                                                                                                                                                                                                                                                                                                  |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Direct            | The system resolver.                                                                                                                                                                                                                                                                                                     |
-| Bind to interface | The system resolver. Where the query goes depends on the VPN app's DNS settings; TorrentPlayer cannot pin it to the interface. **Not verified by TorrentPlayer.**                                                                                                                                                        |
-| SOCKS5            | The proxy, for torrentplayer-swarm trackers, `.torrent` downloads, search, and the connection check (no DNS query leaves the machine). **Exception:** librqbit resolves its HTTP tracker names with the system resolver before using the proxy (it only speaks `socks5://`); the announce itself goes through the proxy. |
-
+| Mode      | Who resolves host names                                                                                                                                                                                                                                                                                                                           |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Direct    | The system resolver. With a VPN app connected, where the query goes depends on the VPN app's DNS settings. **Not verified by TorrentPlayer.**                                                                                                                                                                                                     |
+| SOCKS5    | The proxy, for torrentplayer-swarm trackers, `.torrent` downloads, search, and the connection check (no DNS query leaves the machine). **Exception:** librqbit resolves its HTTP tracker names with the system resolver before using the proxy (it only speaks `socks5://`); the announce itself goes through the proxy.                          |
 | WireGuard | The configured DNS servers, contacted through the WireGuard tunnel. The system resolver is used only to bootstrap the VPN server endpoint. Missing DNS blocks TorrentPlayer-controlled host-name lookups without a direct fallback. As in SOCKS5 mode, librqbit resolves its HTTP tracker names with the system resolver before using the bridge. |
 
 ## IPv6
@@ -274,17 +268,20 @@ trackers time out.
 
 ### Using a VPN app
 
-Connect with your VPN provider's app first (OpenVPN-based apps included), then choose **VPN**,
-select its tunnel adapter, and press **Refresh** if necessary. TorrentPlayer does not run OpenVPN
-itself: it does not import `.ovpn` files or start VPN apps. VPN adapters appear first in the picker.
-The `bindInterface` setting remains compatible with existing saved profiles.
+A VPN app (OpenVPN-based apps included) works at the system level: connect it first and keep
+**Direct** selected. TorrentPlayer's traffic then goes wherever the VPN app routes it, so the VPN
+app's own kill switch decides what happens when it disconnects; TorrentPlayer has no kill switch
+in Direct mode. For a kill switch inside TorrentPlayer, use the **WireGuard** mode with your
+provider's WireGuard configuration, or the **SOCKS5** mode with your provider's proxy. Use
+**Check connection** to see which public address peers see. TorrentPlayer does not run OpenVPN
+itself: it does not import `.ovpn` files or start VPN apps.
 
-Hyper-V's **Default Switch** and **WSL** adapters are local virtual networks, not VPN tunnels;
-they normally have no internet route for connections bound on the Windows host. The settings
-show a warning when one is selected. Tailscale needs an exit node to carry internet traffic.
-An adapter showing **Bound** only means TorrentPlayer pinned traffic to it; it does not establish VPN
-encryption or prove that the adapter can reach the internet. Use **Check connection** to verify
-that requests work through the selected path.
+**The VPN adapter mode was removed in 0.3.0** ([ADR 0009](adr/0009-remove-vpn-adapter-mode.md)).
+It pinned every socket to the VPN app's network interface. Saved settings that used it
+(`network.mode = "bindInterface"`) load as Direct with `network.vpnAdapterModeRemoved` set: Settings
+→ Network and the status bar show a notice, and all traffic is held (see
+[Held traffic](#kill-switch-and-connection-state)) until the notice is dismissed or another mode is
+chosen. `network.interface` is dropped.
 
 ## Connection check
 
@@ -310,19 +307,19 @@ It runs:
 The Settings page (`torrentplayer-settings`) stores what the user chooses; the app turns it into a
 `torrentplayer_net::NetworkConfig`:
 
-| Setting                        | Effect                                                                                                    |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------- |
-| `network.mode`                 | The mode.                                                                                                 |
-| `network.interface`            | Interface for binding.                                                                                    |
-| `network.socks5.host`, `port`  | The proxy.                                                                                                |
-| `network.socks5.username`      | With the `socks5Password` secret from the credential store. A username without a password blocks traffic. |
-| `network.socks5.proxyDns`      | Proxy resolves host names (`socks5h`). Off: resolved locally, only addresses are sent.                    |
-| `network.socks5.proxyTrackers` | Off: trackers are not contacted in this mode.                                                             |
-| `network.socks5.proxyDht`      | Enables DHT through UDP ASSOCIATE; off means no DHT in SOCKS5 mode.                                       |
-| `network.wireguard`            | Shown in the status (endpoint). The private key is not read until the tunnel exists.                      |
-| `network.ipv6`                 | `tunnel` allows IPv6 destinations in protected modes; `disable` refuses them.                             |
-| `network.incomingPeers`        | `enabled`, `port` (0: random), `upnp` (direct mode only); see [Incoming](#incoming-peer-connections).     |
-| `network.encryption`           | Not implemented by either engine yet.                                                                     |
+| Setting                         | Effect                                                                                                     |
+| ------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `network.mode`                  | The mode.                                                                                                  |
+| `network.vpnAdapterModeRemoved` | Set by the migration from the removed VPN adapter mode; in Direct mode it holds all traffic until cleared. |
+| `network.socks5.host`, `port`   | The proxy.                                                                                                 |
+| `network.socks5.username`       | With the `socks5Password` secret from the credential store. A username without a password blocks traffic.  |
+| `network.socks5.proxyDns`       | Proxy resolves host names (`socks5h`). Off: resolved locally, only addresses are sent.                     |
+| `network.socks5.proxyTrackers`  | Off: trackers are not contacted in this mode.                                                              |
+| `network.socks5.proxyDht`       | Enables DHT through UDP ASSOCIATE; off means no DHT in SOCKS5 mode.                                        |
+| `network.wireguard`             | Shown in the status (endpoint). The private key is not read until the tunnel exists.                       |
+| `network.ipv6`                  | `tunnel` allows IPv6 destinations in protected modes; `disable` refuses them.                              |
+| `network.incomingPeers`         | `enabled`, `port` (0: random), `upnp` (direct mode only); see [Incoming](#incoming-peer-connections).      |
+| `network.encryption`            | Not implemented by either engine yet.                                                                      |
 
 ## Limits
 
@@ -334,10 +331,9 @@ The Settings page (`torrentplayer-settings`) stores what the user chooses; the a
   reply must contain an IP address (or the proxy's own configured name); other relay hostnames
   are refused without local DNS. Fragmentation and domain-addressed response envelopes are
   unsupported. A successful TCP health check does not prove that the proxy supports UDP.
-- Bound-interface DNS goes to the system resolver (see [DNS](#dns)).
+- Direct mode cannot tell whether a VPN app is connected; the public-IP check (status bar, or
+  "Check connection") shows the address peers see.
 - librqbit resolves tracker host names locally in SOCKS5 mode.
-- The bound-interface check proves the adapter is up with an address, not that it reaches the
-  internet; the public-IP check (status bar, or "Check connection") does.
 - Switching protection on or off stops librqbit's torrents (only those using the `rqbit`
   engine choice); they must be added again. torrentplayer-swarm torrents, magnet links included,
   continue.
@@ -354,8 +350,8 @@ All on loopback, no internet:
   targets), UDP envelope property tests, WireGuard parser, and end-to-end tests with a recording SOCKS5 proxy: proxied
   connections, remote DNS through the bridge, the kill switch blocking connections, HTTP, and the
   connection check while the proxy is down and recovering after, leases revoked on mode changes,
-  incomplete settings blocking, missing interfaces, IPv6 refusal, and the bridge refusing clients
-  without the token.
+  incomplete settings blocking, held traffic in Direct mode, IPv6 refusal, and the bridge
+  refusing clients without the token.
 - Scripted UDP relays exercise proxy-side tracker and DHT bootstrap DNS, DHT peer discovery,
   relay-only sends, IPv6 refusal, control-connection closure, and lease revocation. They never
   forward packets to the public addresses used in test replies.

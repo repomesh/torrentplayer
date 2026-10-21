@@ -131,11 +131,6 @@ const RULES: Record<string, Check> = {
     'Choose up to 100 downloads, or 0 for no limit.',
   ),
   'search.resultsPerSearch': range(LIMITS.results, 'Choose between 10 and 500 results.'),
-  'network.interface': optional((v) =>
-    typeof v === 'string' && isLabel(v)
-      ? null
-      : 'Interface names cannot be empty or contain control characters.',
-  ),
   'network.socks5.host': (v) =>
     typeof v === 'string' && (v === '' || isHost(v))
       ? null

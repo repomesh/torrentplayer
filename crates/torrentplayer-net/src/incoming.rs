@@ -8,8 +8,6 @@
 //!
 //! - **Direct:** every interface (IPv4 and IPv6), optionally with a UPnP port mapping on the
 //!   router.
-//! - **Bound to an interface:** only that interface's addresses, with the socket pinned to the
-//!   interface as outgoing connections are (see [`crate::bind`]).
 //! - **WireGuard:** only the tunnel's own addresses, inside TorrentPlayer's tunnel. Peers reach
 //!   them only if the VPN server forwards the port.
 //! - **SOCKS5:** never. A proxy cannot accept arbitrary incoming connections for a client, and
@@ -25,13 +23,13 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use serde::Serialize;
+use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
-use crate::bind;
 use crate::error::NetError;
 use crate::mode::NetworkMode;
 use crate::network::{EventLevel, Inner, Lease, Network, Route, State};
@@ -525,39 +523,23 @@ async fn open(
 }
 
 /// Opens the sockets for `route`, never anywhere else: every interface in direct mode, the
-/// interface's addresses when bound, the tunnel's addresses for WireGuard.
+/// tunnel's addresses for WireGuard.
 async fn bind_route(route: &Route, port: u16, ipv4_only: bool) -> Result<Bound, NetError> {
-    let os = |iface: Option<&bind::BoundInterface>, ip: IpAddr| {
+    let os = |ip: IpAddr| {
         let addr = SocketAddr::new(ip, port);
-        bind::listen(iface, addr)
+        listen(addr)
             .and_then(|l| TcpListener::from_std(l).map_err(NetError::Io))
             .map(|l| (l, addr))
     };
     match route {
         Route::Direct => {
-            let mut listeners = vec![os(None, IpAddr::V4(Ipv4Addr::UNSPECIFIED))?];
+            let mut listeners = vec![os(IpAddr::V4(Ipv4Addr::UNSPECIFIED))?];
             // IPv6 is optional: not every machine has it.
-            match os(None, IpAddr::V6(Ipv6Addr::UNSPECIFIED)) {
+            match os(IpAddr::V6(Ipv6Addr::UNSPECIFIED)) {
                 Ok(v6) => listeners.push(v6),
                 Err(error) => {
                     tracing::debug!(target: "torrentplayer_net", %error, "not listening on IPv6");
                 }
-            }
-            Ok(Bound::Os(listeners))
-        }
-        Route::Bind(iface) => {
-            let mut listeners = Vec::new();
-            if let Some(v4) = iface.v4 {
-                listeners.push(os(Some(iface), IpAddr::V4(v4))?);
-            }
-            if let Some(v6) = iface.v6.filter(|_| !ipv4_only) {
-                listeners.push(os(Some(iface), IpAddr::V6(v6))?);
-            }
-            if listeners.is_empty() {
-                return Err(NetError::InterfaceUnavailable(format!(
-                    "{} has no address to listen on",
-                    iface.name
-                )));
             }
             Ok(Bound::Os(listeners))
         }
@@ -577,6 +559,23 @@ async fn bind_route(route: &Route, port: u16, ipv4_only: bool) -> Result<Bound, 
             "a SOCKS5 proxy cannot accept incoming connections".into(),
         )),
     }
+}
+
+/// A listening socket on `addr`. An IPv6 socket accepts only IPv6, so the IPv4 one can share
+/// the port.
+fn listen(addr: SocketAddr) -> Result<std::net::TcpListener, NetError> {
+    let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    if addr.is_ipv6() {
+        socket.set_only_v6(true)?;
+    }
+    // Elsewhere this only allows rebinding over connections in TIME_WAIT; on Windows it would
+    // let the socket share a port another program is listening on.
+    #[cfg(not(windows))]
+    socket.set_reuse_address(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(128)?;
+    socket.set_nonblocking(true)?;
+    Ok(socket.into())
 }
 
 /// Hands an accepted connection to the consumer, if it is still allowed and there is room.
@@ -657,5 +656,23 @@ async fn forward_port(port: u16, cancel: CancellationToken) {
     tokio::select! {
         () = cancel.cancelled() => {}
         _ = forwarder.run_forever() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn listeners_bind_only_the_given_address() {
+        let listener = listen(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).unwrap();
+        let addr = listener.local_addr().unwrap();
+        assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        let listener = TcpListener::from_std(listener).unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (_accepted, from) = listener.accept().await.unwrap();
+        assert_eq!(from, client.local_addr().unwrap());
+        // The same port cannot be opened twice.
+        assert!(listen(addr).is_err());
     }
 }

@@ -3,9 +3,9 @@
 //! UDP tracker announces (BEP 15) over sockets from TorrentPlayer's network manager.
 //!
 //! librqbit's UDP tracker client opens its own unbound socket, which is fine in direct mode but
-//! cannot be pinned to a VPN interface on every platform. This client takes its socket from
-//! [`Network::udp_socket`], which binds it to the interface's address when TorrentPlayer is bound to
-//! one, so torrents that list only UDP trackers still find peers through a VPN. Responses are
+//! would bypass a proxy or tunnel. This client takes its socket from [`Network::udp_socket`],
+//! which keeps it inside the WireGuard tunnel or the SOCKS5 UDP relay, so torrents that list only
+//! UDP trackers still find peers in a protected mode. Responses are
 //! untrusted: lengths, transaction ids, and peer counts are checked, and tracker and peer
 //! addresses on the user's own network are refused.
 
@@ -125,7 +125,7 @@ async fn announce_addresses(
     request: &AnnounceRequest,
 ) -> Result<Announced, String> {
     let mut last = String::from("the tracker has no public address");
-    // IPv4 first: most trackers and VPN interfaces have it.
+    // IPv4 first: most trackers and VPN tunnels have it.
     let mut candidates: Vec<SocketAddr> =
         addrs.into_iter().filter(|a| is_public_ip(a.ip())).collect();
     candidates.sort_by_key(SocketAddr::is_ipv6);
@@ -140,8 +140,8 @@ async fn announce_addresses(
 
 /// Announces once to up to `MAX_AT_ONCE` of `trackers` (UDP ones only) at the same time and
 /// returns the peers they name, without duplicates, within `deadline`. For finding peers of a
-/// magnet link when only TorrentPlayer's own UDP client can reach its trackers (bound to a VPN
-/// interface); failures are skipped.
+/// magnet link when only TorrentPlayer's own UDP client can reach its trackers (in a protected
+/// mode); failures are skipped.
 pub async fn announce_all(
     network: Option<&Network>,
     trackers: &[Url],
@@ -437,6 +437,7 @@ mod tests {
                 proxy_dht: true,
             }),
             allow_ipv6: false,
+            hold: None,
         };
         let net = Network::start(cfg.clone(), NetworkOptions::default())
             .await

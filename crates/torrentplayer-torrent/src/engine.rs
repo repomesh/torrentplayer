@@ -72,7 +72,7 @@ pub struct EngineConfig {
     pub download_limit_bps: Option<NonZeroU32>,
     /// Maximum upload rate in bytes per second, if limited.
     pub upload_limit_bps: Option<NonZeroU32>,
-    /// TorrentPlayer's network manager. If a protected mode (VPN interface, proxy, or tunnel) is
+    /// TorrentPlayer's network manager. If a protected mode (proxy or tunnel) is
     /// selected when the session starts, the session gets no DHT, no listening socket, no local
     /// discovery, and no UDP trackers, and reaches peers and trackers only through the network's
     /// loopback bridge. `None` connects directly.

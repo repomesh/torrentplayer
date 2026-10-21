@@ -457,6 +457,7 @@ mod tests {
                 NetworkConfig {
                     mode: crate::NetworkMode::WireGuard(config),
                     allow_ipv6: false,
+                    hold: None,
                 },
                 NetworkOptions::default(),
             )
@@ -511,6 +512,7 @@ mod tests {
                 NetworkConfig {
                     mode: crate::NetworkMode::WireGuard(config),
                     allow_ipv6: false,
+                    hold: None,
                 },
                 NetworkOptions::default(),
             )
@@ -618,6 +620,7 @@ mod tests {
                 NetworkConfig {
                     mode: crate::NetworkMode::WireGuard(config),
                     allow_ipv6: false,
+                    hold: None,
                 },
                 NetworkOptions {
                     ip_check_v4_url: "http://search.torrentplayer.test:8080/".into(),
@@ -732,6 +735,7 @@ mod tests {
                 NetworkConfig {
                     mode: crate::NetworkMode::WireGuard(config),
                     allow_ipv6: false,
+                    hold: None,
                 },
                 NetworkOptions::default(),
             )
@@ -777,6 +781,7 @@ mod tests {
             NetworkConfig {
                 mode: crate::NetworkMode::WireGuard(config),
                 allow_ipv6: false,
+                hold: None,
             },
             NetworkOptions {
                 check_timeout: Duration::from_millis(150),

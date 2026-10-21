@@ -11,8 +11,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The VPN mode no longer lists OpenVPN as if it were built in: connect with your VPN
-  provider's app first (OpenVPN-based apps included), then pick its adapter.
 - TorrentStream is now TorrentPlayer (torrentplayer.io, `github.com/torrentplayer/torrentplayer`).
   The app identifier is `io.torrentplayer.desktop` and the binary `TorrentPlayer`. Settings, the
   queue, the download cache, the default `Downloads/TorrentStream` folder, and stored secrets
@@ -25,18 +23,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Incoming peer connections can be turned on in Settings → VPN and network, on a chosen or
   random port, for more peers and better uploads (off by default, so there is still no firewall
   prompt unless chosen). TorrentPlayer listens only where the network mode allows: every
-  interface in direct mode (with optional UPnP port mapping), only the VPN adapter when bound to
-  one, and only inside the tunnel with WireGuard; never through a SOCKS5 proxy, and never while
+  interface in direct mode (with optional UPnP port mapping) and only inside the tunnel with
+  WireGuard; never through a SOCKS5 proxy, and never while
   the kill switch blocks traffic. Settings shows whether it is listening.
 - torrentplayer-swarm keeps its DHT routing tables in the app data folder between runs (Direct
   mode only), so magnet links find peers sooner after a restart. Protected modes still start
   with a fresh node and save nothing. librqbit starts from the bootstrap servers each time: from
   a saved table it fetched magnet metadata more slowly, not faster.
 - In Direct mode, Settings → Network and the status bar recommend a VPN when downloading or
-  seeding (for example Windscribe, through its app or a WireGuard configuration), with a link
+  seeding (connect a VPN app such as Windscribe first, or use the WireGuard mode with your
+  provider's WireGuard configuration), with a link
   to the blog post on VPNs; it is shown once more when seeding starts, until dismissed
   (`network.vpnHintDismissed`).
-- DHT peer discovery now uses bound VPN sockets and the built-in WireGuard tunnel. SOCKS5
+- DHT peer discovery now runs inside the built-in WireGuard tunnel. SOCKS5
   proxies with UDP ASSOCIATE support carry DHT and UDP trackers, including magnet metadata
   discovery, without falling back to direct UDP or target DNS.
 - torrentplayer-swarm now uploads verified pieces with cancellable, bounded reads, reports per-torrent
@@ -59,6 +58,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `torrentplayer-bench` measures streaming with incoming peers only (`local --inbound`), how
   closely an engine holds a download limit that changes mid-transfer (`limit`), and start-up
   from a saved DHT state (`--dht-state`, `--no-trackers`). See `docs/performance.md`.
+
+### Removed
+
+- The VPN adapter network mode (binding all traffic to a VPN app's network adapter, saved as
+  `bindInterface`) and its adapter picker. The modes are now Direct, SOCKS5 proxy, and built-in
+  WireGuard: keep a VPN app connected at the system level and choose Direct, or import your
+  provider's WireGuard configuration for a kill switch inside TorrentPlayer (see
+  [ADR 0009](docs/adr/0009-remove-vpn-adapter-mode.md)). Saved settings that used it load as
+  Direct, and TorrentPlayer pauses all torrent traffic and searches until you dismiss the notice
+  in Settings → Network or beside the status bar's network indicator (or choose SOCKS5 or
+  WireGuard), so nothing is sent outside your VPN without your confirmation. Settings files are
+  now version 4.
 
 ### Fixed
 

@@ -1,7 +1,11 @@
 # 0008: Application-local WireGuard tunnel
 
-- **Status:** Proposed (implemented)
+- **Status:** Proposed (implemented); amended by [0009](0009-remove-vpn-adapter-mode.md)
 - **Date:** 2026-10-18
+
+> **Amended in 0.3.0:** the separate VPN choice (the bound-interface mode) described below was
+> removed by [ADR 0009](0009-remove-vpn-adapter-mode.md). Users of VPN apps, OpenVPN-based ones
+> included, now connect them at the system level and choose Direct, or use this WireGuard mode.
 
 ## Context
 

@@ -7,9 +7,8 @@
  */
 export type IncomingPeersSettings = { 
 /**
- * Accept incoming peer connections: in direct mode on every interface, with a VPN
- * interface only on that interface, with WireGuard only inside the tunnel, and never in
- * SOCKS5 mode.
+ * Accept incoming peer connections: in direct mode on every interface, with WireGuard only
+ * inside the tunnel, and never in SOCKS5 mode.
  */
 enabled: boolean, 
 /**

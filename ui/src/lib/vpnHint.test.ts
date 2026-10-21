@@ -42,15 +42,23 @@ describe('the VPN note', () => {
   it('is shown only in Direct mode until dismissed', () => {
     expect(showVpnHint('direct', false)).toBe(true);
     expect(showVpnHint('direct', true)).toBe(false);
-    for (const mode of ['bindInterface', 'socks5', 'wireGuard'] as const) {
+    for (const mode of ['socks5', 'wireGuard'] as const) {
       expect(showVpnHint(mode, false)).toBe(false);
     }
+    // The removed-mode notice says the same, so the note waits until that is dismissed.
+    expect(showVpnHint('direct', false, true)).toBe(false);
   });
 
   it('is one sentence that does not talk about legality', () => {
     expect(VPN_HINT.split('. ')).toHaveLength(1);
     expect(VPN_HINT).not.toMatch(/legal/i);
     expect(VPN_HINT).toContain('Windscribe');
+  });
+
+  it('points to a VPN app or the WireGuard mode, not the removed VPN mode', () => {
+    expect(VPN_HINT).toMatch(/connect your VPN app/);
+    expect(VPN_HINT).toMatch(/WireGuard mode/);
+    expect(VPN_HINT).not.toMatch(/VPN mode|adapter/i);
   });
 
   it('opens the blog post and saves the dismissal', async () => {

@@ -31,7 +31,6 @@ export interface NetworkSummary {
 
 export const MODE_NAMES: Record<NetworkModeKind, string> = {
   direct: 'Direct (no VPN or proxy)',
-  bindInterface: 'VPN (bound adapter)',
   socks5: 'SOCKS5 proxy',
   wireGuard: 'WireGuard',
 };
@@ -69,7 +68,7 @@ function clock(ms: number): string {
   return new Date(ms).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
-/** Where protected traffic goes, for the label: the proxy's host or the interface. */
+/** Where protected traffic goes, for the label: the proxy's host or the WireGuard endpoint. */
 function protectedVia(status: NetworkStatus): string {
   if (status.endpoint === null) {
     return MODE_NAMES[status.mode];
@@ -89,7 +88,7 @@ export function describeNetwork(status: NetworkStatus, nowMs: number): NetworkSu
       break;
     case 'connected':
       tone = 'protected';
-      label = `${status.mode === 'bindInterface' ? 'Bound' : 'Protected'} · ${protectedVia(status)}`;
+      label = `Protected · ${protectedVia(status)}`;
       break;
     case 'connecting':
       tone = 'pending';
@@ -105,7 +104,12 @@ export function describeNetwork(status: NetworkStatus, nowMs: number): NetworkSu
       break;
     case 'error':
       tone = 'blocked';
-      label = `Network error: ${state.reason}`;
+      // Direct mode has nothing to fail: the backend is holding traffic until the user confirms
+      // a settings change (the removed VPN adapter mode).
+      label =
+        status.mode === 'direct'
+          ? `Traffic paused: ${state.reason}`
+          : `Network error: ${state.reason}`;
       break;
     case 'disconnected':
       tone = 'blocked';
@@ -115,12 +119,7 @@ export function describeNetwork(status: NetworkStatus, nowMs: number): NetworkSu
 
   const details = [`Mode: ${MODE_NAMES[status.mode]}`];
   if (status.endpoint !== null) {
-    details.push(
-      `${status.mode === 'bindInterface' ? 'Interface' : 'Endpoint'}: ${status.endpoint}`,
-    );
-  }
-  if (status.bound !== null) {
-    details.push(`In use: ${status.bound}`);
+    details.push(`Endpoint: ${status.endpoint}`);
   }
   if (status.connectedSinceMs !== null) {
     details.push(`Connected for ${formatUptime(nowMs - status.connectedSinceMs)}`);
@@ -150,8 +149,11 @@ export function pausedMessage(status: NetworkStatus | null): string | null {
   if (status === null || !trafficPaused(status)) {
     return null;
   }
-  return status.state.kind === 'connecting'
-    ? 'Connecting to the VPN or proxy…'
+  if (status.state.kind === 'connecting') {
+    return 'Connecting to the VPN or proxy…';
+  }
+  return status.mode === 'direct'
+    ? 'Traffic paused — confirm the network change in Settings'
     : 'VPN/proxy disconnected — traffic paused';
 }
 
@@ -212,8 +214,6 @@ export function followPublicIp(onIp: (ip: PublicIp | null) => void): () => void 
 export const INCOMING_HELP: Record<NetworkModeKind, string> = {
   direct:
     'Listens on every network interface, so your firewall may ask to allow TorrentPlayer. Behind a router, forward the port or turn on UPnP.',
-  bindInterface:
-    'Listens only on the VPN adapter, never on your other networks. Peers reach it only if your VPN provider forwards this port to you.',
   socks5:
     'Not available with a SOCKS5 proxy: it cannot accept incoming connections, so TorrentPlayer does not listen at all in this mode.',
   wireGuard:
@@ -245,15 +245,4 @@ export function describeIncoming(status: IncomingPeersStatus): string {
       return `Listening on port ${String(status.port)} (${where})${status.upnp ? ' · UPnP requested' : ''}`;
     }
   }
-}
-
-/** Guidance for local virtual switches and mesh VPNs that do not imply internet routing. */
-export function interfaceAdvice(name: string): string | null {
-  if (/^vEthernet \((?:Default Switch\)|WSL(?:[ (]|\)))/i.test(name)) {
-    return 'This is a local Hyper-V virtual network, not a VPN tunnel. It normally has no internet route for TorrentPlayer. Select your VPN app’s tunnel adapter instead.';
-  }
-  if (/tailscale/i.test(name)) {
-    return 'For internet access through Tailscale, select an exit node in Tailscale first. A normal mesh connection only reaches your Tailscale devices.';
-  }
-  return null;
 }

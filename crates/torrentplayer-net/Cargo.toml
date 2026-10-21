@@ -1,6 +1,6 @@
 [package]
 name = "torrentplayer-net"
-description = "Network modes for TorrentPlayer: direct, bound interface, SOCKS5 proxy, and WireGuard configs, with a kill switch."
+description = "Network modes for TorrentPlayer: direct, SOCKS5 proxy, and WireGuard configs, with a kill switch."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,7 +13,6 @@ publish.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 dns-parser.workspace = true
-if-addrs.workspace = true
 librqbit-upnp.workspace = true
 reqwest = { workspace = true, features = ["socks"] }
 serde.workspace = true

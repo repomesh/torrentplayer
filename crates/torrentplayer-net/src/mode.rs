@@ -16,12 +16,6 @@ pub enum NetworkMode {
     /// switch.
     #[default]
     Direct,
-    /// All traffic is bound to one network interface, typically created by the user's own VPN
-    /// app. If that interface disappears or loses its address, traffic stops.
-    BindInterface {
-        /// Interface name as listed by [`crate::list_interfaces`].
-        interface: String,
-    },
     /// TCP uses SOCKS5 CONNECT; DHT and UDP trackers use UDP ASSOCIATE when supported.
     Socks5(Socks5Config),
     /// An application-local WireGuard tunnel using an imported configuration.
@@ -35,8 +29,6 @@ pub enum NetworkMode {
 pub enum ModeKind {
     /// [`NetworkMode::Direct`].
     Direct,
-    /// [`NetworkMode::BindInterface`].
-    BindInterface,
     /// [`NetworkMode::Socks5`].
     Socks5,
     /// [`NetworkMode::WireGuard`].
@@ -136,7 +128,6 @@ impl NetworkMode {
     pub fn kind(&self) -> ModeKind {
         match self {
             Self::Direct => ModeKind::Direct,
-            Self::BindInterface { .. } => ModeKind::BindInterface,
             Self::Socks5(_) => ModeKind::Socks5,
             Self::WireGuard(_) => ModeKind::WireGuard,
         }
@@ -148,13 +139,11 @@ impl NetworkMode {
         !matches!(self, Self::Direct)
     }
 
-    /// Where traffic goes, without secrets: the proxy endpoint, the interface name, or the
-    /// WireGuard endpoint.
+    /// Where traffic goes, without secrets: the proxy endpoint or the WireGuard endpoint.
     #[must_use]
     pub fn endpoint(&self) -> Option<String> {
         match self {
             Self::Direct => None,
-            Self::BindInterface { interface } => Some(interface.clone()),
             Self::Socks5(c) => Some(c.endpoint()),
             Self::WireGuard(c) => c.peers.first().map(|p| p.endpoint.clone()),
         }
@@ -169,20 +158,6 @@ impl NetworkMode {
         match self {
             Self::Direct => Ok(()),
             Self::WireGuard(config) => crate::tunnel::validate(config),
-            Self::BindInterface { interface } => {
-                let name = interface.trim();
-                if name.is_empty() {
-                    Err(NetError::InvalidConfig(
-                        "choose the network interface to bind to".into(),
-                    ))
-                } else if name.len() > 256 || name.chars().any(char::is_control) {
-                    Err(NetError::InvalidConfig(
-                        "the interface name is not valid".into(),
-                    ))
-                } else {
-                    Ok(())
-                }
-            }
             Self::Socks5(c) => c.validate(),
         }
     }

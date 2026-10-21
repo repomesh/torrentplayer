@@ -22,8 +22,8 @@ that changes gets a new ADR that supersedes the old one.
 | [0005](0005-prioritization-with-anchor-streams.md) | Prioritization on librqbit with anchor streams | Accepted for librqbit                         |
 | [0006](0006-streaming-engine.md)                   | A streaming-first BitTorrent engine            | Proposed (M1 built)                           |
 | [0007](0007-dolby-and-dts-audio.md)                | Dolby and DTS audio in the built-in player     | Proposed                                      |
-
-| [0008](0008-application-wireguard-tunnel.md) | Application-local WireGuard tunnel | Proposed (implemented) |
+| [0008](0008-application-wireguard-tunnel.md)       | Application-local WireGuard tunnel             | Proposed (implemented; amended by 0009)       |
+| [0009](0009-remove-vpn-adapter-mode.md)            | Remove the VPN adapter mode                    | Proposed (implemented)                        |
 
 Decisions still to be recorded: `stream_cb` vs HTTP feed (Phase 2), libmpv rendering approach
 (Phase 2).

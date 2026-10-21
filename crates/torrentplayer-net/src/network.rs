@@ -9,8 +9,8 @@
 //! engages the kill switch when it fails, and lifts it when the mode works again.
 //!
 //! Each change that could leave a connection on the wrong path (a new mode, the kill switch
-//! engaging, a bound interface changing address) starts a new *epoch*. Connections carry a
-//! [`Lease`] for the epoch they were made in and must close when it is revoked.
+//! engaging) starts a new *epoch*. Connections carry a [`Lease`] for the epoch they were made in
+//! and must close when it is revoked.
 
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -26,7 +26,6 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use crate::addr::is_public_ip;
-use crate::bind::{self, BoundInterface};
 use crate::bridge;
 use crate::error::NetError;
 use crate::incoming::{IncomingState, IncomingStatus};
@@ -55,6 +54,19 @@ pub struct NetworkConfig {
     /// Allow IPv6 destinations in protected modes. Off by default, so IPv6 cannot bypass a VPN
     /// or proxy that only carries IPv4.
     pub allow_ipv6: bool,
+    /// Hold all traffic, whatever the mode, until this is cleared: the state is
+    /// [`ConnectionState::Error`] with this reason, and the policy counts as protected, so the
+    /// engines start as they would behind the kill switch. For settings that need the user's
+    /// confirmation before anything is sent (the removed VPN adapter mode).
+    pub hold: Option<String>,
+}
+
+impl NetworkConfig {
+    /// Whether the kill switch applies: a protected mode, or a hold.
+    #[must_use]
+    pub fn is_protected(&self) -> bool {
+        self.mode.is_protected() || self.hold.is_some()
+    }
 }
 
 /// Timing of health checks and connections.
@@ -165,19 +177,17 @@ pub struct NetworkStatus {
     pub mode: ModeKind,
     /// Connection state.
     pub state: ConnectionState,
-    /// Proxy endpoint, interface name, or WireGuard endpoint; no secrets.
+    /// Proxy endpoint or WireGuard endpoint; no secrets.
     pub endpoint: Option<String>,
     /// Whether connections are allowed right now.
     pub traffic_allowed: bool,
     /// Whether the kill switch is blocking traffic (a protected mode that is not connected).
     pub kill_switch_engaged: bool,
-    /// Whether scoped UDP is available: direct, bound, through WireGuard, or via a SOCKS5
-    /// UDP association. Proxy UDP support is negotiated per association, not by the health check.
+    /// Whether scoped UDP is available: direct, through WireGuard, or via a SOCKS5 UDP
+    /// association. Proxy UDP support is negotiated per association, not by the health check.
     pub udp_allowed: bool,
     /// Whether trackers may be contacted.
     pub trackers_allowed: bool,
-    /// For interface binding: the interface and addresses in use.
-    pub bound: Option<String>,
     /// When the mode was last checked, in milliseconds since the Unix epoch.
     pub last_check_ms: Option<u64>,
     /// While connected: since when, in milliseconds since the Unix epoch (for the uptime).
@@ -197,13 +207,13 @@ pub struct Policy {
     pub epoch: u64,
     /// Whether new connections are allowed.
     pub traffic_allowed: bool,
-    /// Whether a protected mode (VPN interface, proxy, or tunnel) is selected.
+    /// Whether a protected mode (proxy or tunnel) is selected, or traffic is held.
     pub protected: bool,
     /// Whether UDP (DHT, UDP trackers, uTP) may be sent from unbound sockets: direct mode only.
     pub udp_allowed: bool,
-    /// Whether UDP may use sockets made by [`Network::udp_socket`]: direct, bound to an
-    /// interface, inside WireGuard, or through SOCKS5 UDP ASSOCIATE. A proxy's UDP support
-    /// is checked when opening the association. Unbound OS UDP stays disabled in protected modes.
+    /// Whether UDP may use sockets made by [`Network::udp_socket`]: direct, inside WireGuard,
+    /// or through SOCKS5 UDP ASSOCIATE. A proxy's UDP support is checked when opening the
+    /// association. Unbound OS UDP stays disabled in protected modes.
     pub bound_udp_allowed: bool,
     /// Whether DHT may use scoped datagrams (honors the SOCKS5 DHT preference).
     pub dht_allowed: bool,
@@ -299,7 +309,6 @@ impl Drop for Inner {
 pub(crate) struct State {
     pub(crate) config: NetworkConfig,
     pub(crate) conn: ConnectionState,
-    bound: Option<BoundInterface>,
     tunnel: Option<Tunnel>,
     /// Increases on every `apply`, so results of checks started under old settings are dropped.
     generation: u64,
@@ -314,7 +323,7 @@ pub(crate) struct State {
 
 impl State {
     fn policy(&self) -> Policy {
-        let protected = self.config.mode.is_protected();
+        let protected = self.config.is_protected();
         Policy {
             epoch: self.epoch,
             traffic_allowed: self.conn.allows_traffic(),
@@ -370,7 +379,6 @@ impl State {
 /// Where a connection goes.
 pub(crate) enum Route {
     Direct,
-    Bind(BoundInterface),
     Socks(Socks5Config),
     WireGuard(Tunnel),
 }
@@ -383,7 +391,6 @@ fn unix_ms(t: SystemTime) -> u64 {
 fn describe(mode: &NetworkMode) -> String {
     match mode {
         NetworkMode::Direct => "direct (no VPN or proxy)".to_owned(),
-        NetworkMode::BindInterface { interface } => format!("bound to interface {interface}"),
         NetworkMode::Socks5(c) => format!("SOCKS5 proxy {}", c.endpoint()),
         NetworkMode::WireGuard(c) => format!(
             "WireGuard ({})",
@@ -394,9 +401,16 @@ fn describe(mode: &NetworkMode) -> String {
     }
 }
 
-/// The state a newly selected mode starts in. An invalid protected configuration (for example a
-/// proxy without a host, or a username without its password) blocks traffic.
-fn initial_state(mode: &NetworkMode) -> ConnectionState {
+/// The state a newly selected configuration starts in. A hold, or an invalid protected
+/// configuration (for example a proxy without a host, or a username without its password),
+/// blocks traffic.
+fn initial_state(config: &NetworkConfig) -> ConnectionState {
+    if let Some(reason) = &config.hold {
+        return ConnectionState::Error {
+            reason: reason.clone(),
+        };
+    }
+    let mode = &config.mode;
     if let Err(error) = mode.validate() {
         return ConnectionState::Error {
             reason: error.to_string(),
@@ -404,12 +418,7 @@ fn initial_state(mode: &NetworkMode) -> ConnectionState {
     }
     match mode {
         NetworkMode::Direct => ConnectionState::Direct,
-        NetworkMode::BindInterface { .. } if !bind::SUPPORTED => ConnectionState::Error {
-            reason: "binding to a network interface is not supported on this platform".into(),
-        },
-        NetworkMode::BindInterface { .. } | NetworkMode::Socks5(_) | NetworkMode::WireGuard(_) => {
-            ConnectionState::Connecting
-        }
+        NetworkMode::Socks5(_) | NetworkMode::WireGuard(_) => ConnectionState::Connecting,
     }
 }
 
@@ -443,11 +452,7 @@ impl Inner {
 
     /// Applies the result of a health check started under `generation`; returns when to check
     /// next.
-    fn on_check(
-        &self,
-        generation: u64,
-        result: Result<Option<BoundInterface>, NetError>,
-    ) -> Duration {
+    fn on_check(&self, generation: u64, result: Result<(), NetError>) -> Duration {
         let interval = self.options.health_interval;
         let mut st = self.state();
         if st.generation != generation
@@ -464,27 +469,17 @@ impl Inner {
         st.last_check = Some(SystemTime::now());
         let via = describe(&st.config.mode);
         match result {
-            Ok(bound) => {
-                let label = bound.as_ref().map_or(via, BoundInterface::describe);
+            Ok(()) => {
                 match &st.conn {
-                    ConnectionState::Connected => {
-                        if bound.is_some() && st.bound != bound {
-                            st.epoch += 1;
-                            st.log(
-                                EventLevel::Info,
-                                format!("Interface address changed: now {label}; reconnecting"),
-                            );
-                        }
-                    }
+                    ConnectionState::Connected => {}
                     ConnectionState::Connecting => {
-                        st.log(EventLevel::Info, format!("Connected: {label}"));
+                        st.log(EventLevel::Info, format!("Connected: {via}"));
                     }
                     _ => st.log(
                         EventLevel::Info,
-                        format!("Connection restored ({label}); traffic resumed"),
+                        format!("Connection restored ({via}); traffic resumed"),
                     ),
                 }
-                st.bound = bound;
                 if st.conn != ConnectionState::Connected {
                     st.connected_since = st.last_check;
                 }
@@ -494,7 +489,6 @@ impl Inner {
             }
             Err(error) => {
                 let reason = error.to_string();
-                st.bound = None;
                 let next = match &st.conn {
                     ConnectionState::Connected => {
                         st.epoch += 1;
@@ -545,9 +539,8 @@ impl Network {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let bridge_addr = listener.local_addr()?;
         let mut st = State {
-            conn: initial_state(&config.mode),
+            conn: initial_state(&config),
             config,
-            bound: None,
             tunnel: None,
             generation: 1,
             epoch: 1,
@@ -606,11 +599,10 @@ impl Network {
             if let Some(tunnel) = st.tunnel.take() {
                 tunnel.close();
             }
-            st.conn = initial_state(&config.mode);
+            st.conn = initial_state(&config);
             st.config = config;
             st.generation += 1;
             st.epoch += 1;
-            st.bound = None;
             st.last_check = None;
             let message = format!("Network mode changed: {}", describe(&st.config.mode));
             st.log(EventLevel::Info, message);
@@ -658,7 +650,6 @@ impl Network {
             kill_switch_engaged: policy.protected && !policy.traffic_allowed,
             udp_allowed: policy.bound_udp_allowed,
             trackers_allowed: policy.trackers_allowed,
-            bound: st.bound.as_ref().map(BoundInterface::describe),
             last_check_ms: st.last_check.map(unix_ms),
             connected_since_ms: st
                 .connected_since
@@ -755,9 +746,8 @@ impl Network {
     }
 
     /// Opens a UDP socket for talking to `target` under the current mode: an ordinary socket in
-    /// direct mode, and one bound to the interface's address when bound to an interface, so
-    /// its packets leave only through that interface. WireGuard sockets stay inside the
-    /// tunnel; SOCKS5 uses a UDP ASSOCIATE relay with a live TCP control connection.
+    /// direct mode. WireGuard sockets stay inside the tunnel; SOCKS5 uses a UDP ASSOCIATE relay
+    /// with a live TCP control connection.
     /// The returned lease ends when the mode changes or the kill switch engages; check it
     /// before sending.
     ///
@@ -782,7 +772,6 @@ impl Network {
                 };
                 std::net::UdpSocket::bind(any)?
             }
-            Route::Bind(iface) => bind::udp_socket(iface, &target)?,
             Route::WireGuard(tunnel) => {
                 let socket = tunnel.udp_socket(target).await?;
                 if !lease.is_valid() {
@@ -939,11 +928,6 @@ impl Network {
                 last.get_or_insert(NetError::NotPublic);
                 continue;
             }
-            if let Route::Bind(iface) = &route
-                && !iface.has_family_of(&addr)
-            {
-                continue;
-            }
             match self.dial(&route, addr, ipv4_only).await {
                 Ok(stream) => return Self::check_lease(stream, lease),
                 Err(error) => last = Some(error),
@@ -964,9 +948,6 @@ impl Network {
         }
         let route = match &st.config.mode {
             NetworkMode::Direct => Route::Direct,
-            NetworkMode::BindInterface { .. } => {
-                Route::Bind(st.bound.clone().ok_or_else(|| st.blocked())?)
-            }
             NetworkMode::Socks5(c) => Route::Socks(c.clone()),
             NetworkMode::WireGuard(_) => {
                 Route::WireGuard(st.tunnel.clone().ok_or_else(|| st.blocked())?)
@@ -991,7 +972,6 @@ impl Network {
         }
         match route {
             Route::Direct => Ok(TcpStream::connect(target).await?),
-            Route::Bind(iface) => bind::connect(iface, target).await,
             Route::Socks(cfg) => self.socks_dial(cfg, &Target::Addr(target)).await,
             Route::WireGuard(tunnel) => tunnel.connect(target).await,
         }
@@ -1203,15 +1183,7 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
         let result = match mode {
             _ if idle => None,
             NetworkMode::Direct => None,
-            NetworkMode::BindInterface { interface } => {
-                let check = tokio::task::spawn_blocking(move || bind::resolve(&interface));
-                Some(match tokio::time::timeout(timeout, check).await {
-                    Ok(Ok(result)) => result.map(Some),
-                    Ok(Err(_)) => Err(NetError::Unsupported("interface check failed".into())),
-                    Err(_) => Err(NetError::Timeout),
-                })
-            }
-            NetworkMode::Socks5(cfg) => Some(probe(&cfg, timeout).await.map(|()| None)),
+            NetworkMode::Socks5(cfg) => Some(probe(&cfg, timeout).await),
             NetworkMode::WireGuard(cfg) => {
                 let check = async {
                     let existing = net
@@ -1231,7 +1203,7 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
                         st.tunnel = Some(tunnel.clone());
                         tunnel
                     };
-                    tunnel.healthy(timeout).await.map(|()| None)
+                    tunnel.healthy(timeout).await
                 };
                 Some(
                     tokio::time::timeout(timeout, check).await.unwrap_or(Err(

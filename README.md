@@ -72,9 +72,8 @@ share what you play.
   nothing but the swarm.)
 - **None of the usual limits.** No subscription, ads, watch-time limits, quality caps, storage
   quotas, or speed tiers. Watch at the quality the file has, for as long as you like.
-- **Private by design.** No telemetry, analytics, or crash reporting. Built-in WireGuard, VPN
-  adapter binding, and SOCKS5, with a kill switch that never falls back to a direct
-  connection.
+- **Private by design.** No telemetry, analytics, or crash reporting. Built-in WireGuard and SOCKS5,
+  with a kill switch that never falls back to a direct connection, or your own VPN app.
 - **Free and open source,** every part of it, including the streaming engine. MIT or
   Apache-2.0, your choice.
 
@@ -161,9 +160,9 @@ sources, details, and where other tools are the better fit.
 
 ### Network and privacy controls
 
-- **Four connection modes:** direct; bound to the adapter of your VPN provider's app (connect
-  with the app first, OpenVPN-based apps included); a **built-in WireGuard tunnel** that runs inside the app with
-  no administrator rights or separate VPN app; or a SOCKS5 proxy.
+- **Three connection modes:** direct (with your VPN provider's app connected, OpenVPN-based
+  apps included, traffic goes through it); a **built-in WireGuard tunnel** that runs inside the
+  app with no administrator rights or separate VPN app; or a SOCKS5 proxy.
 - **Kill switch in every protected mode.** If the VPN or proxy drops, all traffic stops and open
   connections close. Nothing falls back to your direct connection, and traffic resumes by
   itself when the tunnel is back.

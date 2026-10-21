@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Current schema version. Bump it and add a step to [`crate::migrate`] when the shape changes.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// Slowest and fastest playback speeds.
 pub const SPEED_RANGE: (f64, f64) = (0.5, 3.0);
@@ -31,7 +31,7 @@ pub const CACHE_LIMIT_RANGE_GB: (u32, u32) = (1, 100_000);
 pub const CLEANUP_RANGE_DAYS: (u32, u32) = (1, 3650);
 /// Results requested per search.
 pub const RESULTS_RANGE: (u32, u32) = (10, 500);
-/// Longest accepted path, host name, interface name, or label.
+/// Longest accepted path, host name, or label.
 pub const MAX_TEXT: usize = 1024;
 /// Lowest port accepted for incoming peer connections (0 means a random port).
 pub const LISTEN_PORT_MIN: u16 = 1024;
@@ -239,8 +239,6 @@ impl Default for SearchSources {
 pub struct NetworkSettings {
     /// Connection mode.
     pub mode: NetworkMode,
-    /// Interface to bind to in [`NetworkMode::BindInterface`] (OS interface name).
-    pub interface: Option<String>,
     /// SOCKS5 proxy, used in [`NetworkMode::Socks5`].
     pub socks5: Socks5Settings,
     /// Imported WireGuard configuration (non-secret parts), used in [`NetworkMode::WireGuard`].
@@ -257,13 +255,16 @@ pub struct NetworkSettings {
     /// The user dismissed the note that recommends a VPN in Direct mode (shown in Settings →
     /// Network, the status bar, and when seeding starts).
     pub vpn_hint_dismissed: bool,
+    /// The settings used the VPN adapter mode, which was removed in 0.3.0, and were moved to
+    /// Direct (see [`crate::migrate`]). While this is set and the mode is Direct, TorrentPlayer
+    /// holds all traffic and shows a notice; dismissing the notice clears it.
+    pub vpn_adapter_mode_removed: bool,
 }
 
 impl Default for NetworkSettings {
     fn default() -> Self {
         Self {
             mode: NetworkMode::Direct,
-            interface: None,
             socks5: Socks5Settings::default(),
             wireguard: WireGuardSettings::default(),
             encryption: EncryptionMode::Prefer,
@@ -271,6 +272,7 @@ impl Default for NetworkSettings {
             show_public_ip: true,
             incoming_peers: IncomingPeersSettings::default(),
             vpn_hint_dismissed: false,
+            vpn_adapter_mode_removed: false,
         }
     }
 }
@@ -282,9 +284,8 @@ impl Default for NetworkSettings {
 #[serde(rename_all = "camelCase", default)]
 #[ts(export)]
 pub struct IncomingPeersSettings {
-    /// Accept incoming peer connections: in direct mode on every interface, with a VPN
-    /// interface only on that interface, with WireGuard only inside the tunnel, and never in
-    /// SOCKS5 mode.
+    /// Accept incoming peer connections: in direct mode on every interface, with WireGuard only
+    /// inside the tunnel, and never in SOCKS5 mode.
     pub enabled: bool,
     /// TCP port, 1024–65535; 0 picks a random port (10000–49151) once per run.
     pub port: u16,
@@ -300,8 +301,6 @@ pub enum NetworkMode {
     /// No tunnel or proxy.
     #[default]
     Direct,
-    /// Bind all torrent traffic to one network interface (for example a VPN app's adapter).
-    BindInterface,
     /// Send traffic through a SOCKS5 proxy.
     Socks5,
     /// TorrentPlayer's built-in userspace WireGuard tunnel.
@@ -562,10 +561,6 @@ impl Settings {
                     self.advanced.ffmpeg_dir = None;
                     true
                 }
-                "network.interface" => {
-                    self.network.interface = None;
-                    true
-                }
                 "network.socks5.host" => {
                     self.network.socks5.host.clear();
                     true
@@ -602,9 +597,6 @@ impl Settings {
         let mut warnings = Vec::new();
         let net = &self.network;
         match net.mode {
-            NetworkMode::BindInterface if net.interface.is_none() => {
-                warnings.push("Choose the network interface to bind to.".to_owned());
-            }
             NetworkMode::Socks5 if net.socks5.host.is_empty() => {
                 warnings.push("Enter the SOCKS5 proxy's host and port.".to_owned());
             }
@@ -721,14 +713,6 @@ impl BandwidthSettings {
 
 impl NetworkSettings {
     fn check(&self, errors: &mut Vec<FieldError>) {
-        if let Some(name) = &self.interface
-            && !is_label(name)
-        {
-            errors.push(FieldError::new(
-                "network.interface",
-                "Interface names cannot be empty or contain control characters.",
-            ));
-        }
         let proxy = &self.socks5;
         if !proxy.host.is_empty() && !is_host(&proxy.host) {
             errors.push(FieldError::new(

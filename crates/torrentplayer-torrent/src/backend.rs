@@ -490,8 +490,8 @@ impl StreamEngine {
 
     /// Where librqbit should listen for incoming peers, and whether with UPnP. Only when
     /// librqbit is the engine for every torrent (otherwise torrentplayer-swarm takes incoming
-    /// peers from the network manager), in direct mode (librqbit's listener cannot be pinned to
-    /// an interface or tunnel), and with incoming connections turned on.
+    /// peers from the network manager), in direct mode (librqbit's listener cannot be moved into
+    /// a tunnel), and with incoming connections turned on.
     fn rqbit_listen(&self, protected: bool) -> Option<(SocketAddr, bool)> {
         if self.swarm.is_some() || protected {
             return None;
@@ -512,7 +512,7 @@ impl StreamEngine {
         };
         let report = if network.policy().protected {
             ExternalListener::Idle(
-                "librqbit accepts incoming peers only in direct mode; choose the automatic \n                 engine to accept them through a VPN interface or WireGuard"
+                "librqbit accepts incoming peers only in direct mode; choose the automatic \n                 engine to accept them through WireGuard"
                     .into(),
             )
         } else {
@@ -586,7 +586,7 @@ impl StreamEngine {
         let mut slot = self.rqbit.lock().await;
         if slot
             .as_ref()
-            .is_some_and(|e| e.protected() != config.mode.is_protected())
+            .is_some_and(|e| e.protected() != config.is_protected())
         {
             self.stop_rqbit(&mut slot).await;
         }

@@ -1308,8 +1308,8 @@ struct Trackers {
 
 impl Trackers {
     /// Starts announcing under `policy`: not at all while traffic is blocked or trackers are
-    /// off. Protected modes use TorrentPlayer's own scoped UDP client through the interface,
-    /// tunnel, or proxy relay; native unbound UDP is never used (see [`crate::udp_tracker`]).
+    /// off. Protected modes use TorrentPlayer's own scoped UDP client through the WireGuard
+    /// tunnel or the proxy relay; native unbound UDP is never used (see [`crate::udp_tracker`]).
     fn start(&self, policy: Option<Policy>) -> Option<BoxStream<'static, SocketAddr>> {
         if policy.is_some_and(|p| !p.traffic_allowed || !p.trackers_allowed) {
             return None;

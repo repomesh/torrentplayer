@@ -221,6 +221,7 @@ mod tests {
                     proxy_dht: true,
                 }),
                 allow_ipv6: true,
+                hold: None,
             },
             NetworkOptions::default(),
         )
@@ -264,48 +265,5 @@ mod tests {
                 .is_err()
         );
         network.shutdown();
-    }
-
-    #[tokio::test]
-    async fn bound_dht_transport_uses_the_selected_interface_address() {
-        let Some((name, address)) = torrentplayer_net::list_interfaces()
-            .unwrap()
-            .into_iter()
-            .filter(|iface| iface.is_up && !iface.is_loopback)
-            .find_map(|iface| {
-                let ip = iface
-                    .addresses
-                    .iter()
-                    .filter_map(|a| a.parse::<Ipv4Addr>().ok())
-                    .find(|ip| !ip.is_link_local())?;
-                Some((iface.name, ip))
-            })
-        else {
-            return;
-        };
-        let network = Network::start(
-            NetworkConfig {
-                mode: NetworkMode::BindInterface { interface: name },
-                allow_ipv6: false,
-            },
-            NetworkOptions::default(),
-        )
-        .await
-        .unwrap();
-        assert!(
-            network
-                .settled(Duration::from_secs(3))
-                .await
-                .traffic_allowed
-        );
-        let transport = ScopedDht::open(network.clone()).await.unwrap();
-        assert_eq!(transport.local_addr().ip(), std::net::IpAddr::V4(address));
-        network.shutdown();
-        assert!(
-            transport
-                .send_to(b"old", "8.8.8.8:6881".parse().unwrap())
-                .await
-                .is_err()
-        );
     }
 }

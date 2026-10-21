@@ -17,9 +17,9 @@ const {
   hostOf,
   pausedMessage,
   trafficPaused,
-  interfaceAdvice,
   describeIncoming,
   INCOMING_HELP,
+  MODE_NAMES,
 } = await import('./network');
 
 function status(overrides: Partial<NetworkStatus> = {}): NetworkStatus {
@@ -31,7 +31,6 @@ function status(overrides: Partial<NetworkStatus> = {}): NetworkStatus {
     killSwitchEngaged: false,
     udpAllowed: true,
     trackersAllowed: true,
-    bound: null,
     lastCheckMs: null,
     connectedSinceMs: null,
     events: [],
@@ -85,7 +84,6 @@ describe('describeIncoming', () => {
   it('explains every mode, and that SOCKS5 never listens', () => {
     expect(INCOMING_HELP.socks5).toMatch(/does not listen/);
     expect(INCOMING_HELP.direct).toMatch(/firewall/);
-    expect(INCOMING_HELP.bindInterface).toMatch(/only on the VPN adapter/);
     expect(INCOMING_HELP.wireGuard).toMatch(/only inside the WireGuard tunnel/);
   });
 });
@@ -97,7 +95,12 @@ describe('describeNetwork', () => {
     expect(s.details[0]).toBe('Mode: Direct (no VPN or proxy)');
   });
 
-  it('names the proxy host or interface when protected', () => {
+  it('offers exactly Direct, SOCKS5, and WireGuard', () => {
+    expect(Object.keys(MODE_NAMES)).toEqual(['direct', 'socks5', 'wireGuard']);
+    expect(Object.keys(INCOMING_HELP)).toEqual(['direct', 'socks5', 'wireGuard']);
+  });
+
+  it('names the proxy host or WireGuard endpoint when protected', () => {
     const now = 3 * 3_600_000;
     const s = describeNetwork(
       status({ ...socks, state: { kind: 'connected' }, connectedSinceMs: now - 125 * 60_000 }),
@@ -108,19 +111,31 @@ describe('describeNetwork', () => {
     expect(s.details).toContain('Connected for 2 h 5 min');
     expect(s.details).not.toContain('DHT and UDP trackers are off in this mode.');
 
-    const bound = describeNetwork(
+    const wg = describeNetwork(
       status({
-        mode: 'bindInterface',
-        endpoint: 'wg0',
-        bound: 'wg0 (10.2.0.2)',
+        mode: 'wireGuard',
+        endpoint: 'vpn.example.com:51820',
         state: { kind: 'connected' },
-        udpAllowed: false,
       }),
       0,
     );
-    expect(bound.label).toBe('Bound · wg0');
-    expect(bound.details).toContain('Interface: wg0');
-    expect(bound.details).toContain('In use: wg0 (10.2.0.2)');
+    expect(wg.label).toBe('Protected · vpn.example.com:51820');
+    expect(wg.details).toContain('Endpoint: vpn.example.com:51820');
+  });
+
+  it('says traffic is held in Direct mode after the VPN adapter mode was removed', () => {
+    const held = status({
+      state: { kind: 'error', reason: 'the VPN adapter mode was removed' },
+      trafficAllowed: false,
+      killSwitchEngaged: true,
+      udpAllowed: false,
+    });
+    expect(describeNetwork(held, 0)).toMatchObject({
+      tone: 'blocked',
+      label: 'Traffic paused: the VPN adapter mode was removed',
+    });
+    expect(trafficPaused(held)).toBe(true);
+    expect(pausedMessage(held)).toBe('Traffic paused — confirm the network change in Settings');
   });
 
   it('is yellow while checking and red while traffic is paused', () => {
@@ -254,15 +269,5 @@ describe('public addresses', () => {
     expect(d.short).toBe('2001:db8::7');
     expect(d.details[0]).toBe('Public IPv4: none');
     expect(d.details[2]).toBe('Checked just now via icanhazip.com');
-  });
-});
-
-describe('VPN adapter guidance', () => {
-  it('explains local Hyper-V switches and Tailscale exit nodes', () => {
-    expect(interfaceAdvice('vEthernet (Default Switch)')).toContain('local Hyper-V');
-    expect(interfaceAdvice('vEthernet (WSL (Hyper-V firewall))')).toContain('local Hyper-V');
-    expect(interfaceAdvice('Tailscale')).toContain('exit node');
-    expect(interfaceAdvice('vEthernet (External Switch)')).toBeNull();
-    expect(interfaceAdvice('ProtonVPN')).toBeNull();
   });
 });

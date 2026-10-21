@@ -26,7 +26,7 @@ pub enum ErrorKind {
     /// The search service is rate limiting, down, timed out, or sent an unreadable response.
     /// Retrying later may help.
     SearchUnavailable,
-    /// The selected VPN interface, proxy, or tunnel is not working, so the kill switch blocked
+    /// The selected proxy or tunnel is not working, or traffic is held, so the kill switch blocked
     /// the request. Nothing was sent.
     KillSwitch,
     /// A network request (such as the connection check) failed.

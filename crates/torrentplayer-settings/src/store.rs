@@ -108,9 +108,17 @@ impl SettingsStore {
                  not know about were kept in {NEWER_FILE_NAME}."
             ));
         }
+        let retired = uses_vpn_adapter_mode(&value);
         let value = migrate(value);
         let mut settings = from_sections(value, &mut warnings);
         warnings.extend(settings.sanitize());
+        if retired {
+            // Saved at once, so the file no longer names the removed mode and the notice stays
+            // pending even if TorrentPlayer closes before the user sees it.
+            if let Err(error) = self.save(&settings) {
+                tracing::warn!(%error, "could not save the migrated settings");
+            }
+        }
         for warning in &warnings {
             tracing::warn!(%warning, "settings loaded with a problem");
         }
@@ -176,10 +184,43 @@ pub fn migrate(mut doc: Map<String, Value>) -> Map<String, Value> {
                 .entry("seedTimeLimitMinutes")
                 .or_insert_with(|| Value::from(0));
         }
+        if version < 4
+            && let Some(Value::Object(network)) = doc.get_mut("network")
+        {
+            // `network.interface` belonged to the VPN adapter mode, removed in 0.3.0.
+            network.remove("interface");
+        }
         tracing::info!(from = version, to = SCHEMA_VERSION, "migrating settings");
+    }
+    // Not tied to a version, so a hand-edited file or a test harness that still selects the
+    // removed mode loads too: never as an unknown mode, which would reset every network setting.
+    if let Some(Value::Object(network)) = doc.get_mut("network") {
+        retire_vpn_adapter_mode(network);
     }
     doc.insert("version".to_owned(), Value::from(SCHEMA_VERSION));
     doc
+}
+
+/// Moves settings that used the VPN adapter mode (`"bindInterface"`, removed in 0.3.0) to
+/// Direct, and records it in `vpnAdapterModeRemoved`: until the user acknowledges the notice,
+/// the app holds all traffic rather than silently connecting without the VPN the user chose.
+fn retire_vpn_adapter_mode(network: &mut Map<String, Value>) {
+    if !is_vpn_adapter_mode(network) {
+        return;
+    }
+    tracing::warn!("the VPN adapter mode was removed; switching to Direct until acknowledged");
+    network.insert("mode".to_owned(), Value::from("direct"));
+    network.insert("vpnAdapterModeRemoved".to_owned(), Value::Bool(true));
+    network.remove("interface");
+}
+
+fn is_vpn_adapter_mode(network: &Map<String, Value>) -> bool {
+    network.get("mode").and_then(Value::as_str) == Some("bindInterface")
+}
+
+/// Whether the document selects the removed VPN adapter mode.
+fn uses_vpn_adapter_mode(doc: &Map<String, Value>) -> bool {
+    matches!(doc.get("network"), Some(Value::Object(network)) if is_vpn_adapter_mode(network))
 }
 
 /// The document's schema version; documents without one are version 1.
@@ -414,12 +455,12 @@ mod tests {
         fs::create_dir_all(store.dir()).unwrap();
         fs::write(
             store.path(),
-            r#"{"version":3,"network":{"mode":"bindInterface","interface":"wg0"}}"#,
+            r#"{"version":3,"network":{"mode":"wireGuard","showPublicIp":false}}"#,
         )
         .unwrap();
         let loaded = store.load();
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
-        assert_eq!(loaded.settings.network.interface.as_deref(), Some("wg0"));
+        assert_eq!(loaded.settings.network.mode, NetworkMode::WireGuard);
         assert!(
             !loaded.settings.network.incoming_peers.enabled,
             "listening stays off until chosen"
@@ -433,6 +474,99 @@ mod tests {
         let loaded = store.load();
         assert!(loaded.settings.network.incoming_peers.enabled);
         assert_eq!(loaded.settings.network.incoming_peers.port, 0);
+        assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+    }
+
+    #[test]
+    fn the_vpn_adapter_mode_becomes_direct_with_a_notice() {
+        let (_dir, store) = store();
+        fs::create_dir_all(store.dir()).unwrap();
+        fs::write(
+            store.path(),
+            r#"{"version":3,"network":{"mode":"bindInterface","interface":"Ethernet",
+               "socks5":{"host":"10.0.0.1","port":1081},"vpnHintDismissed":true,
+               "incomingPeers":{"enabled":true,"port":51413}}}"#,
+        )
+        .unwrap();
+        let loaded = store.load();
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        let on_disk = fs::read_to_string(store.path()).unwrap();
+        assert!(
+            !on_disk.contains("bindInterface") && on_disk.contains("vpnAdapterModeRemoved"),
+            "the migration is saved at once: {on_disk}"
+        );
+        let network = &loaded.settings.network;
+        assert_eq!(network.mode, NetworkMode::Direct);
+        assert!(network.vpn_adapter_mode_removed, "the notice is pending");
+        // Nothing else in the section is lost.
+        assert_eq!(network.socks5.host, "10.0.0.1");
+        assert_eq!(network.socks5.port, 1081);
+        assert!(network.vpn_hint_dismissed);
+        assert!(network.incoming_peers.enabled);
+        assert_eq!(network.incoming_peers.port, 51413);
+
+        // Saved and loaded again: still Direct, the notice still pending, the interface gone.
+        store.save(&loaded.settings).unwrap();
+        let saved = fs::read_to_string(store.path()).unwrap();
+        assert!(!saved.contains("bindInterface") && !saved.contains("\"interface\""));
+        assert!(saved.contains("\"vpnAdapterModeRemoved\": true"));
+        assert!(saved.contains(&format!("\"version\": {SCHEMA_VERSION}")));
+        let again = store.load();
+        assert_eq!(again.settings, loaded.settings);
+        assert!(again.warnings.is_empty(), "{:?}", again.warnings);
+
+        // Once dismissed, it stays dismissed.
+        let mut dismissed = again.settings;
+        dismissed.network.vpn_adapter_mode_removed = false;
+        store.save(&dismissed).unwrap();
+        assert!(!store.load().settings.network.vpn_adapter_mode_removed);
+    }
+
+    #[test]
+    fn the_vpn_adapter_mode_is_retired_whatever_the_version() {
+        for text in [
+            // Unversioned (version 1) and incomplete: no interface name.
+            r#"{"network":{"mode":"bindInterface"}}"#,
+            // A current-version file edited by hand or by a test harness.
+            r#"{"version":4,"network":{"mode":"bindInterface","interface":"wg0"}}"#,
+        ] {
+            let (_dir, store) = store();
+            fs::create_dir_all(store.dir()).unwrap();
+            fs::write(store.path(), text).unwrap();
+            let loaded = store.load();
+            assert!(loaded.warnings.is_empty(), "{text}: {:?}", loaded.warnings);
+            assert_eq!(loaded.settings.network.mode, NetworkMode::Direct, "{text}");
+            assert!(loaded.settings.network.vpn_adapter_mode_removed, "{text}");
+        }
+    }
+
+    #[test]
+    fn other_modes_are_not_flagged() {
+        for mode in ["direct", "socks5", "wireGuard"] {
+            let doc =
+                serde_json::json!({"version": 3, "network": {"mode": mode, "interface": "wg0"}});
+            let Value::Object(doc) = doc else {
+                unreachable!()
+            };
+            let migrated = migrate(doc);
+            assert_eq!(migrated["network"]["mode"], mode);
+            assert!(migrated["network"].get("vpnAdapterModeRemoved").is_none());
+            assert!(migrated["network"].get("interface").is_none());
+        }
+    }
+
+    #[test]
+    fn an_unknown_mode_resets_only_the_network_section() {
+        let (_dir, store) = store();
+        fs::create_dir_all(store.dir()).unwrap();
+        fs::write(
+            store.path(),
+            r#"{"version":4,"network":{"mode":"openvpn"},"search":{"hideAdult":false}}"#,
+        )
+        .unwrap();
+        let loaded = store.load();
+        assert_eq!(loaded.settings.network, Settings::default().network);
+        assert!(!loaded.settings.search.hide_adult);
         assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
     }
 
