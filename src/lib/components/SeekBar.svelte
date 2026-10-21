@@ -1,6 +1,13 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 <script lang="ts">
-  import { downloadedRuns, formatTime, fractionAt, playedFraction } from '../seekbar';
+  import {
+    downloadedRuns,
+    formatTime,
+    fractionAt,
+    playedFraction,
+    thumbnailTime,
+    type ThumbnailSource,
+  } from '../seekbar';
 
   interface Props {
     currentTime: number;
@@ -11,9 +18,14 @@
     onSeek: (fraction: number) => void;
     /** Whether the user is dragging the thumb (keeps the controls visible). */
     onScrub?: (dragging: boolean) => void;
+    /** Pictures of the video to show above the pointer, if any. */
+    thumbnails?: ThumbnailSource | null;
   }
 
-  let { currentTime, duration, pieceMap, onSeek, onScrub }: Props = $props();
+  let { currentTime, duration, pieceMap, onSeek, onScrub, thumbnails = null }: Props = $props();
+
+  /** Pointer rest before a thumbnail is asked for, so sweeping across asks for nothing. */
+  const PREVIEW_DELAY_MS = 120;
 
   let bar: HTMLDivElement | undefined = $state();
   let hover = $state<number | null>(null);
@@ -22,6 +34,46 @@
   const runs = $derived(downloadedRuns(pieceMap));
   const played = $derived(drag ?? playedFraction(currentTime, duration));
   const known = $derived(Number.isFinite(duration) && duration > 0);
+  const previewSecs = $derived(
+    hover === null || thumbnails === null ? null : thumbnailTime(hover, duration),
+  );
+  let preview = $state<string | null>(null);
+
+  $effect(() => {
+    const secs = previewSecs;
+    const source = thumbnails;
+    if (secs === null || source === null) {
+      preview = null;
+      return;
+    }
+    const remembered = source.peek(secs);
+    if (remembered !== undefined) {
+      preview = remembered;
+      return;
+    }
+    // Do not show the previous bucket's frame under the new bucket's timestamp while this one
+    // is waiting for its debounce or FFmpeg.
+    preview = null;
+    let stale = false;
+    const timer = setTimeout(() => {
+      source
+        .get(secs)
+        .then((picture) => {
+          if (!stale) {
+            preview = picture;
+          }
+        })
+        .catch(() => {
+          if (!stale) {
+            preview = null;
+          }
+        });
+    }, PREVIEW_DELAY_MS);
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
+  });
 
   function at(event: PointerEvent): number {
     const rect = bar?.getBoundingClientRect();
@@ -100,7 +152,16 @@
     <div class="thumb" style:left={pct(played)}></div>
   {/if}
   {#if hover !== null && known}
-    <div class="tooltip" style:left={pct(hover)}>{formatTime(hover * duration)}</div>
+    <!-- With a picture, kept inside the bar so it is not cut off at the ends. -->
+    <div
+      class="hover"
+      style:left={preview === null ? pct(hover) : `clamp(5rem, ${pct(hover)}, calc(100% - 5rem))`}
+    >
+      {#if preview !== null}
+        <img class="preview" src={preview} alt="" />
+      {/if}
+      <span class="tooltip">{formatTime(hover * duration)}</span>
+    </div>
   {/if}
 </div>
 
@@ -165,9 +226,28 @@
     transform: translate(-50%, -50%) scale(1);
   }
 
-  .tooltip {
+  .hover {
     position: absolute;
     bottom: 1.2rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.3rem;
+    transform: translateX(-50%);
+    pointer-events: none;
+  }
+
+  .preview {
+    display: block;
+    width: 10rem;
+    max-width: none;
+    border: 1px solid rgb(255 255 255 / 25%);
+    border-radius: 0.3rem;
+    background: #000;
+    box-shadow: 0 2px 10px rgb(0 0 0 / 60%);
+  }
+
+  .tooltip {
     padding: 0.15rem 0.4rem;
     border-radius: 0.25rem;
     background: rgb(10 10 12 / 85%);
@@ -175,7 +255,5 @@
     font-size: 0.75rem;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
-    transform: translateX(-50%);
-    pointer-events: none;
   }
 </style>

@@ -69,4 +69,13 @@ Install the WebKitGTK packages from the README. CI uses Ubuntu 24.04.
 
 ### libmpv and FFmpeg
 
-Required from Phase 2. Instructions will be added here.
+libmpv is required from Phase 2. Instructions will be added here.
+
+FFmpeg is optional at run time (see `advanced.ffmpegDir` in [Configuration](configuration.md)).
+The tests in `crates/lumen-media/tests/ffmpeg.rs` run `ffprobe` and `ffmpeg` against the
+loopback stream server when they are on `PATH` or in `LUMEN_FFMPEG_DIR`, and are skipped (with a
+note) otherwise:
+
+```sh
+LUMEN_FFMPEG_DIR=/path/to/ffmpeg/bin cargo test -p lumen-media --test ffmpeg
+```

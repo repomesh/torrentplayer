@@ -18,6 +18,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   action.
 - Playback positions persist across restarts in a local library, reopening unfinished media
   offers to resume or start over, and watch progress appears in both the Library and queue.
+- Seek-bar previews: with FFmpeg installed (on `PATH` or in a folder chosen in Settings), pointing
+  at the seek bar shows a frame of the video, for the parts already downloaded.
+- The duration of a video now comes from its container header (MP4, Matroska) or, with FFmpeg,
+  `ffprobe` when the player cannot tell, so read-ahead and buffering work for such files too.
+  FFmpeg reads only what is already downloaded and is locked down to the local stream.
 
 ## [0.2.0] - 2026-10-20
 

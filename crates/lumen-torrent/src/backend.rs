@@ -1059,8 +1059,42 @@ impl StreamEngine {
                 file,
                 len: entry.len,
                 content_type: mime_type(&entry.path),
+                stored_only: false,
             }),
         })
+    }
+
+    /// A media source that serves only what is already downloaded of one file, for tools
+    /// (`ffprobe`, `ffmpeg`) that must not change what is downloaded: reading it prioritizes
+    /// nothing, and a read of a missing piece fails at once. librqbit cannot read without
+    /// prioritizing, so its files are served only once complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the torrent or file is unknown, or a librqbit file is incomplete.
+    pub async fn stored_media(
+        &self,
+        id: TorrentId,
+        file: usize,
+    ) -> Result<Arc<dyn MediaSource>, EngineError> {
+        let entry = file_entry(&self.info(id)?, file)?;
+        match self.handle(id)? {
+            Handle::Rqbit(_) => {
+                let have = self.have_pieces(id).await?;
+                let readiness = self.file_readiness(id, Some(file), &have)?;
+                if readiness.file != file || !readiness.complete() {
+                    return Err(EngineError::Unsupported("the file is not downloaded yet"));
+                }
+                self.media_source(id, file).await
+            }
+            Handle::Swarm(torrent) => Ok(Arc::new(SwarmMedia {
+                torrent,
+                file,
+                len: entry.len,
+                content_type: mime_type(&entry.path),
+                stored_only: true,
+            })),
+        }
     }
 
     /// Downloads a whole file in the background, after whatever is being played.
@@ -2031,6 +2065,8 @@ struct SwarmMedia {
     file: usize,
     len: u64,
     content_type: &'static str,
+    /// Open stored-only readers (see `Torrent::stored_reader`).
+    stored_only: bool,
 }
 
 impl MediaSource for SwarmMedia {
@@ -2043,7 +2079,12 @@ impl MediaSource for SwarmMedia {
     }
 
     fn open(&self) -> BoxFuture<'static, io::Result<Box<dyn MediaReader>>> {
-        let reader = self.torrent.reader(self.file).map_err(io::Error::other);
+        let reader = if self.stored_only {
+            self.torrent.stored_reader(self.file)
+        } else {
+            self.torrent.reader(self.file)
+        }
+        .map_err(io::Error::other);
         Box::pin(async move { reader.map(|r| Box::new(r) as Box<dyn MediaReader>) })
     }
 }

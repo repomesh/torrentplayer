@@ -2,7 +2,7 @@
 <script lang="ts">
   import type { SettingsSection } from '../settings';
   import type { StatusInfo } from '../stats';
-  import { formatTime } from '../seekbar';
+  import { formatTime, type ThumbnailSource } from '../seekbar';
   import { subtitleGroups, subtitleMenuNote, type SubtitleOption } from '../subtitles';
   import NetworkIndicator from './NetworkIndicator.svelte';
   import TransferRates from './TransferRates.svelte';
@@ -40,6 +40,8 @@
     onSubtitle?: (id: string | null) => void;
     /** "Load subtitle file…": opens the file picker. */
     onLoadSubtitles?: () => void;
+    /** Pictures for the seek bar, if any. */
+    thumbnails?: ThumbnailSource | null;
   }
 
   let {
@@ -69,6 +71,7 @@
     subtitleMenuOpen = $bindable(false),
     onSubtitle,
     onLoadSubtitles,
+    thumbnails = null,
   }: Props = $props();
 
   const groups = $derived(subtitleGroups(subtitles));
@@ -102,7 +105,7 @@
     onHover(false);
   }}
 >
-  <SeekBar {currentTime} {duration} {pieceMap} {onSeek} {onScrub} />
+  <SeekBar {currentTime} {duration} {pieceMap} {onSeek} {onScrub} {thumbnails} />
 
   <div class="row">
     <button

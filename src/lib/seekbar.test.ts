@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import { describe, expect, it } from 'vitest';
-import { downloadedRuns, formatTime, fractionAt, playedFraction } from './seekbar';
+import {
+  MIN_THUMBNAIL_STEP_SECS,
+  THUMBNAIL_CACHE_SIZE,
+  downloadedRuns,
+  formatTime,
+  fractionAt,
+  playedFraction,
+  thumbnailSource,
+  thumbnailTime,
+} from './seekbar';
 
 describe('downloadedRuns', () => {
   it('merges contiguous fully downloaded cells into one solid run', () => {
@@ -48,5 +57,65 @@ describe('geometry and time', () => {
     expect(formatTime(65.9)).toBe('1:05');
     expect(formatTime(3725)).toBe('1:02:05');
     expect(formatTime(Number.NaN)).toBe('--:--');
+  });
+});
+
+describe('thumbnailTime', () => {
+  it('snaps to the start of a step of 1/120 of the video', () => {
+    // A 2-hour video: one thumbnail a minute.
+    expect(thumbnailTime(0.5, 7200)).toBe(3600);
+    expect(thumbnailTime(0.5 + 1 / 7200, 7200)).toBe(3600);
+    expect(thumbnailTime(0.5 + 61 / 7200, 7200)).toBe(3660);
+  });
+
+  it('keeps steps of at least two seconds', () => {
+    expect(thumbnailTime(0.51, 100)).toBe(50);
+    expect(thumbnailTime(0.53, 100)).toBe(52);
+    expect(MIN_THUMBNAIL_STEP_SECS).toBe(2);
+  });
+
+  it('clamps and refuses unknown durations', () => {
+    expect(thumbnailTime(-1, 100)).toBe(0);
+    expect(thumbnailTime(2, 100)).toBe(98);
+    expect(thumbnailTime(1, 1)).toBe(0);
+    expect(thumbnailTime(0.5, Number.NaN)).toBeNull();
+    expect(thumbnailTime(0.5, Number.POSITIVE_INFINITY)).toBeNull();
+    expect(thumbnailTime(0.5, 0)).toBeNull();
+    expect(thumbnailTime(Number.NaN, 100)).toBeNull();
+  });
+});
+
+describe('thumbnailSource', () => {
+  it('fetches each picture once and remembers it', async () => {
+    const asked: number[] = [];
+    const source = thumbnailSource((secs) => {
+      asked.push(secs);
+      return Promise.resolve(`data:image/jpeg;base64,${String(secs)}`);
+    });
+    expect(source.peek(10)).toBeUndefined();
+    expect(await source.get(10)).toBe('data:image/jpeg;base64,10');
+    expect(await source.get(10)).toBe('data:image/jpeg;base64,10');
+    expect(source.peek(10)).toBe('data:image/jpeg;base64,10');
+    expect(asked).toEqual([10]);
+  });
+
+  it('asks again where there was nothing to show', async () => {
+    let downloaded = false;
+    const source = thumbnailSource(() => Promise.resolve(downloaded ? 'data:x' : null));
+    expect(await source.get(4)).toBeNull();
+    expect(source.peek(4)).toBeUndefined();
+    downloaded = true;
+    expect(await source.get(4)).toBe('data:x');
+  });
+
+  it('forgets the oldest pictures beyond its limit', async () => {
+    const source = thumbnailSource((secs) => Promise.resolve(String(secs)), 2);
+    await source.get(1);
+    await source.get(2);
+    await source.get(3);
+    expect(source.peek(1)).toBeUndefined();
+    expect(source.peek(2)).toBe('2');
+    expect(source.peek(3)).toBe('3');
+    expect(THUMBNAIL_CACHE_SIZE).toBe(48);
   });
 });

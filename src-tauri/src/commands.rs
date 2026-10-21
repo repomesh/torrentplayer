@@ -239,12 +239,17 @@ pub(crate) struct StreamInfo {
 /// Starts streaming one video file: selects it for download, starts prioritization, and
 /// publishes it on the loopback server.
 #[tauri::command]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "Tauri injects the application states used to start and account for a stream"
+)]
 pub(crate) async fn start_stream(
     app: AppHandle,
     state: State<'_, AppState>,
     downloads: State<'_, crate::downloads::DownloadsState>,
     library: State<'_, crate::library::LibraryState>,
     settings: State<'_, crate::settings::SettingsState>,
+    media_tools: State<'_, crate::media::MediaToolsState>,
     torrent_id: usize,
     file_index: usize,
 ) -> Result<StreamInfo, IpcError> {
@@ -279,6 +284,9 @@ pub(crate) async fn start_stream(
         torrent_name: library_text(&info.name),
         size_bytes: i64::try_from(entry.len).ok().map(|_| entry.len),
     };
+    // Locate optional tools before publishing the stream. Awaiting after `publish` would leave
+    // an orphaned source if this command were cancelled while the lookup was in flight.
+    let tools = media_tools.tools(&settings).await;
     crate::cache::mark_unfinished(&settings.active_download_dir(), &info.info_hash);
     // The queue downloader may have paused or limited this torrent in the background; what is
     // watched always gets the whole link.
@@ -299,6 +307,12 @@ pub(crate) async fn start_stream(
     // Reads the container header alongside the player, so the player can say if the audio
     // will be silent and list embedded subtitles.
     let tracks = TrackProbe::start(published.id, media);
+    let duration = crate::media::DurationProbe::start(
+        std::sync::Arc::downgrade(core),
+        tools,
+        (published.id, torrent_id, file_index),
+        tracks.subscribe(),
+    );
     core.streams
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -312,6 +326,7 @@ pub(crate) async fn start_stream(
                 media: library_media.clone(),
                 progress: ProgressTracker::default(),
                 tracks,
+                duration,
             },
         );
     tracing::info!(
@@ -359,11 +374,15 @@ pub(crate) async fn report_playback(
     let duration_secs =
         duration_secs.filter(|d| d.is_finite() && *d > 0.0 && *d <= MAX_DURATION_SECS);
     let core = state.core().await?;
-    let (torrent, progress) = core.with_stream(stream_id, |s| {
+    // The player knows the duration of what it plays; for the rest (a Matroska file without
+    // one, a format it cannot open), the header or `ffprobe` may.
+    let (torrent, duration_secs, progress) = core.with_stream(stream_id, |s| {
+        let duration_secs = duration_secs.or_else(|| s.duration.duration_secs());
         s.session.update(position_secs, duration_secs);
         let save = s.progress.update(position_secs, duration_secs);
         (
             s.torrent,
+            duration_secs,
             save.then(|| {
                 (
                     s.media.clone(),

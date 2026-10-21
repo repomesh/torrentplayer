@@ -104,6 +104,9 @@ const RULES: Record<string, Check> = {
   'storage.downloadDir': optional((v) =>
     typeof v === 'string' ? downloadDirProblem(v) : 'Enter a folder path.',
   ),
+  'advanced.ffmpegDir': optional((v) =>
+    typeof v === 'string' ? downloadDirProblem(v) : 'Enter a folder path.',
+  ),
   'storage.cacheLimitGb': optional(
     range(LIMITS.cacheLimitGb, 'Choose a limit between 1 GB and 100 000 GB, or unlimited.'),
   ),

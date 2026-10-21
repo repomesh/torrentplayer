@@ -114,6 +114,21 @@
     />
   </Field>
   <Field
+    id="playback-thumbnails"
+    label="Seek bar previews"
+    path="playback.seekThumbnails"
+    help="Shows a frame of the video where you point at the seek bar, for the parts already downloaded. Needs FFmpeg (Advanced)."
+  >
+    <Toggle
+      id="playback-thumbnails"
+      checked={p.seekThumbnails}
+      describedby="playback-thumbnails-help"
+      onchange={(v) => {
+        update('playback.seekThumbnails', v);
+      }}
+    />
+  </Field>
+  <Field
     id="playback-hwdec"
     label="Hardware decoding"
     path="playback.hardwareDecoding"

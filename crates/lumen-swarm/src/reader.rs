@@ -29,6 +29,10 @@ enum State {
 /// While it exists, the data just after its position is the most urgent work in the torrent.
 /// Reads wait until the needed piece is downloaded and verified; seeking re-prioritizes
 /// immediately and cancels requests that are no longer needed.
+///
+/// A *stored-only* reader ([`Torrent::stored_reader`](crate::Torrent::stored_reader)) changes
+/// nothing about what is downloaded: it reads pieces already stored and fails at once with
+/// [`io::ErrorKind::WouldBlock`] where one is missing.
 pub struct FileReader {
     shared: Arc<Shared>,
     id: InterestId,
@@ -36,6 +40,7 @@ pub struct FileReader {
     len: u64,
     pos: u64,
     state: State,
+    stored_only: bool,
 }
 
 impl std::fmt::Debug for FileReader {
@@ -48,7 +53,13 @@ impl std::fmt::Debug for FileReader {
 }
 
 impl FileReader {
-    pub(crate) fn new(shared: Arc<Shared>, id: InterestId, file_offset: u64, len: u64) -> Self {
+    pub(crate) fn new(
+        shared: Arc<Shared>,
+        id: InterestId,
+        file_offset: u64,
+        len: u64,
+        stored_only: bool,
+    ) -> Self {
         let reader = Self {
             shared,
             id,
@@ -56,6 +67,7 @@ impl FileReader {
             len,
             pos: 0,
             state: State::Idle,
+            stored_only,
         };
         reader.register(true);
         reader
@@ -74,6 +86,9 @@ impl FileReader {
     }
 
     fn register(&self, seek: bool) {
+        if self.stored_only {
+            return;
+        }
         self.shared.sched().set_interest(
             self.id,
             Interest {
@@ -90,6 +105,9 @@ impl FileReader {
 
 impl Drop for FileReader {
     fn drop(&mut self) {
+        if self.stored_only {
+            return;
+        }
         self.shared.sched().remove_interest(self.id);
         self.shared.request_replan(false);
     }
@@ -125,6 +143,11 @@ impl AsyncRead for FileReader {
                             shared.store.read(piece, in_piece, &mut out)?;
                             Ok(out)
                         }));
+                    } else if self.stored_only {
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::WouldBlock,
+                            "piece not downloaded",
+                        )));
                     } else {
                         // Register for the wake-up before re-checking, so a piece finishing in
                         // between is not missed.

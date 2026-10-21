@@ -17,4 +17,10 @@ debugOverlay: boolean,
 /**
  * Log detail. The `RUST_LOG` environment variable overrides it.
  */
-logLevel: LogLevel, };
+logLevel: LogLevel, 
+/**
+ * Folder with `ffprobe` and `ffmpeg` (or its `bin` folder); `None` looks on `PATH`.
+ * FFmpeg is optional: it gives the duration of videos whose header has none, and seek-bar
+ * thumbnails.
+ */
+ffmpegDir: string | null, };

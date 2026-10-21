@@ -228,6 +228,38 @@ async fn reads_correct_bytes_at_any_offset() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stored_readers_read_only_stored_pieces_and_download_nothing() {
+    // 1 MiB/s, so the middle of the file is still missing when it is read.
+    let f = fixture(NonZeroU32::new(1024 * 1024)).await;
+    let mut stored = f.torrent.stored_reader(0).unwrap();
+    let mut buf = vec![0u8; 1000];
+    let error = stored.read_exact(&mut buf).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        f.torrent.stats().downloaded_bytes,
+        0,
+        "nothing was asked for"
+    );
+
+    // Once a normal reader has fetched the start, the stored reader serves it.
+    let mut reader = f.torrent.reader(0).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), reader.read_exact(&mut buf))
+        .await
+        .expect("timed out waiting for data")
+        .unwrap();
+    drop(reader);
+    stored.seek(SeekFrom::Start(10)).await.unwrap();
+    let mut start = vec![0u8; 500];
+    stored.read_exact(&mut start).await.unwrap();
+    assert_eq!(start, f.data[10..510]);
+    stored.seek(SeekFrom::Start(LEN as u64 / 2)).await.unwrap();
+    let error = stored.read_exact(&mut start).await.unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    f.swarm.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn downloads_a_whole_selected_file_correctly() {
     let f = fixture(None).await;
     f.torrent.select_file(0).unwrap();

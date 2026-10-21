@@ -35,6 +35,9 @@ describe('validate', () => {
     expect(validate('bandwidth.maxDownloads', 101)).toMatch(/0 for no limit/);
     expect(validate('bandwidth.seedTimeLimitMinutes', 0)).toBeNull();
     expect(validate('bandwidth.seedTimeLimitMinutes', 525_601)).toMatch(/one year/);
+    expect(validate('advanced.ffmpegDir', null)).toBeNull();
+    expect(validate('advanced.ffmpegDir', 'C:\\ffmpeg\\bin')).toBeNull();
+    expect(validate('advanced.ffmpegDir', 'ffmpeg')).toMatch(/full path/);
     expect(validate('playback.defaultSpeed', 1.25)).toBeNull();
     expect(validate('playback.defaultSpeed', 3.5)).not.toBeNull();
     expect(validate('playback.defaultSpeed', Number.NaN)).not.toBeNull();

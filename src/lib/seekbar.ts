@@ -67,3 +67,64 @@ export function formatTime(secs: number): string {
   const ss = s.toString().padStart(2, '0');
   return h > 0 ? `${h.toString()}:${m.toString().padStart(2, '0')}:${ss}` : `${m.toString()}:${ss}`;
 }
+
+/** Seek-bar thumbnails per video, at most; nearby positions share one. */
+export const THUMBNAIL_STEPS = 120;
+/** Shortest time between two thumbnails, in seconds. */
+export const MIN_THUMBNAIL_STEP_SECS = 2;
+/** Most encoded preview URLs retained for one video. */
+export const THUMBNAIL_CACHE_SIZE = 48;
+
+/**
+ * The time whose thumbnail stands for `fraction` of the video: the start of its step, so a
+ * pointer moving a little asks for nothing new. Null while the duration is unknown.
+ */
+export function thumbnailTime(fraction: number, duration: number): number | null {
+  if (!Number.isFinite(duration) || duration <= 0 || !Number.isFinite(fraction)) {
+    return null;
+  }
+  const step = Math.max(MIN_THUMBNAIL_STEP_SECS, duration / THUMBNAIL_STEPS);
+  const at = Math.min(1, Math.max(0, fraction)) * duration;
+  // The exact duration has no frame. Keep the right edge in the final non-empty bucket.
+  const bucketCount = Math.max(1, Math.ceil(duration / step));
+  return Math.min(Math.floor(at / step), bucketCount - 1) * step;
+}
+
+/** Thumbnails of one video, remembered once fetched. */
+export interface ThumbnailSource {
+  /** The picture for `secs`, if already fetched. */
+  peek: (secs: number) => string | undefined;
+  /** Fetches the picture for `secs` (null: none to show now). */
+  get: (secs: number) => Promise<string | null>;
+}
+
+/**
+ * Remembers the pictures `fetch` returns, up to `limit` (the oldest is forgotten first). A null
+ * answer is not remembered: that part may be downloaded later.
+ */
+export function thumbnailSource(
+  fetch: (secs: number) => Promise<string | null>,
+  limit: number = THUMBNAIL_CACHE_SIZE,
+): ThumbnailSource {
+  const pictures = new Map<number, string>();
+  return {
+    peek: (secs) => pictures.get(secs),
+    get: async (secs) => {
+      const known = pictures.get(secs);
+      if (known !== undefined) {
+        return known;
+      }
+      const picture = await fetch(secs);
+      if (picture !== null) {
+        if (pictures.size >= limit) {
+          const oldest = pictures.keys().next();
+          if (oldest.done !== true) {
+            pictures.delete(oldest.value);
+          }
+        }
+        pictures.set(secs, picture);
+      }
+      return picture;
+    },
+  };
+}

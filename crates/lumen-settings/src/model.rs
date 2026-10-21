@@ -94,6 +94,9 @@ pub struct PlaybackSettings {
     pub keep_course_order: bool,
     /// Turn on subtitles in the system language when a video has them.
     pub subtitles_by_default: bool,
+    /// Show a frame above the seek bar where the pointer is, for parts already downloaded.
+    /// Needs FFmpeg (see [`AdvancedSettings::ffmpeg_dir`]).
+    pub seek_thumbnails: bool,
 }
 
 impl Default for PlaybackSettings {
@@ -106,6 +109,7 @@ impl Default for PlaybackSettings {
             optimize_queue: false,
             keep_course_order: true,
             subtitles_by_default: false,
+            seek_thumbnails: true,
         }
     }
 }
@@ -380,6 +384,10 @@ pub struct AdvancedSettings {
     pub debug_overlay: bool,
     /// Log detail. The `RUST_LOG` environment variable overrides it.
     pub log_level: LogLevel,
+    /// Folder with `ffprobe` and `ffmpeg` (or its `bin` folder); `None` looks on `PATH`.
+    /// FFmpeg is optional: it gives the duration of videos whose header has none, and seek-bar
+    /// thumbnails.
+    pub ffmpeg_dir: Option<String>,
 }
 
 impl Default for AdvancedSettings {
@@ -388,6 +396,7 @@ impl Default for AdvancedSettings {
             engine: EngineSetting::Auto,
             debug_overlay: true,
             log_level: LogLevel::Info,
+            ffmpeg_dir: None,
         }
     }
 }
@@ -524,6 +533,10 @@ impl Settings {
                     self.search.results_per_search = defaults.search.results_per_search;
                     true
                 }
+                "advanced.ffmpegDir" => {
+                    self.advanced.ffmpeg_dir = None;
+                    true
+                }
                 "network.interface" => {
                     self.network.interface = None;
                     true
@@ -586,6 +599,11 @@ impl Settings {
             ));
         }
         self.network.check(&mut errors);
+        if let Some(dir) = &self.advanced.ffmpeg_dir
+            && let Err(message) = check_folder(dir)
+        {
+            errors.push(FieldError::new("advanced.ffmpegDir", message));
+        }
         errors
     }
 }
@@ -749,6 +767,11 @@ fn is_host(host: &str) -> bool {
 
 // Checks a user-chosen download folder.
 fn check_download_dir(dir: &str) -> Result<(), String> {
+    check_folder(dir)
+}
+
+// Checks a user-chosen folder: a full, plain path below a drive or file system root.
+fn check_folder(dir: &str) -> Result<(), String> {
     if dir.is_empty() || dir.len() > MAX_TEXT || dir.chars().any(char::is_control) {
         return Err("Enter a folder path.".to_owned());
     }
@@ -800,6 +823,37 @@ mod tests {
         assert!(!old.subtitles_by_default);
         let json = serde_json::to_value(PlaybackSettings::default()).unwrap();
         assert_eq!(json["subtitlesByDefault"], false);
+    }
+
+    #[test]
+    fn media_settings_default_for_older_files() {
+        let old: Settings =
+            serde_json::from_str(r#"{"playback": {"defaultSpeed": 1.25}, "advanced": {}}"#)
+                .unwrap();
+        assert!(old.playback.seek_thumbnails);
+        assert_eq!(old.advanced.ffmpeg_dir, None);
+        let json = serde_json::to_value(Settings::default()).unwrap();
+        assert_eq!(json["playback"]["seekThumbnails"], true);
+        assert_eq!(json["advanced"]["ffmpegDir"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn ffmpeg_folder_must_be_a_full_path() {
+        let good = if cfg!(windows) {
+            r"C:\ffmpeg\bin"
+        } else {
+            "/opt/ffmpeg/bin"
+        };
+        let mut s = Settings::default();
+        s.advanced.ffmpeg_dir = Some(good.into());
+        assert_eq!(s.validate(), Ok(()));
+        for bad in ["ffmpeg", "", "../ffmpeg"] {
+            s.advanced.ffmpeg_dir = Some(bad.into());
+            let errors = s.validate().unwrap_err();
+            assert_eq!(errors[0].field, "advanced.ffmpegDir", "{bad}");
+        }
+        s.sanitize();
+        assert_eq!(s.advanced.ffmpeg_dir, None);
     }
 
     #[test]

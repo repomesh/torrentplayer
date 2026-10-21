@@ -20,6 +20,7 @@ mod downloads;
 mod error;
 mod latest;
 mod library;
+mod media;
 mod migrate;
 mod network;
 mod prefetch;
@@ -155,6 +156,7 @@ pub fn run() -> anyhow::Result<()> {
             app.manage(library);
             app.manage(queue);
             app.manage(preview::PreviewState::default());
+            app.manage(media::MediaToolsState::default());
             downloads::start(app.handle());
             window::show_eventually(app.handle());
             Ok(())
@@ -190,6 +192,9 @@ pub fn run() -> anyhow::Result<()> {
             downloads::queue_downloads,
             library::library_items,
             preview::preview_file,
+            media::seek_thumbnail,
+            media::media_tools,
+            media::choose_ffmpeg_dir,
             settings::get_settings,
             settings::update_settings,
             settings::set_secret,

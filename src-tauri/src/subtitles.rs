@@ -318,6 +318,7 @@ mod tests {
             forced: false,
         };
         let report = TrackReport {
+            duration_ms: None,
             container: Container::Matroska,
             audio: Vec::new(),
             subtitles: vec![

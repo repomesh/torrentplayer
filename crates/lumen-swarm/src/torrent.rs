@@ -606,6 +606,21 @@ impl Torrent {
     ///
     /// Returns an error if there is no file with that index.
     pub fn reader(&self, file: usize) -> Result<FileReader, SwarmError> {
+        self.open_reader(file, false)
+    }
+
+    /// Opens a seekable reader over a file that reads only pieces already stored: it is never
+    /// prioritized, and a read of a missing piece fails at once with
+    /// [`std::io::ErrorKind::WouldBlock`]. For tools that must not compete with playback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if there is no file with that index.
+    pub fn stored_reader(&self, file: usize) -> Result<FileReader, SwarmError> {
+        self.open_reader(file, true)
+    }
+
+    fn open_reader(&self, file: usize, stored_only: bool) -> Result<FileReader, SwarmError> {
         let f = self
             .shared
             .meta
@@ -618,6 +633,7 @@ impl Torrent {
             id,
             f.offset,
             f.len,
+            stored_only,
         ))
     }
 

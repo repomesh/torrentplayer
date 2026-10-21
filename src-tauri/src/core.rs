@@ -14,6 +14,7 @@ use tokio::sync::OnceCell;
 
 use crate::audio::TrackProbe;
 use crate::error::{ErrorKind, IpcError};
+use crate::media::DurationProbe;
 
 /// Managed Tauri state. The engine starts lazily on first use, so a failure is reported to the
 /// UI instead of preventing the window from opening.
@@ -76,6 +77,8 @@ pub(crate) struct ActiveStream {
     pub(crate) progress: ProgressTracker,
     /// The probe of its audio and subtitle tracks, cancelled when the stream stops.
     pub(crate) tracks: TrackProbe,
+    /// Its duration from the header or `ffprobe`, for when the player reports none.
+    pub(crate) duration: DurationProbe,
 }
 
 /// The latest playback position and when it was last persisted.

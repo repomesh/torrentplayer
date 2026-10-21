@@ -33,4 +33,9 @@ keepCourseOrder: boolean,
 /**
  * Turn on subtitles in the system language when a video has them.
  */
-subtitlesByDefault: boolean, };
+subtitlesByDefault: boolean, 
+/**
+ * Show a frame above the seek bar where the pointer is, for parts already downloaded.
+ * Needs FFmpeg (see [`AdvancedSettings::ffmpeg_dir`]).
+ */
+seekThumbnails: boolean, };

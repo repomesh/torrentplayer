@@ -89,6 +89,8 @@ impl From<&TrackReport> for StreamAudio {
 pub(crate) struct Probed {
     pub(crate) audio: StreamAudio,
     pub(crate) subtitles: Vec<EmbeddedSubtitleDto>,
+    /// The duration in the header, in milliseconds, if it gives one.
+    pub(crate) duration_ms: Option<u64>,
 }
 
 /// A stream's probe of its container's tracks, running or finished. Dropping it (when the
@@ -136,6 +138,7 @@ async fn probe(stream: StreamId, media: &dyn MediaSource) -> Probed {
     let unknown = Probed {
         audio: StreamAudio::unknown(),
         subtitles: Vec::new(),
+        duration_ms: None,
     };
     match outcome {
         Ok(Ok(report)) => {
@@ -151,6 +154,7 @@ async fn probe(stream: StreamId, media: &dyn MediaSource) -> Probed {
             Probed {
                 audio,
                 subtitles: embedded(&report),
+                duration_ms: report.duration_ms,
             }
         }
         Ok(Err(error)) => {
@@ -217,6 +221,7 @@ mod tests {
     #[test]
     fn reports_primary_and_playable_alternative() {
         let report = TrackReport {
+            duration_ms: None,
             container: Container::Matroska,
             subtitles: Vec::new(),
             audio: vec![

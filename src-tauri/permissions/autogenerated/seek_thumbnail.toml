@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-seek-thumbnail"
+description = "Enables the seek_thumbnail command without any pre-configured scope."
+commands.allow = ["seek_thumbnail"]
+
+[[permission]]
+identifier = "deny-seek-thumbnail"
+description = "Denies the seek_thumbnail command without any pre-configured scope."
+commands.deny = ["seek_thumbnail"]
