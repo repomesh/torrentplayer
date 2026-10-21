@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod audio;
+mod cache;
 mod commands;
 mod core;
 mod details;
@@ -121,7 +122,9 @@ pub fn run() -> anyhow::Result<()> {
             {
                 migrate::migrate(&earlier_default, &folders.downloads);
             }
-            settings.run_startup_maintenance();
+            let queue = queue::QueueState::new(folders.data);
+            let saved_queue = queue.load();
+            settings.run_startup_maintenance(&saved_queue);
             // The network manager starts before anything can connect, and then follows the
             // network settings, so no traffic ever leaves outside the selected mode.
             let network = network::start(&settings.current(), settings.secrets().as_ref())?;
@@ -142,8 +145,7 @@ pub fn run() -> anyhow::Result<()> {
             app.manage(preload::PreloadState::default());
             app.manage(prefetch::PrefetchState::default());
             app.manage(thumbnails::ThumbnailState::default());
-            let queue = queue::QueueState::new(folders.data);
-            app.manage(downloads::DownloadsState::new(queue.load()));
+            app.manage(downloads::DownloadsState::new(saved_queue));
             app.manage(queue);
             app.manage(preview::PreviewState::default());
             downloads::start(app.handle());

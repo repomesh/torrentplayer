@@ -775,9 +775,9 @@ returns a secret's value.
 
 #### `cache_usage`
 
-Size and file count of TorrentStream's cache folders (`lumen-swarm/`, `librqbit/`) in the download
-folder in use. Symbolic links are not followed; counting stops after 200 000 entries
-(`complete: false`).
+Size, configured limit, file count, and safely reclaimable finished data in TorrentStream's cache
+folders (`lumen-swarm/`, `librqbit/`) in the download folder in use. Symbolic links are not
+followed; counting stops after 200 000 entries (`complete: false`).
 
 |            |                                                   |
 | ---------- | ------------------------------------------------- |
@@ -788,12 +788,10 @@ folder in use. Symbolic links are not followed; counting stops after 200 000 ent
 
 #### `clear_cache`
 
-Deletes TorrentStream's cache folders (only `lumen-swarm/` and `librqbit/` in the download folder in
-use; a cache folder that is a symbolic link is left alone). If the torrent engine has not started
-this session, they are deleted now (`"cleared"`), and the engine cannot start until that is done.
-Otherwise the clear is scheduled for the next start (`"scheduled"`), before the engine starts;
-the marker only ever clears the configured or default download folder. The frontend must ask for
-confirmation first.
+Deletes finished downloads that are no longer queued and have no open player stream. Only validated
+info-hash directories under `lumen-swarm/` and `librqbit/` are removed; symbolic links, legacy
+layouts, and unrelated files are left alone. The result reports bytes and downloads removed. The
+frontend asks for confirmation first.
 
 |            |                                                                 |
 | ---------- | --------------------------------------------------------------- |

@@ -83,8 +83,8 @@ saved before these two existed read them as their defaults.
 | Setting                    | Default | Valid values                                      | Applies    |
 | -------------------------- | ------- | ------------------------------------------------- | ---------- |
 | `storage.downloadDir`      | `null`  | `null` (default folder) or a full path; see below | next start |
-| `storage.cacheLimitGb`     | `null`  | `null` (unlimited) or 1–100 000                   | later      |
-| `storage.cleanupAfterDays` | `null`  | `null` (never) or 1–3650                          | later      |
+| `storage.cacheLimitGb`     | `null`  | `null` (unlimited) or 1–100 000                   | now        |
+| `storage.cleanupAfterDays` | `null`  | `null` (never) or 1–3650                          | now        |
 
 The download folder holds everything TorrentStream downloads: the videos themselves and its cache, in
 `lumen-swarm/` and `librqbit/` folders inside it. Type a path, or press **Choose folder…** to
@@ -96,11 +96,17 @@ A download folder must be a full path (not relative), must not be the root of a 
 contain `.` or `..` components, control characters, or device prefixes (`\\?\`, `\\.\`). TorrentStream
 creates it if needed and checks that it can write there before saving.
 
-The **Cache** row shows how much space downloaded lecture data uses. **Clear cache…** asks for
-confirmation on the page, then deletes only TorrentStream's own cache folders (`lumen-swarm/` and
-`librqbit/`) inside the download folder in use; nothing else in that folder is touched. If the
-torrent engine has already started this session, the cache is cleared the next time TorrentStream
-starts, before the engine runs.
+The **Cache** row shows the current use and configured limit. TorrentStream marks a download as
+finished when playback reaches the end, then checks the storage policy at startup, after playback,
+and periodically while it runs. It removes the oldest eligible downloads first until the cache is
+within the limit; the age setting independently removes eligible downloads older than the selected
+number of days.
+
+**Clear now…** removes every finished download that is no longer in the queue. A queued torrent or
+one with an open player stream is always protected. Cleanup deletes only validated info-hash
+folders inside TorrentStream's own `lumen-swarm/` and `librqbit/` cache folders. Unrecognized and
+legacy layouts count toward the displayed size but are not removed automatically because they
+cannot be associated safely with a finished torrent.
 
 ### Bandwidth and seeding
 

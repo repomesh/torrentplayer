@@ -118,6 +118,8 @@ describe('availability', () => {
     expect(availability('bandwidth.seedAfterWatching')).toBe('live');
     expect(availability('bandwidth.seedRatioTarget')).toBe('live');
     expect(availability('bandwidth.seedTimeLimitMinutes')).toBe('live');
+    expect(availability('storage.cacheLimitGb')).toBe('live');
+    expect(availability('storage.cleanupAfterDays')).toBe('live');
     expect(availability('search.sources.internetArchive')).toBe('later');
     expect(availability('playback.defaultSpeed')).toBe('live');
     expect(availability('search.hideAdult')).toBe('live');

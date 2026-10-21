@@ -31,6 +31,9 @@ use crate::error::IpcError;
 
 /// How often the downloader re-plans.
 const TICK: Duration = Duration::from_secs(1);
+/// Cache policy checks are deliberately much less frequent than download planning: they walk
+/// the download folder and also run immediately after playback reaches the end.
+const CACHE_CHECK: Duration = Duration::from_secs(60);
 /// Give up adding a torrent after this long, and wait this long before trying it again.
 const ADD_TIMEOUT: Duration = Duration::from_secs(60);
 const RETRY_ADD_AFTER: Duration = Duration::from_secs(60);
@@ -54,6 +57,8 @@ struct Inner {
     queue: Mutex<Queue>,
     snapshot: Mutex<DownloadsSnapshot>,
     wake: Notify,
+    /// Serializes queue changes and stream starts with cache removal.
+    cache_gate: tokio::sync::Mutex<()>,
 }
 
 impl DownloadsState {
@@ -64,12 +69,14 @@ impl DownloadsState {
                 queue: Mutex::new(queue),
                 snapshot: Mutex::new(DownloadsSnapshot::default()),
                 wake: Notify::new(),
+                cache_gate: tokio::sync::Mutex::new(()),
             }),
         }
     }
 
     /// Follows a newly saved queue (order, pauses, items) at once.
-    pub(crate) fn set_queue(&self, queue: Queue) {
+    pub(crate) async fn set_queue(&self, queue: Queue) {
+        let _gate = self.inner.cache_gate.lock().await;
         *self
             .inner
             .queue
@@ -78,12 +85,16 @@ impl DownloadsState {
         self.inner.wake.notify_one();
     }
 
-    fn queue(&self) -> Queue {
+    pub(crate) fn queue(&self) -> Queue {
         self.inner
             .queue
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    pub(crate) fn cache_gate(&self) -> &tokio::sync::Mutex<()> {
+        &self.inner.cache_gate
     }
 
     fn publish(&self, snapshot: DownloadsSnapshot) {
@@ -250,10 +261,16 @@ pub(crate) fn start(app: &AppHandle) {
             };
             let Some(core) = core.cloned() else {
                 downloads.publish(idle_snapshot(&queue));
+                if runtime.cache_cleanup_due(Instant::now()) {
+                    crate::settings::enforce_cache_policy(&app).await;
+                }
                 continue;
             };
             let snapshot = runtime.tick(&app, &core, &queue).await;
             downloads.publish(snapshot);
+            if runtime.cache_cleanup_due(Instant::now()) {
+                crate::settings::enforce_cache_policy(&app).await;
+            }
         }
     });
 }
@@ -309,6 +326,9 @@ struct Runtime {
     selected: HashMap<String, (TorrentId, usize)>,
     /// The download and upload limits last applied from the settings.
     limits: Option<(Option<NonZeroU32>, Option<NonZeroU32>)>,
+    /// Last cache walk and whether finishing playback requested one immediately.
+    last_cache_cleanup: Option<Instant>,
+    cleanup_requested: bool,
 }
 
 #[derive(Default)]
@@ -368,6 +388,18 @@ fn post_playback_seeding(
 }
 
 impl Runtime {
+    fn cache_cleanup_due(&mut self, now: Instant) -> bool {
+        let due = self.cleanup_requested
+            || self
+                .last_cache_cleanup
+                .is_none_or(|last| now.saturating_duration_since(last) >= CACHE_CHECK);
+        if due {
+            self.cleanup_requested = false;
+            self.last_cache_cleanup = Some(now);
+        }
+        due
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn tick(
         &mut self,
@@ -379,7 +411,9 @@ impl Runtime {
         let engine = &core.engine;
         // The user's bandwidth limits cover everything: both engines, playback included. They
         // follow the settings within a tick, and cap the link estimate the plan is based on.
-        let settings = app.state::<crate::settings::SettingsState>().current();
+        let settings_state = app.state::<crate::settings::SettingsState>();
+        let settings = settings_state.current();
+        let cache_root = settings_state.active_download_dir();
         let limits = crate::settings::rate_limits(&settings.bandwidth);
         if self.limits != Some(limits) {
             engine.set_rate_limits(limits.0, limits.1).await;
@@ -627,11 +661,23 @@ impl Runtime {
             let foreground = watched_torrent == Some(id);
             let needed = wanted.get(&id).copied().unwrap_or(false);
             if foreground {
+                if !run.was_watching
+                    && let Ok(info) = engine.info(id)
+                {
+                    crate::cache::mark_unfinished(&cache_root, &info.info_hash);
+                }
                 run.was_watching = true;
                 run.seed_since = None;
             } else if run.was_watching {
                 run.was_watching = false;
                 run.seed_since = Some(now);
+                if let (Ok(info), Ok(backend)) = (engine.info(id), engine.backend(id))
+                    && let Err(error) =
+                        crate::cache::mark_finished(&cache_root, backend, &info.info_hash)
+                {
+                    tracing::warn!(%error, "could not mark a download as finished");
+                }
+                self.cleanup_requested = true;
             }
             let seeding = post_playback_seeding(
                 run.seed_since,
@@ -865,15 +911,15 @@ mod tests {
         assert_eq!(json["link"]["pressure"], "relaxed");
     }
 
-    #[test]
-    fn a_saved_queue_reaches_the_downloader() {
+    #[tokio::test]
+    async fn a_saved_queue_reaches_the_downloader() {
         let state = DownloadsState::new(Queue::default());
         let queue = Queue {
             items: vec![item("a", None, true)],
             order: DownloadOrder::Fastest,
             ..Queue::default()
         };
-        state.set_queue(queue.clone());
+        state.set_queue(queue.clone()).await;
         assert_eq!(state.queue(), queue);
     }
 

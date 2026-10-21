@@ -22,7 +22,7 @@ pub(crate) struct AppState {
     config: StreamEngineConfig,
     /// The network manager all engine traffic goes through.
     network: lumen_net::Network,
-    /// Held while the core starts, so [`AppState::unless_started`] cannot race it.
+    /// Serializes lazy core startup.
     starting: tokio::sync::Mutex<()>,
 }
 
@@ -53,20 +53,6 @@ impl AppState {
     /// The core, if it has started.
     pub(crate) fn started(&self) -> Option<&Arc<Core>> {
         self.core.get()
-    }
-
-    /// Runs `f` only if the core has not started, keeping it from starting until `f` is done
-    /// (used to delete the download cache safely). Returns `None` if the core is running.
-    pub(crate) async fn unless_started<F, R>(&self, f: impl FnOnce() -> F) -> Option<R>
-    where
-        F: Future<Output = R>,
-    {
-        let _starting = self.starting.lock().await;
-        if self.core.initialized() {
-            None
-        } else {
-            Some(f().await)
-        }
     }
 }
 

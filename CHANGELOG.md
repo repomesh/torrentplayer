@@ -13,6 +13,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and total upload rates, and shares the global upload limit with librqbit.
 - Seeding can continue after playback until a ratio or time target is reached, and the configured
   peer cap now applies to both engines.
+- Storage can cap cache size and expire old finished downloads automatically, while protecting
+  everything queued or open in the player; Settings shows current use and offers a safe clear-now
+  action.
 
 ## [0.2.0] - 2026-10-20
 
