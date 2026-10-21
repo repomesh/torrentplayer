@@ -2,7 +2,8 @@
 
 This guide is for people who work on TorrentStream: how it is designed, why, and how to build, test,
 benchmark, and release it. If you only want to use TorrentStream, start with the
-[README](https://github.com/torrent-stream/torrentstream#readme).
+[README](https://github.com/torrent-stream/torrentstream#readme). Questions about anything here
+are welcome on the [TorrentStream Discord server](https://discord.gg/fVkWSZAafp).
 
 TorrentStream streams any torrent, video or audio, straight from BitTorrent ("stream at the speed
 of the swarm"). Its top priority is that playback starts fast, seeking feels near-instant, and

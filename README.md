@@ -17,7 +17,8 @@
   <a href="#features">Features</a> ·
   <a href="#performance">Performance</a> ·
   <a href="#privacy">Privacy</a> ·
-  <a href="#get-torrentstream">Get it</a>
+  <a href="#get-torrentstream">Get it</a> ·
+  <a href="https://discord.gg/fVkWSZAafp">Discord</a>
 </p>
 
 <p align="center">
@@ -26,6 +27,7 @@
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational" alt="Platforms: Windows, macOS, Linux">
   <img src="https://img.shields.io/badge/telemetry-none-brightgreen" alt="Telemetry: none">
+  <a href="https://discord.gg/fVkWSZAafp"><img src="https://img.shields.io/badge/Discord-come%20talk-5865F2?logo=discord&amp;logoColor=white" alt="Discord: come talk"></a>
 </p>
 
 <p align="center">
@@ -324,6 +326,13 @@ the tunnel is back; nothing falls back to a direct connection. See
 another folder in Settings → Storage, which shows its size and limit and safely clears finished,
 unqueued downloads (see
 [configuration](docs/configuration.md)).
+
+## Community
+
+Questions, ideas, or just want to talk about TorrentStream? Join the
+[TorrentStream Discord server](https://discord.gg/fVkWSZAafp). Bugs and feature requests are tracked in
+[GitHub issues](https://github.com/torrent-stream/torrentstream/issues), so they don't get lost
+in chat.
 
 ## Contributing
 

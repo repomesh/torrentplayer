@@ -15,8 +15,8 @@ minor release only.
 
 ## Reporting a vulnerability
 
-**Please do not report security vulnerabilities through public GitHub issues, discussions, or
-pull requests.**
+**Please do not report security vulnerabilities through public GitHub issues, discussions, pull
+requests, or the Discord server.**
 
 Report them privately through
 [GitHub private vulnerability reporting](https://github.com/torrent-stream/torrentstream/security/advisories/new).
