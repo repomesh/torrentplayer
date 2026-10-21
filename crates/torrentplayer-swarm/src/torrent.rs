@@ -96,6 +96,9 @@ pub struct SwarmConfig {
     /// policy allows UDP (direct mode). Off by default; turn it on along with trackers for
     /// public swarms.
     pub enable_dht: bool,
+    /// Where the DHT's routing tables are kept between runs (direct mode only). `None` starts
+    /// from the bootstrap nodes every time.
+    pub dht_state_file: Option<PathBuf>,
     /// Port announced to trackers while incoming connections are not accepted (trackers reject
     /// port 0). While they are, the listening port is announced instead.
     pub announce_port: u16,
@@ -133,6 +136,7 @@ impl SwarmConfig {
             idle_timeout: Duration::from_secs(120),
             enable_trackers: true,
             enable_dht: false,
+            dht_state_file: None,
             announce_port: 6881,
             accept_incoming: false,
             scheduler: SchedulerConfig::default(),
@@ -313,9 +317,13 @@ impl Swarm {
             .build()
             .map_err(|e| SwarmError::Trackers(e.to_string()))?;
         let web = web_client(&cfg)?;
-        let dht = cfg
-            .enable_dht
-            .then(|| Arc::new(DhtNode::new(cancel.clone(), cfg.network.clone())));
+        let dht = cfg.enable_dht.then(|| {
+            Arc::new(DhtNode::new(
+                cancel.clone(),
+                cfg.network.clone(),
+                cfg.dht_state_file.clone(),
+            ))
+        });
         if let (Some(node), Some(network)) = (&dht, &cfg.network) {
             tokio::spawn(crate::dht::follow_policy(
                 Arc::clone(node),

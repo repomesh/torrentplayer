@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use librqbit::api::{Api, TorrentIdOrHash};
+use librqbit::dht::DhtPersistenceConfig;
 use librqbit::limits::LimitsConfig;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, ConnectionOptions, DhtSessionConfig,
@@ -21,7 +22,7 @@ use librqbit::{
 use torrentplayer_net::Network;
 use torrentplayer_prioritize::{FileSpan, PieceGeometry};
 use torrentplayer_stream::{MediaReader, MediaSource};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::media::{FileKind, mime_type};
 use crate::paths::{UnsafePath, validate_components};
@@ -48,6 +49,9 @@ pub struct EngineConfig {
     pub enable_upnp: bool,
     /// Use the BitTorrent DHT to find peers (needed for most magnet links).
     pub enable_dht: bool,
+    /// Where the DHT's routing tables and port are kept between runs (direct mode only).
+    /// `None` starts from the bootstrap nodes every time.
+    pub dht_state_file: Option<PathBuf>,
     /// Announce to trackers listed in torrents.
     pub enable_trackers: bool,
     /// Discover peers on the local network.
@@ -83,6 +87,7 @@ impl EngineConfig {
             listen_addr: None,
             enable_upnp: false,
             enable_dht: true,
+            dht_state_file: None,
             enable_trackers: true,
             enable_local_discovery: false,
             blocking_permits: 32,
@@ -266,10 +271,47 @@ impl Engine {
             .network
             .as_ref()
             .is_some_and(|n| n.policy().protected);
+        let session = match Self::session(&config, protected, true).await {
+            Ok(session) => session,
+            // The saved DHT port may be taken now; a fresh node picks another.
+            Err(error) if config.dht_state_file.is_some() && !protected => {
+                warn!(%error, "starting librqbit without its saved DHT state");
+                Self::session(&config, protected, false).await?
+            }
+            Err(error) => return Err(error),
+        };
+        let http = http_for(&config.client_name, config.network.as_ref())?;
+        info!(protected, "torrent engine started");
+        Ok(Self {
+            inner: Arc::new(Inner {
+                api: Api::new(Arc::clone(&session), None),
+                session,
+                http,
+                config,
+                protected,
+            }),
+        })
+    }
+
+    /// A librqbit session for `config`. With `persist_dht`, the DHT's routing tables and port
+    /// are loaded from and saved to [`EngineConfig::dht_state_file`]. A protected session has
+    /// no DHT at all.
+    async fn session(
+        config: &EngineConfig,
+        protected: bool,
+        persist_dht: bool,
+    ) -> Result<Arc<Session>, EngineError> {
+        let persistence = config
+            .dht_state_file
+            .clone()
+            .filter(|_| persist_dht)
+            .map(|file| DhtPersistenceConfig {
+                config_filename: Some(file),
+                dump_interval: None,
+            });
         let options = SessionOptions {
-            // DHT state is not persisted yet; it moves into TorrentPlayer's data directory in Phase 4.
             dht: (config.enable_dht && !protected).then(|| DhtSessionConfig {
-                persistence: None,
+                persistence,
                 ..DhtSessionConfig::default()
             }),
             disable_trackers: !config.enable_trackers,
@@ -301,20 +343,9 @@ impl Engine {
             fastresume: false,
             ..SessionOptions::default()
         };
-        let session = Session::new_with_opts(config.download_dir.clone(), options)
+        Session::new_with_opts(config.download_dir.clone(), options)
             .await
-            .map_err(engine_err)?;
-        let http = http_for(&config.client_name, config.network.as_ref())?;
-        info!(protected, "torrent engine started");
-        Ok(Self {
-            inner: Arc::new(Inner {
-                api: Api::new(Arc::clone(&session), None),
-                session,
-                http,
-                config,
-                protected,
-            }),
-        })
+            .map_err(engine_err)
     }
 
     /// Whether the session was started for a protected network mode. Its DHT, listening

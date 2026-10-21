@@ -216,6 +216,7 @@ async fn magnets_through_librqbit_use_only_the_proxy() {
             download_limit_bps: None,
             upload_limit_bps: None,
             peer_limit: 40,
+            dht_state_dir: None,
         },
         Some(net.clone()),
     )
@@ -279,6 +280,7 @@ async fn magnets_without_usable_trackers_are_refused_in_protected_modes() {
             download_limit_bps: None,
             upload_limit_bps: None,
             peer_limit: 40,
+            dht_state_dir: None,
         },
         Some(net.clone()),
     )
@@ -316,6 +318,7 @@ async fn turning_protection_on_replaces_the_librqbit_session() {
             download_limit_bps: None,
             upload_limit_bps: None,
             peer_limit: 40,
+            dht_state_dir: None,
         },
         Some(net.clone()),
     )
@@ -405,6 +408,7 @@ async fn librqbit_listens_for_incoming_peers_only_in_direct_mode() {
             download_limit_bps: None,
             upload_limit_bps: None,
             peer_limit: 40,
+            dht_state_dir: None,
         },
         Some(net.clone()),
     )

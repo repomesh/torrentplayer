@@ -23,6 +23,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interface in direct mode (with optional UPnP port mapping), only the VPN adapter when bound to
   one, and only inside the tunnel with WireGuard; never through a SOCKS5 proxy, and never while
   the kill switch blocks traffic. Settings shows whether it is listening.
+- Both engines keep their DHT routing tables in the app data folder between runs (Direct mode
+  only), so magnet links find peers sooner after a restart. Protected modes still start with a
+  fresh node and save nothing.
 - DHT peer discovery now uses bound VPN sockets and the built-in WireGuard tunnel. SOCKS5
   proxies with UDP ASSOCIATE support carry DHT and UDP trackers, including magnet metadata
   discovery, without falling back to direct UDP or target DNS.

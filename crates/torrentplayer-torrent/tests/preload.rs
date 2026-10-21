@@ -128,6 +128,7 @@ async fn fixture() -> Fixture {
         download_limit_bps: None,
         upload_limit_bps: None,
         peer_limit: 40,
+        dht_state_dir: None,
     })
     .await
     .unwrap();
@@ -335,6 +336,7 @@ async fn stale_preload_caches_are_removed_at_start() {
         download_limit_bps: None,
         upload_limit_bps: None,
         peer_limit: 40,
+        dht_state_dir: None,
     })
     .await
     .unwrap();

@@ -55,7 +55,10 @@ shown, until the settings are fixed.
 "Off" means the traffic is not sent at all, never sent around the mode. WireGuard also carries
 DHT and UDP trackers inside its tunnel. In protected modes, peers found by scoped DHT and UDP
 trackers bootstrap librqbit's magnet metadata lookup; torrentplayer-swarm continues discovery while
-streaming. Trackerless magnets can therefore find peers too. A TCP-only SOCKS5 proxy cannot
+streaming. Trackerless magnets can therefore find peers too. Protected-mode DHT nodes never
+load or save the routing tables kept between runs in Direct mode (see
+[Configuration](configuration.md#where-settings-are-stored)), so their node id cannot link the
+two. A TCP-only SOCKS5 proxy cannot
 provide these UDP paths: HTTP trackers and peer exchange still work, but UDP failures never
 trigger a direct fallback. `.torrent` files work through torrentplayer-swarm.
 

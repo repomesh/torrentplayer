@@ -55,7 +55,7 @@ pub const PROFILE_ENV_VAR: &str = "TORRENTPLAYER_PROFILE_DIR";
 struct Folders {
     /// Settings.
     config: PathBuf,
-    /// The queue.
+    /// The queue, the library, and the DHT routing tables.
     data: PathBuf,
     /// App-local data (the webview's, and downloads before they moved to `downloads`).
     local_data: PathBuf,
@@ -148,7 +148,7 @@ pub fn run() -> anyhow::Result<()> {
                 migrate::migrate(&old_swarm, &download_dir.join(cache::CACHE_DIRS[0]));
             }
             let library = library::LibraryState::new(folders.data.clone());
-            let queue = queue::QueueState::new(folders.data);
+            let queue = queue::QueueState::new(folders.data.clone());
             let saved_queue = queue.load();
             settings.run_startup_maintenance(&saved_queue);
             // The network manager starts before anything can connect, and then follows the
@@ -160,10 +160,9 @@ pub fn run() -> anyhow::Result<()> {
                 settings.subscribe(),
                 settings.secrets(),
             );
-            app.manage(core::AppState::new(
-                settings.engine_config(),
-                network.clone(),
-            ));
+            let mut engine_config = settings.engine_config();
+            engine_config.dht_state_dir = Some(folders.data.join("dht"));
+            app.manage(core::AppState::new(engine_config, network.clone()));
             app.manage(settings);
             app.manage(search::SearchState::new(network.clone()));
             app.manage(network::NetworkState::new(network));
