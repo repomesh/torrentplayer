@@ -63,8 +63,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The download speed shown for torrentplayer-swarm torrents no longer runs up to a quarter
   above the real rate while peers come and go (as they do under a download limit), so the
   queue's "in use" figure stays within the configured limit.
-- Lowering the download limit no longer lets through a burst of everything the peers had
-  already sent: what was received before the change still counts against the new limit.
+- Changing the download limit while torrentplayer-swarm downloads from many peers is now
+  smooth. Lowering it used to let every waiting peer through at once (about 1.5 MB within
+  0.2 s with 40 peers) and then deliver nothing for over a second, which could stall playback;
+  waits now stretch or shrink to the new limit, and under a limit each peer is read one block
+  at a time so no peer waits long for its turn.
+- Under a download limit, torrentplayer-swarm no longer asks many peers for more than the limit
+  lets through before requests time out. Those requests were fetched twice, so with 40 peers
+  up to a third of the limited bandwidth went to data that was thrown away.
 
 ## [0.2.0] - 2026-10-20
 
