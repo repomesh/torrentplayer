@@ -7,15 +7,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
 ### Changed
 
 - The VPN mode no longer lists OpenVPN as if it were built in: connect with your VPN
   provider's app first (OpenVPN-based apps included), then pick its adapter.
 - TorrentStream is now TorrentPlayer (torrentplayer.io, `github.com/torrentplayer/torrentplayer`).
   The app identifier is `io.torrentplayer.desktop` and the binary `TorrentPlayer`. Settings, the
-  queue, the download cache, the default `DownloadsTorrentStream` folder, and stored secrets
+  queue, the download cache, the default `Downloads/TorrentStream` folder, and stored secrets
   move to the new names at start-up. The `LUMEN_*` environment variables are now
   `TORRENTPLAYER_*`, and the crates are named `torrentplayer-*`.
+- New app icon: a play button ringed by swarm peers.
 
 ### Added
 
@@ -298,6 +301,7 @@ The first public preview: stream any torrent, video or audio, and skip to any mo
   never unmuted. It now mutes only when the autoplay policy refuses sound, then shows a "click
   to unmute" button. Interruptions are retried with the sound unchanged.
 
-[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/torrentplayer/torrentplayer/releases/tag/v0.1.0
