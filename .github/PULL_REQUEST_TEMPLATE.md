@@ -10,7 +10,7 @@
 
 ## Checklist
 
-- [ ] CI checks pass locally (see [CONTRIBUTING.md](../CONTRIBUTING.md#development-setup))
+- [ ] CI checks pass locally (see [CONTRIBUTING.md](CONTRIBUTING.md#development-setup))
 - [ ] Tests cover the new behavior
 - [ ] Public Rust items are documented
 - [ ] `CHANGELOG.md` updated under `[Unreleased]` (for user-facing changes)

@@ -100,9 +100,9 @@ jobs:
           tool: cargo-about
       - name: Check THIRD_PARTY_NOTICES.md is up to date
         run: |
-          cargo about generate --workspace --locked about.hbs -o THIRD_PARTY_NOTICES.md
+          cargo about generate --workspace --locked -c .cargo/about.toml .cargo/about.hbs -o THIRD_PARTY_NOTICES.md
           if ! git diff --exit-code -- THIRD_PARTY_NOTICES.md; then
-            echo "::error::THIRD_PARTY_NOTICES.md is out of date. Regenerate it with the command in about.toml."
+            echo "::error::THIRD_PARTY_NOTICES.md is out of date. Regenerate it with the command in .cargo/about.toml."
             exit 1
           fi
 
@@ -177,7 +177,7 @@ jobs:
           missing=0
           for sha in $(git rev-list --no-merges "$BASE_SHA..$HEAD_SHA"); do
             if ! git show -s --format=%B "$sha" | grep -qE '^Signed-off-by: .+ <.+@.+>$'; then
-              echo "::error::Commit $sha is missing a 'Signed-off-by:' line. See CONTRIBUTING.md#developer-certificate-of-origin."
+              echo "::error::Commit $sha is missing a 'Signed-off-by:' line. See .github/CONTRIBUTING.md#developer-certificate-of-origin."
               missing=1
             fi
           done

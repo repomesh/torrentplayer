@@ -7,4 +7,4 @@ src/lib/bindings/
 package-lock.json
 CHANGELOG.md
 THIRD_PARTY_NOTICES.md
-about.hbs
+.cargo/about.hbs

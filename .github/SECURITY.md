@@ -58,4 +58,4 @@ an attacker who already has full control of the user's account.
 ## Security practices
 
 How TorrentPlayer is designed to resist these threats is documented in the
-[threat model](docs/threat-model.md).
+[threat model](../docs/threat-model.md).

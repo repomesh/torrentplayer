@@ -61,4 +61,4 @@ all and can likewise be replaced.
   which is GPL-compatible). That would be a new decision, recorded in a superseding ADR, and the
   maintainers must approve it before any GPL binary ships.
 - Contributors agree to license contributions under the same dual license (see
-  CONTRIBUTING.md).
+  .github/CONTRIBUTING.md).
