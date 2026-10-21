@@ -53,6 +53,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   playback-only LGPL FFmpeg converts the audio to AAC as the video plays, copying the video, and
   the player keeps the full seek bar and restarts the conversion on far seeks.
 
+### Fixed
+
+- Releases: the parallel builds no longer create duplicate draft releases (v0.2.0 got two).
+  One job creates the draft and one uploads every file, so the macOS `.app.tar.gz` archives now
+  have checksums and attestations too.
+
 ## [0.2.0] - 2026-10-20
 
 ### Changed
