@@ -9,6 +9,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The VPN mode no longer lists OpenVPN as if it were built in: connect with your VPN
+  provider's app first (OpenVPN-based apps included), then pick its adapter.
 - TorrentStream is now TorrentPlayer (torrentplayer.io, `github.com/torrentplayer/torrentplayer`).
   The app identifier is `io.torrentplayer.desktop` and the binary `TorrentPlayer`. Settings, the
   queue, the download cache, the default `DownloadsTorrentStream` folder, and stored secrets
@@ -26,6 +28,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Both engines keep their DHT routing tables in the app data folder between runs (Direct mode
   only), so magnet links find peers sooner after a restart. Protected modes still start with a
   fresh node and save nothing.
+- In Direct mode, Settings → Network and the status bar recommend a VPN when downloading or
+  seeding (for example Windscribe, through its app or a WireGuard configuration), with a link
+  to the blog post on VPNs; it is shown once more when seeding starts, until dismissed
+  (`network.vpnHintDismissed`).
 - DHT peer discovery now uses bound VPN sockets and the built-in WireGuard tunnel. SOCKS5
   proxies with UDP ASSOCIATE support carry DHT and UDP trackers, including magnet metadata
   discovery, without falling back to direct UDP or target DNS.

@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager as _, State};
+use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::Notify;
 use torrentplayer_library::{DownloadOrder, Queue, QueueItem};
 use torrentplayer_torrent::bandwidth::{self, Candidate, Foreground, Planner, Pressure};
@@ -28,6 +28,9 @@ use ts_rs::TS;
 
 use crate::core::{AppState, Core};
 use crate::error::IpcError;
+
+/// Sent (without a payload) when a torrent starts seeding after its playback ended.
+pub(crate) const SEEDING_STARTED: &str = "seeding-started";
 
 /// How often the downloader re-plans.
 const TICK: Duration = Duration::from_secs(1);
@@ -346,6 +349,8 @@ struct TorrentRun {
     was_watching: bool,
     /// When the most recent playback ended; starts the optional seeding timer.
     seed_since: Option<Instant>,
+    /// It was seeding after playback on the previous tick.
+    seeding: bool,
     /// The torrentplayer-swarm upload switch last requested.
     upload_enabled: Option<bool>,
 }
@@ -686,6 +691,13 @@ impl Runtime {
                 m.stats.uploaded_bytes,
                 now,
             );
+            if seeding
+                && !run.seeding
+                && let Err(error) = app.emit(SEEDING_STARTED, ())
+            {
+                tracing::warn!(%error, "could not send the seeding-started event");
+            }
+            run.seeding = seeding;
             let upload_enabled = foreground || needed || seeding;
             if run.upload_enabled != Some(upload_enabled)
                 && engine.set_upload_enabled(id, upload_enabled).is_ok()

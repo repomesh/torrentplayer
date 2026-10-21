@@ -161,8 +161,8 @@ sources, details, and where other tools are the better fit.
 
 ### Network and privacy controls
 
-- **Four connection modes:** direct; bound to your VPN app's adapter (OpenVPN, Proton VPN,
-  NordVPN, Mullvad, and others); a **built-in WireGuard tunnel** that runs inside the app with
+- **Four connection modes:** direct; bound to the adapter of your VPN provider's app (connect
+  with the app first, OpenVPN-based apps included); a **built-in WireGuard tunnel** that runs inside the app with
   no administrator rights or separate VPN app; or a SOCKS5 proxy.
 - **Kill switch in every protected mode.** If the VPN or proxy drops, all traffic stops and open
   connections close. Nothing falls back to your direct connection, and traffic resumes by

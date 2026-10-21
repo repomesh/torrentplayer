@@ -46,4 +46,9 @@ showPublicIp: boolean,
 /**
  * Incoming peer connections (off by default).
  */
-incomingPeers: IncomingPeersSettings, };
+incomingPeers: IncomingPeersSettings, 
+/**
+ * The user dismissed the note that recommends a VPN in Direct mode (shown in Settings →
+ * Network, the status bar, and when seeding starts).
+ */
+vpnHintDismissed: boolean, };

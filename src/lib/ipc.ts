@@ -204,6 +204,11 @@ export function getSettings(): Promise<SettingsView> {
   return invoke<SettingsView>('get_settings');
 }
 
+/** The backend event carrying the new {@link Settings} after every saved change. */
+export const SETTINGS_CHANGED_EVENT = 'settings-changed';
+/** Event (no payload) sent when a torrent starts seeding after its playback ended. */
+export const SEEDING_STARTED_EVENT = 'seeding-started';
+
 /**
  * Applies a partial update (only the changed fields, nested like {@link Settings}) and returns
  * the saved settings. Rejects with an `invalid-argument` error, whose message starts with the

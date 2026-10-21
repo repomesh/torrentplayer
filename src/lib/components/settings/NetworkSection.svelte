@@ -32,6 +32,8 @@
     followNetwork,
     interfaceAdvice,
   } from '../../network';
+  import { showVpnHint } from '../../vpnHint';
+  import VpnHint from '../VpnHint.svelte';
   import Field from './Field.svelte';
   import SecretField from './SecretField.svelte';
   import Toggle from './Toggle.svelte';
@@ -56,7 +58,7 @@
     {
       value: 'bindInterface',
       label: 'VPN',
-      help: 'Use your connected VPN app, including OpenVPN, Proton VPN, NordVPN, or Mullvad. Choose its tunnel adapter below; traffic pauses if it disconnects.',
+      help: "Connect with your VPN provider's app first (OpenVPN-based apps included), then choose its tunnel adapter below. Traffic pauses if it disconnects.",
     },
     {
       value: 'socks5',
@@ -339,6 +341,16 @@
     {/each}
   </fieldset>
 
+  {#if showVpnHint(n.mode, n.vpnHintDismissed)}
+    <div class="vpn-hint">
+      <VpnHint
+        onDismiss={() => {
+          update('network.vpnHintDismissed', true);
+        }}
+      />
+    </div>
+  {/if}
+
   {#if n.mode === 'bindInterface'}
     <p class="banner">
       This option uses a VPN app already connected on your computer. For a WireGuard
@@ -350,7 +362,7 @@
     <Field
       id="network-interface"
       label="VPN adapter"
-      help="Connect your VPN app first, then select its tunnel adapter. OpenVPN may use a TAP, TUN, or DCO adapter. Refresh after connecting."
+      help="Connect with your VPN provider's app first (OpenVPN-based apps included), then pick its adapter here. Refresh after connecting."
       error={errors['network.interface'] ?? interfacesError ?? undefined}
     >
       <div class="inline-controls">
@@ -792,6 +804,10 @@
 {/if}
 
 <style>
+  .vpn-hint {
+    margin: 0 0 1rem;
+  }
+
   .banner {
     margin: 0 0 1rem;
     padding: 0.75rem 1rem;

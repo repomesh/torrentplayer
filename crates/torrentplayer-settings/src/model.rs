@@ -254,6 +254,9 @@ pub struct NetworkSettings {
     pub show_public_ip: bool,
     /// Incoming peer connections (off by default).
     pub incoming_peers: IncomingPeersSettings,
+    /// The user dismissed the note that recommends a VPN in Direct mode (shown in Settings →
+    /// Network, the status bar, and when seeding starts).
+    pub vpn_hint_dismissed: bool,
 }
 
 impl Default for NetworkSettings {
@@ -267,6 +270,7 @@ impl Default for NetworkSettings {
             ipv6: Ipv6Policy::Disable,
             show_public_ip: true,
             incoming_peers: IncomingPeersSettings::default(),
+            vpn_hint_dismissed: false,
         }
     }
 }
@@ -1066,6 +1070,10 @@ mod tests {
         assert_eq!(json["bandwidth"]["seedTimeLimitMinutes"], 0);
         assert_eq!(json["bandwidth"]["maxDownloads"], 0, "no limit by default");
         assert_eq!(json["advanced"]["logLevel"], "info");
+        assert_eq!(
+            json["network"]["vpnHintDismissed"], false,
+            "shown until dismissed"
+        );
         let mode: NetworkMode = serde_json::from_value("wireGuard".into()).unwrap();
         assert_eq!(mode, NetworkMode::WireGuard);
     }
