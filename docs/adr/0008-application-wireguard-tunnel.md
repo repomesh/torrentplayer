@@ -51,5 +51,6 @@ WireGuard configuration files now establish real application-local connections, 
 search and peer traffic. Wrong keys or missing credentials fail closed. One peer and one
 address per family are supported. Configured DNS servers are required for host names.
 UDP tracker announces and their DNS lookups run inside the tunnel and bootstrap magnet metadata
-fetching. DHT, incoming peers, and uTP remain disabled in this mode. Throughput of the
+fetching. The follow-up for issue #19 also routes DHT and bootstrap DNS through scoped tunnel
+sockets. Incoming peers and uTP remain disabled in this mode. Throughput of the
 userspace stack remains a performance consideration for large numbers of peers.

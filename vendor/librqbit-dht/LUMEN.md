@@ -7,4 +7,11 @@ Upstream, one oversized datagram (WSAEMSGSIZE, 10040) or one ICMP port-unreachab
 (WSAECONNRESET) on Windows ended the DHT for the rest of the session, which stopped peer
 discovery for both librqbit and lumen-swarm. Other receive errors still end the node.
 
-Drop this copy once upstream tolerates these errors.
+Additional local change (`src/transport.rs`, `src/lib.rs`, `src/dht.rs`): optional `DhtTransport`
+lets the application provide leased send/receive and bootstrap resolution. With this transport,
+the node never opens a native UDP socket or uses the system resolver. The default transport
+is unchanged. TorrentStream uses this seam for bound-interface, WireGuard, and SOCKS5 UDP DHT.
+Worker exit cancels the node token so a closed UDP association can be restarted instead of
+leaving an apparently live node cached by the application.
+
+Drop this copy once upstream supports scoped transports and tolerates these errors.

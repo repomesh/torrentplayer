@@ -77,19 +77,53 @@ pub async fn announce(
     let host = url.host_str().ok_or("tracker has no host")?;
     let port = url.port().ok_or("tracker has no port")?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
+    if let Some(network) = network {
+        if !network.policy().trackers_allowed {
+            return Err("trackers are disabled in this mode".into());
+        }
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            if !is_public_ip(ip) {
+                return Err("the tracker is on the local network".into());
+            }
+        } else if host.trim_end_matches('.').eq_ignore_ascii_case("localhost")
+            || host
+                .trim_end_matches('.')
+                .to_ascii_lowercase()
+                .ends_with(".localhost")
+        {
+            return Err("the tracker is on the local network".into());
+        }
+        // Retain address-family preference and retries for ordinary scoped resolution.
+        // Only SOCKS5 remote DNS needs a domain-addressed relay request.
+        match network.resolve_host(host, port).await {
+            Ok(addresses) => return announce_addresses(Some(network), addresses, request).await,
+            Err(lumen_net::NetError::Unsupported(_)) => {}
+            Err(error) => return Err(format!("cannot resolve the tracker: {error}")),
+        }
+        let (socket, target, lease) = network
+            .udp_socket_host(host, port)
+            .await
+            .map_err(|e| e.to_string())?;
+        if matches!(target, lumen_net::socks5::Target::Addr(a) if !is_public_ip(a.ip())) {
+            return Err("the tracker has no public address".into());
+        }
+        return announce_socket(&socket, target, request, &|| lease.is_valid()).await;
+    }
     let addrs: Vec<SocketAddr> = match host.parse::<IpAddr>() {
         Ok(ip) => vec![SocketAddr::new(ip, port)],
-        Err(_) => match network {
-            Some(network) => network
-                .resolve_host(host, port)
-                .await
-                .map_err(|e| format!("cannot resolve the tracker: {e}"))?,
-            None => tokio::net::lookup_host((host, port))
-                .await
-                .map_err(|e| format!("cannot resolve the tracker: {e}"))?
-                .collect(),
-        },
+        Err(_) => tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|e| format!("cannot resolve the tracker: {e}"))?
+            .collect(),
     };
+    announce_addresses(None, addrs, request).await
+}
+
+async fn announce_addresses(
+    network: Option<&Network>,
+    addrs: Vec<SocketAddr>,
+    request: &AnnounceRequest,
+) -> Result<Announced, String> {
     let mut last = String::from("the tracker has no public address");
     // IPv4 first: most trackers and VPN interfaces have it.
     let mut candidates: Vec<SocketAddr> =
@@ -182,32 +216,53 @@ async fn announce_to(
     };
     let still_allowed = || lease.as_ref().is_none_or(lumen_net::Lease::is_valid);
 
+    announce_socket(
+        &socket,
+        lumen_net::socks5::Target::Addr(target),
+        request,
+        &still_allowed,
+    )
+    .await
+}
+
+async fn announce_socket(
+    socket: &lumen_net::DatagramSocket,
+    target: lumen_net::socks5::Target,
+    request: &AnnounceRequest,
+    still_allowed: &(dyn Fn() -> bool + Sync),
+) -> Result<Announced, String> {
     let tid = transaction_id()?;
     let connect = connect_request(tid);
-    let reply = exchange(&socket, target, &connect, &still_allowed).await?;
+    let (reply, peer) = exchange(socket, &target, &connect, still_allowed).await?;
     let connection_id = parse_connect(&reply, tid)?;
 
     let tid = transaction_id()?;
     let key = transaction_id()?;
     let packet = announce_request(connection_id, tid, key, request);
-    let reply = exchange(&socket, target, &packet, &still_allowed).await?;
-    parse_announce(&reply, tid, target.is_ipv6())
+    let (reply, _) = exchange(
+        socket,
+        &lumen_net::socks5::Target::Addr(peer),
+        &packet,
+        still_allowed,
+    )
+    .await?;
+    parse_announce(&reply, tid, peer.is_ipv6())
 }
 
 /// Sends `packet` and waits for a reply from `target`, retrying once.
 async fn exchange(
     socket: &lumen_net::DatagramSocket,
-    target: SocketAddr,
+    target: &lumen_net::socks5::Target,
     packet: &[u8],
     still_allowed: &(dyn Fn() -> bool + Sync),
-) -> Result<Vec<u8>, String> {
+) -> Result<(Vec<u8>, SocketAddr), String> {
     let mut buf = vec![0u8; MAX_RESPONSE];
     for timeout in ATTEMPT_TIMEOUTS {
         if !still_allowed() {
             return Err("the network mode changed".into());
         }
         socket
-            .send_to(packet, target)
+            .send_to_target(packet, target)
             .await
             .map_err(|e| e.to_string())?;
         let deadline = tokio::time::Instant::now() + timeout;
@@ -216,8 +271,17 @@ async fn exchange(
                 Err(_) => break,
                 Ok(Err(e)) => return Err(e.to_string()),
                 // Datagrams from anyone else are ignored.
-                Ok(Ok((_, from))) if from != target => {}
-                Ok(Ok((n, _))) => return Ok(buf[..n].to_vec()),
+                Ok(Ok((n, from))) => {
+                    let source_ok = match target {
+                        lumen_net::socks5::Target::Addr(addr) => from == *addr,
+                        lumen_net::socks5::Target::Domain(_, port) => {
+                            from.port() == *port && is_public_ip(from.ip())
+                        }
+                    };
+                    if source_ok && buf.get(4..8).filter(|_| n >= 8) == packet.get(12..16) {
+                        return Ok((buf[..n].to_vec(), from));
+                    }
+                }
             }
         }
     }
@@ -330,6 +394,78 @@ mod tests {
         r.extend_from_slice(&tid.to_be_bytes());
         r.extend_from_slice(rest);
         r
+    }
+
+    #[tokio::test]
+    async fn announces_through_proxy_dns_and_respects_tracker_disable() {
+        use lumen_net::{
+            NetworkConfig, NetworkMode, NetworkOptions, Socks5Config, socks5::Target,
+            test_util::TestUdpProxy,
+        };
+        let proxy = TestUdpProxy::start(|target, bytes| {
+            let source = match target {
+                Target::Addr(addr) => *addr,
+                Target::Domain(_, port) => SocketAddr::from(([8, 8, 8, 8], *port)),
+            };
+            let tid = u32_at(bytes, 12)?;
+            let answer = match u32_at(bytes, 8)? {
+                ACTION_CONNECT => reply(ACTION_CONNECT, tid, &42_u64.to_be_bytes()),
+                ACTION_ANNOUNCE => {
+                    let mut rest = 60u32.to_be_bytes().to_vec();
+                    rest.extend([0; 8]);
+                    rest.extend([9, 9, 9, 9, 0x1A, 0xE1]);
+                    reply(ACTION_ANNOUNCE, tid, &rest)
+                }
+                _ => return None,
+            };
+            Some((source, answer))
+        })
+        .await
+        .unwrap();
+        let mut cfg = NetworkConfig {
+            mode: NetworkMode::Socks5(Socks5Config {
+                host: proxy.addr().ip().to_string(),
+                port: proxy.addr().port(),
+                username: None,
+                password: None,
+                remote_dns: true,
+                proxy_trackers: true,
+                proxy_dht: true,
+            }),
+            allow_ipv6: false,
+        };
+        let net = Network::start(cfg.clone(), NetworkOptions::default())
+            .await
+            .unwrap();
+        net.settled(Duration::from_secs(3)).await;
+        let url = Url::parse("udp://tracker.invalid:6969/announce").unwrap();
+        let request = AnnounceRequest {
+            info_hash: [1; 20],
+            peer_id: [2; 20],
+            left: 1,
+            port: 6881,
+            started: true,
+        };
+        let announced = announce(Some(&net), &url, &request).await.unwrap();
+        assert_eq!(announced.peers, vec!["9.9.9.9:6881".parse().unwrap()]);
+        assert!(
+            matches!(&proxy.targets()[0], Target::Domain(host, 6969) if host == "tracker.invalid")
+        );
+        assert!(
+            matches!(&proxy.targets()[1], Target::Addr(addr) if addr.to_string() == "8.8.8.8:6969")
+        );
+        if let NetworkMode::Socks5(proxy) = &mut cfg.mode {
+            proxy.proxy_trackers = false;
+        }
+        net.apply(cfg).unwrap();
+        net.settled(Duration::from_secs(3)).await;
+        assert!(announce(Some(&net), &url, &request).await.is_err());
+        assert_eq!(
+            proxy.targets().len(),
+            2,
+            "no disabled tracker request was sent"
+        );
+        net.shutdown();
     }
 
     #[test]

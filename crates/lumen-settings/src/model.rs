@@ -297,8 +297,7 @@ pub struct Socks5Settings {
     pub proxy_dns: bool,
     /// Send tracker requests through the proxy.
     pub proxy_trackers: bool,
-    /// Send DHT traffic through the proxy (needs a proxy with UDP support). Reserved: the DHT
-    /// is off in every protected mode until SOCKS5 UDP support exists, whatever this says.
+    /// Send DHT traffic through SOCKS5 UDP ASSOCIATE (requires a proxy with UDP support).
     pub proxy_dht: bool,
 }
 

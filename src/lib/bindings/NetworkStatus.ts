@@ -28,8 +28,8 @@ trafficAllowed: boolean,
  */
 killSwitchEngaged: boolean, 
 /**
- * Whether UDP trackers can be used: direct, bound to an interface, or through WireGuard.
- * Never through a SOCKS5 proxy.
+ * Whether scoped UDP is available: direct, bound, through WireGuard, or via a SOCKS5
+ * UDP association. Proxy UDP support is negotiated per association, not by the health check.
  */
 udpAllowed: boolean, 
 /**

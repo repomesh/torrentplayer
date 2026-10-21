@@ -22,8 +22,7 @@ pub enum NetworkMode {
         /// Interface name as listed by [`crate::list_interfaces`].
         interface: String,
     },
-    /// All TCP traffic goes through a SOCKS5 proxy, with host names resolved by the proxy. UDP
-    /// (DHT, UDP trackers) is turned off.
+    /// TCP uses SOCKS5 CONNECT; DHT and UDP trackers use UDP ASSOCIATE when supported.
     Socks5(Socks5Config),
     /// An application-local WireGuard tunnel using an imported configuration.
     WireGuard(WireGuardConfig),
@@ -59,8 +58,10 @@ pub struct Socks5Config {
     /// leaves this machine. When off, names are resolved locally and only addresses are sent.
     pub remote_dns: bool,
     /// Contact trackers through the proxy. When off, trackers are not contacted at all in this
-    /// mode (never directly); peers then come only from the torrent itself.
+    /// mode (never directly); DHT and peer exchange remain independent.
     pub proxy_trackers: bool,
+    /// Enable DHT through the proxy's UDP relay. Independent of tracker announces.
+    pub proxy_dht: bool,
 }
 
 /// RFC 1929 limits usernames and passwords to 255 bytes; host names are limited by DNS.
@@ -199,6 +200,7 @@ mod tests {
             password: pass.map(Secret::new),
             remote_dns: true,
             proxy_trackers: true,
+            proxy_dht: true,
         }
     }
 

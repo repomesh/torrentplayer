@@ -157,27 +157,28 @@ turns the metadata prefetch of the other results on screen on or off (see
 The network layer (`lumen-net`) applies these as soon as they are saved; see
 [Network modes and kill switch](network.md).
 
-| Setting                        | Default   | Valid values                                          | Applies                            |
-| ------------------------------ | --------- | ----------------------------------------------------- | ---------------------------------- |
-| `network.mode`                 | `direct`  | `direct`, `bindInterface`, `socks5`, `wireGuard`      | now                                |
-| `network.interface`            | `null`    | an interface name (for `bindInterface`)               | now                                |
-| `network.socks5.host`          | `""`      | a host name or IP address, without scheme or port     | now                                |
-| `network.socks5.port`          | `1080`    | 1–65535                                               | now                                |
-| `network.socks5.username`      | `null`    | 1–255 bytes                                           | now                                |
-| `network.socks5.proxyDns`      | `true`    | on: the proxy resolves names; off: TorrentStream does | now                                |
-| `network.socks5.proxyTrackers` | `true`    | on: trackers through the proxy; off: none at all      | now                                |
-| `network.socks5.proxyDht`      | `true`    | reserved; the Settings page shows it as off           | never today: no DHT behind a proxy |
-| `network.wireguard`            | empty     | set by importing a `.conf` file (non-secret parts)    | now in WireGuard mode              |
-| `network.encryption`           | `prefer`  | `prefer`, `require`, `off`                            | later                              |
-| `network.ipv6`                 | `disable` | `disable`, `tunnel`                                   | now (protected modes only)         |
+| Setting                        | Default   | Valid values                                          | Applies                    |
+| ------------------------------ | --------- | ----------------------------------------------------- | -------------------------- |
+| `network.mode`                 | `direct`  | `direct`, `bindInterface`, `socks5`, `wireGuard`      | now                        |
+| `network.interface`            | `null`    | an interface name (for `bindInterface`)               | now                        |
+| `network.socks5.host`          | `""`      | a host name or IP address, without scheme or port     | now                        |
+| `network.socks5.port`          | `1080`    | 1–65535                                               | now                        |
+| `network.socks5.username`      | `null`    | 1–255 bytes                                           | now                        |
+| `network.socks5.proxyDns`      | `true`    | on: the proxy resolves names; off: TorrentStream does | now                        |
+| `network.socks5.proxyTrackers` | `true`    | on: trackers through the proxy; off: none at all      | now                        |
+| `network.socks5.proxyDht`      | `true`    | DHT through UDP ASSOCIATE; requires proxy UDP support | now                        |
+| `network.wireguard`            | empty     | set by importing a `.conf` file (non-secret parts)    | now in WireGuard mode      |
+| `network.encryption`           | `prefer`  | `prefer`, `require`, `off`                            | later                      |
+| `network.ipv6`                 | `disable` | `disable`, `tunnel`                                   | now (protected modes only) |
 
 **Kill switch:** always on when a VPN or proxy mode is selected, so there is no setting for it.
 If the interface or proxy stops working, torrent traffic pauses and searches are refused; traffic
 resumes by itself when it works again. TorrentStream never falls back to a direct connection. Earlier versions
 had a `network.killSwitch` toggle that had no effect; it is dropped on upgrade.
 
-**DHT:** off in every protected mode. TorrentStream cannot send DHT (UDP) traffic through a SOCKS5
-proxy yet and never sends it around one, so `proxyDht` has no effect.
+**DHT:** uses sockets bound to the VPN adapter or inside WireGuard. In SOCKS5 mode,
+`proxyDht` enables discovery through UDP ASSOCIATE; proxies without UDP support cannot
+provide DHT, and TorrentStream never sends it around them.
 
 **VPN:** use an existing VPN app connection (including OpenVPN or a provider's app), then choose
 its tunnel adapter. This is saved as `bindInterface` for compatibility. Hyper-V local switches
@@ -188,7 +189,7 @@ cannot establish a VPN. Tailscale requires an exit node for internet destination
 credential store and the remaining fields in `network.wireguard`, then connects. A missing key
 or failed handshake blocks traffic. No external VPN app or administrator rights are required.
 The file must contain a `DNS` server to resolve search, trackers, and other host names inside
-the tunnel. UDP trackers and DHT are disabled in this mode. See [Network modes](network.md).
+the tunnel. UDP trackers and DHT use the tunnel too. See [Network modes](network.md).
 
 The SOCKS5 password and the WireGuard private and preshared keys are [secrets](#secrets).
 

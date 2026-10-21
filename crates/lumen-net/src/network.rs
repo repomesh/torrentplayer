@@ -170,8 +170,8 @@ pub struct NetworkStatus {
     pub traffic_allowed: bool,
     /// Whether the kill switch is blocking traffic (a protected mode that is not connected).
     pub kill_switch_engaged: bool,
-    /// Whether UDP trackers can be used: direct, bound to an interface, or through WireGuard.
-    /// Never through a SOCKS5 proxy.
+    /// Whether scoped UDP is available: direct, bound, through WireGuard, or via a SOCKS5
+    /// UDP association. Proxy UDP support is negotiated per association, not by the health check.
     pub udp_allowed: bool,
     /// Whether trackers may be contacted.
     pub trackers_allowed: bool,
@@ -199,8 +199,11 @@ pub struct Policy {
     /// Whether UDP (DHT, UDP trackers, uTP) may be sent from unbound sockets: direct mode only.
     pub udp_allowed: bool,
     /// Whether UDP may use sockets made by [`Network::udp_socket`]: direct, bound to an
-    /// interface, or inside WireGuard. Unbound OS UDP stays disabled in protected modes.
+    /// interface, inside WireGuard, or through SOCKS5 UDP ASSOCIATE. A proxy's UDP support
+    /// is checked when opening the association. Unbound OS UDP stays disabled in protected modes.
     pub bound_udp_allowed: bool,
+    /// Whether DHT may use scoped datagrams (honors the SOCKS5 DHT preference).
+    pub dht_allowed: bool,
     /// Whether trackers may be contacted.
     pub trackers_allowed: bool,
 }
@@ -308,10 +311,11 @@ impl State {
             traffic_allowed: self.conn.allows_traffic(),
             protected,
             udp_allowed: !protected,
-            bound_udp_allowed: matches!(
-                self.config.mode,
-                NetworkMode::Direct | NetworkMode::BindInterface { .. } | NetworkMode::WireGuard(_)
-            ),
+            bound_udp_allowed: true,
+            dht_allowed: match &self.config.mode {
+                NetworkMode::Socks5(cfg) => cfg.proxy_dht,
+                _ => true,
+            },
             trackers_allowed: match &self.config.mode {
                 NetworkMode::Socks5(c) => c.proxy_trackers,
                 _ => true,
@@ -715,14 +719,14 @@ impl Network {
     /// Opens a UDP socket for talking to `target` under the current mode: an ordinary socket in
     /// direct mode, and one bound to the interface's address when bound to an interface, so
     /// its packets leave only through that interface. WireGuard sockets stay inside the
-    /// tunnel; SOCKS5 UDP is refused.
+    /// tunnel; SOCKS5 uses a UDP ASSOCIATE relay with a live TCP control connection.
     /// The returned lease ends when the mode changes or the kill switch engages; check it
     /// before sending.
     ///
     /// # Errors
     ///
-    /// Returns [`NetError::KillSwitch`] while traffic is blocked, [`NetError::Unsupported`] in
-    /// proxy mode, and socket errors otherwise.
+    /// Returns [`NetError::KillSwitch`] while traffic is blocked, relay negotiation failures
+    /// for proxies without UDP support, and socket errors otherwise.
     pub async fn udp_socket(
         &self,
         target: SocketAddr,
@@ -748,36 +752,100 @@ impl Network {
                         "the network settings changed while opening UDP".into(),
                     ));
                 }
-                return Ok((socket.with_lease(lease.clone()), lease));
+                return Ok((socket.ipv4_only(ipv4_only).with_lease(lease.clone()), lease));
             }
-            Route::Socks(_) => {
-                return Err(NetError::Unsupported(
-                    "UDP trackers are disabled through a SOCKS5 proxy".into(),
+            Route::Socks(cfg) => {
+                let socket = tokio::time::timeout(
+                    self.inner.options.connect_timeout,
+                    crate::socks_udp::SocksUdp::open(cfg, lease.clone()),
+                )
+                .await
+                .map_err(|_| NetError::Timeout)??;
+                if !lease.is_valid() {
+                    return Err(NetError::KillSwitch(
+                        "the network settings changed while opening UDP".into(),
+                    ));
+                }
+                return Ok((
+                    crate::DatagramSocket::socks(socket)
+                        .ipv4_only(ipv4_only)
+                        .with_lease(lease.clone()),
+                    lease,
                 ));
             }
         };
         socket.set_nonblocking(true)?;
+        if !lease.is_valid() {
+            return Err(NetError::KillSwitch(
+                "the network settings changed while opening UDP".into(),
+            ));
+        }
         Ok((
-            crate::DatagramSocket::from(UdpSocket::from_std(socket)?).with_lease(lease.clone()),
+            crate::DatagramSocket::from(UdpSocket::from_std(socket)?)
+                .ipv4_only(ipv4_only)
+                .with_lease(lease.clone()),
             lease,
         ))
+    }
+
+    /// Opens a datagram path to a host, retaining remote DNS in SOCKS5 mode.
+    ///
+    /// # Errors
+    /// Returns route, resolution, or relay errors without falling back to direct UDP or DNS.
+    pub async fn udp_socket_host(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<(crate::DatagramSocket, Target, Lease), NetError> {
+        let (route, original, _) = self.route()?;
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        let target = if let Ok(ip) = bare.parse::<IpAddr>() {
+            Target::Addr(SocketAddr::new(ip, port))
+        } else if matches!(route, Route::Socks(ref cfg) if cfg.remote_dns) {
+            Target::Domain(bare.to_owned(), port)
+        } else {
+            let addr = self
+                .resolve_host(bare, port)
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    NetError::Io(std::io::Error::new(
+                        std::io::ErrorKind::NotFound,
+                        "no usable host address",
+                    ))
+                })?;
+            Target::Addr(addr)
+        };
+        let family = match &target {
+            Target::Addr(addr) => *addr,
+            Target::Domain(_, _) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+        };
+        let (socket, lease) = self.udp_socket(family).await?;
+        if !original.is_valid() {
+            return Err(NetError::KillSwitch(
+                "the network settings changed during UDP setup".into(),
+            ));
+        }
+        Ok((socket, target, lease))
     }
 
     /// Resolves a host through the selected mode, including tunneled DNS in WireGuard.
     ///
     /// # Errors
     ///
-    /// Refuses lookups while the kill switch is active or through SOCKS5, where UDP is disabled.
+    /// Refuses lookups while the kill switch is active. With SOCKS5 remote DNS, use
+    /// [`Network::udp_socket_host`] instead: it retains the domain in the relay envelope.
     pub async fn resolve_host(&self, host: &str, port: u16) -> Result<Vec<SocketAddr>, NetError> {
         let (route, lease, ipv4_only) = self.route()?;
         let bare = host.trim_start_matches('[').trim_end_matches(']');
         let addresses = match (&route, bare.parse::<IpAddr>()) {
-            (Route::Socks(_), _) => {
+            (_, Ok(ip)) => vec![SocketAddr::new(ip, port)],
+            (Route::Socks(cfg), Err(_)) if cfg.remote_dns => {
                 return Err(NetError::Unsupported(
-                    "UDP trackers are disabled through a SOCKS5 proxy".into(),
+                    "use a SOCKS5 domain datagram for remote DNS".into(),
                 ));
             }
-            (_, Ok(ip)) => vec![SocketAddr::new(ip, port)],
             (Route::WireGuard(tunnel), Err(_)) => tunnel.resolve(bare, port, ipv4_only).await?,
             (_, Err(_)) => tokio::net::lookup_host((bare, port)).await?.collect(),
         };

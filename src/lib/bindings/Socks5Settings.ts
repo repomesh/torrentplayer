@@ -25,7 +25,6 @@ proxyDns: boolean,
  */
 proxyTrackers: boolean, 
 /**
- * Send DHT traffic through the proxy (needs a proxy with UDP support). Reserved: the DHT
- * is off in every protected mode until SOCKS5 UDP support exists, whatever this says.
+ * Send DHT traffic through SOCKS5 UDP ASSOCIATE (requires a proxy with UDP support).
  */
 proxyDht: boolean, };

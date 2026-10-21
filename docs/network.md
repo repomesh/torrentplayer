@@ -12,12 +12,11 @@
 Every outbound connection TorrentStream makes for torrents, trackers, `.torrent` downloads, search, and
 the connection check asks `lumen_net::Network` first. In a protected mode (anything but
 direct), connections are refused until the mode is verified, and whenever a health check fails.
-Existing connections are closed at the same moment. UDP is never sent through a proxy. When bound
-to an interface, TorrentStream sends UDP tracker announces itself, from sockets bound to the interface's
-address (`Network::udp_socket`), so they leave only through it; librqbit's own UDP (DHT, uTP, its
-UDP tracker client) stays off, because librqbit cannot pin UDP sockets to an interface on
-Windows. WireGuard tracker datagrams use the application-local tunnel and its DNS servers;
-they never use unbound OS UDP.
+Existing connections are closed at the same moment. DHT and UDP trackers use leased sockets
+through the selected interface, WireGuard tunnel, or SOCKS5 UDP ASSOCIATE relay
+(`Network::udp_socket`). librqbit's own unscoped UDP (DHT, uTP, its UDP tracker client) stays
+off in protected modes. A separate scoped DHT transport supplies peers without opening a
+native socket. WireGuard datagrams and bootstrap DNS use the application-local tunnel.
 
 The webview cannot reach the network itself: its CSP allows only `ipc:` and the loopback stream
 server (as media, and with `fetch` for converted audio). The FFmpeg sidecar that converts Dolby
@@ -46,23 +45,31 @@ shown, until the settings are fixed.
 | Peers over uTP (librqbit)               | when listening                                                  | **off**                        | **off**                                                        | off                   |
 | Incoming peer connections               | librqbit only if a listen address is set (it is not by default) | **off**                        | **off**                                                        | off                   |
 | HTTP(S) trackers                        | direct                                                          | bound (system DNS)             | through the proxy (proxy DNS for lumen-swarm, see [DNS](#dns)) | refused               |
-| UDP trackers                            | direct                                                          | TorrentStream's client, bound  | **skipped**                                                    | through WireGuard     |
-| DHT (both engines)                      | on                                                              | **off**                        | **off**                                                        | off                   |
+| UDP trackers                            | direct                                                          | TorrentStream's client, bound  | UDP ASSOCIATE relay                                            | refused               |
+| DHT discovery                           | on                                                              | bound sockets                  | UDP ASSOCIATE relay (when enabled)                             | off                   |
 | Local peer discovery (multicast)        | off                                                             | off                            | off                                                            | off                   |
 | `.torrent` file downloads               | direct                                                          | bound                          | through the proxy                                              | refused               |
 | Search (search.emberglow.tech)          | direct                                                          | bound                          | through the proxy                                              | refused               |
 | Public-IP check (icanhazip.com)         | direct                                                          | bound                          | through the proxy                                              | refused, nothing sent |
 
-"Skipped" and "off" mean the traffic is not sent at all, never sent around the mode. When bound to
-an interface or using WireGuard, a magnet link's UDP trackers are announced through scoped sockets
-(`lumen_swarm::udp_tracker`) and the peers they name are handed to librqbit for the metadata, and
-lumen-swarm keeps announcing to them while it streams. Through a proxy, without the DHT and UDP
-trackers, magnet links whose only trackers are UDP cannot be opened; TorrentStream says so at once instead
-of waiting for the metadata timeout. `.torrent` files still
-work through lumen-swarm, and peers learned from HTTP trackers or peer exchange are used.
+"Off" means the traffic is not sent at all, never sent around the mode. WireGuard also carries
+DHT and UDP trackers inside its tunnel. In protected modes, peers found by scoped DHT and UDP
+trackers bootstrap librqbit's magnet metadata lookup; lumen-swarm continues discovery while
+streaming. Trackerless magnets can therefore find peers too. A TCP-only SOCKS5 proxy cannot
+provide these UDP paths: HTTP trackers and peer exchange still work, but UDP failures never
+trigger a direct fallback. `.torrent` files work through lumen-swarm.
 
 In SOCKS5 mode, turning off "Send tracker requests through the proxy" turns trackers off
 entirely for that mode; trackers are never contacted directly.
+The separate "DHT through the proxy" switch controls DHT, independently of trackers.
+
+**SOCKS5 UDP lifetime.** Each association keeps its authenticated TCP control connection alive.
+The OS UDP socket is connected only to the negotiated relay, not the destination. A closed
+control connection or revoked network lease stops send and receive operations. Invalid reserved
+bytes, fragmented envelopes, domain-addressed replies, and truncated envelopes are dropped.
+For remote DNS, domain requests go to the proxy; DHT bootstrap pings learn the resolved public
+address from a matching reply without a local target-name lookup. Learned DHT nodes and peers,
+and UDP tracker reply sources, are checked against the public-address policy.
 
 ## Kill switch and connection state
 
@@ -135,9 +142,9 @@ flowchart LR
   are never rebuilt: the bridge follows mode changes and closes its connections when the epoch
   changes.
 - **librqbit** cannot be pointed at a connector, so in protected modes it gets the bridge as its
-  SOCKS5 proxy (`ConnectionOptions::proxy_url`), no DHT, no listening socket (so no uTP or
+  SOCKS5 proxy (`ConnectionOptions::proxy_url`), no native DHT, no listening socket (so no uTP or
   incoming connections), and no local discovery. Its magnet links lose their UDP trackers before
-  they are added, and `.torrent` files are refused when librqbit is forced as the engine (their
+  they are added (scoped DHT and trackers supply initial peers separately), and `.torrent` files are refused when librqbit is forced as the engine (their
   tracker lists cannot be filtered); with the automatic engine, `.torrent` files go to
   lumen-swarm anyway. These session options are fixed at start, so when protection turns on or
   off `StreamEngine::apply_network` stops the librqbit session first (dropping its torrents),
@@ -214,8 +221,8 @@ endpoint host name is resolved by the system during tunnel setup. **DNS limitati
 still resolves its HTTP tracker names through the system resolver, as it does in SOCKS5 mode;
 this affects magnet metadata lookup. TorrentStream-swarm and search use tunneled DNS. IPv6 application destinations
 still require **IPv6 → Route through the tunnel** and an IPv6 tunnel address.
-UDP tracker announces and tracker DNS now run inside WireGuard. Their peers bootstrap magnet
-metadata fetching and remain available to the streaming engine. DHT, incoming peers, and uTP
+UDP tracker announces, DHT, and their bootstrap DNS run inside WireGuard. Their peers bootstrap magnet
+metadata fetching and remain available to the streaming engine. Incoming peers and uTP
 remain disabled in built-in WireGuard mode. Successful tracker replies are retained when other
 trackers time out.
 
@@ -265,15 +272,18 @@ The Settings page (`lumen-settings`) stores what the user chooses; the app turns
 | `network.socks5.username`      | With the `socks5Password` secret from the credential store. A username without a password blocks traffic. |
 | `network.socks5.proxyDns`      | Proxy resolves host names (`socks5h`). Off: resolved locally, only addresses are sent.                    |
 | `network.socks5.proxyTrackers` | Off: trackers are not contacted in this mode.                                                             |
-| `network.socks5.proxyDht`      | No effect yet: the DHT is off in every protected mode (no UDP ASSOCIATE support). Shown as read-only.     |
+| `network.socks5.proxyDht`      | Enables DHT through UDP ASSOCIATE; off means no DHT in SOCKS5 mode.                                       |
 | `network.wireguard`            | Shown in the status (endpoint). The private key is not read until the tunnel exists.                      |
 | `network.ipv6`                 | `tunnel` allows IPv6 destinations in protected modes; `disable` refuses them.                             |
 | `network.encryption`           | Not implemented by either engine yet.                                                                     |
 
 ## Limits
 
-- No DHT or uTP in protected modes, and no UDP at all through a proxy, so fewer peers. Planned:
-  SOCKS5 UDP ASSOCIATE, and a DHT on bound sockets.
+- No uTP or incoming peers in protected modes.
+- SOCKS5 UDP requires a proxy supporting UDP ASSOCIATE and reachable relay datagrams. The relay
+  reply must contain an IP address (or the proxy's own configured name); other relay hostnames
+  are refused without local DNS. Fragmentation and domain-addressed response envelopes are
+  unsupported. A successful TCP health check does not prove that the proxy supports UDP.
 - Bound-interface DNS goes to the system resolver (see [DNS](#dns)).
 - librqbit resolves tracker host names locally in SOCKS5 mode.
 - The bound-interface check proves the adapter is up with an address, not that it reaches the
@@ -291,16 +301,19 @@ All on loopback, no internet:
   reject incorrect keys, and close connections on mode changes.
 
 - `crates/lumen-net`: SOCKS5 client and server parsers (malformed replies, auth, IPv6, domain
-  targets), WireGuard parser, and end-to-end tests with a recording SOCKS5 proxy: proxied
+  targets), UDP envelope property tests, WireGuard parser, and end-to-end tests with a recording SOCKS5 proxy: proxied
   connections, remote DNS through the bridge, the kill switch blocking connections, HTTP, and the
   connection check while the proxy is down and recovering after, leases revoked on mode changes,
   incomplete settings blocking, missing interfaces, IPv6 refusal, and the bridge refusing clients
   without the token.
+- Scripted UDP relays exercise proxy-side tracker and DHT bootstrap DNS, DHT peer discovery,
+  relay-only sends, IPv6 refusal, control-connection closure, and lease revocation. They never
+  forward packets to the public addresses used in test replies.
 - `crates/lumen-swarm/tests/network.rs`: a lumen-swarm download from a librqbit seeder behind a
   recording relay, through the proxy only (every connection the seeder saw came from the proxy);
   stopping the proxy stops the transfer with no direct connection; restarting it finishes the
-  download. HTTP trackers go through the proxy with their names resolved by it; UDP trackers get
-  no packets (with a direct-mode control that does see them).
+  download. HTTP trackers go through the proxy with their names resolved by it; a TCP-only proxy
+  refuses UDP, so the direct UDP tracker gets no packets (with a direct-mode control that does).
 - `crates/lumen-torrent/tests/network.rs`: a magnet link through librqbit in SOCKS5 mode reaches
   the seeder and the HTTP tracker only through the proxy and never the UDP tracker; switching
   from direct to protected replaces the librqbit session.

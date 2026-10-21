@@ -37,6 +37,7 @@ fn socks_mode(proxy: &TestProxy, credentials: Option<(&str, &str)>) -> NetworkCo
             password: credentials.map(|(_, p)| Secret::new(p)),
             remote_dns: true,
             proxy_trackers: true,
+            proxy_dht: true,
         }),
         allow_ipv6: false,
     }
@@ -118,7 +119,10 @@ async fn socks_mode_sends_everything_through_the_proxy() {
         .unwrap();
     let status = net.settled(Duration::from_secs(5)).await;
     assert_eq!(status.state, ConnectionState::Connected, "{status:?}");
-    assert!(!status.udp_allowed, "no UDP through a proxy");
+    assert!(
+        status.udp_allowed,
+        "UDP may use a proxy association, never an unbound destination socket"
+    );
     assert!(
         status.connected_since_ms.is_some(),
         "uptime is known once connected"
@@ -302,6 +306,7 @@ async fn a_protected_mode_blocks_until_verified_and_never_falls_back() {
             password: None,
             remote_dns: true,
             proxy_trackers: true,
+            proxy_dht: true,
         }),
         allow_ipv6: false,
     };
@@ -512,6 +517,7 @@ async fn an_incomplete_configuration_blocks_traffic() {
             password: None,
             remote_dns: true,
             proxy_trackers: true,
+            proxy_dht: true,
         }),
         allow_ipv6: false,
     };
@@ -597,17 +603,17 @@ async fn bound_udp_sockets_use_the_interface_address() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn udp_is_refused_through_a_proxy_and_by_the_kill_switch() {
+async fn unsupported_proxy_udp_is_refused_without_fallback_and_the_kill_switch_blocks_udp() {
     let target: SocketAddr = "198.51.100.7:6969".parse().unwrap();
     let proxy = TestProxy::start(None).await.unwrap();
     let net = Network::start(socks_mode(&proxy, None), fast_options())
         .await
         .unwrap();
     net.settled(Duration::from_secs(5)).await;
-    assert!(!net.policy().bound_udp_allowed);
+    assert!(net.policy().bound_udp_allowed);
     assert!(matches!(
         net.udp_socket(target).await,
-        Err(NetError::Unsupported(_))
+        Err(NetError::Proxy(_))
     ));
     net.shutdown();
 
@@ -627,6 +633,110 @@ async fn udp_is_refused_through_a_proxy_and_by_the_kill_switch() {
         net.udp_socket(target).await,
         Err(NetError::KillSwitch(_))
     ));
+    net.shutdown();
+}
+
+#[tokio::test]
+async fn socks_udp_uses_only_the_relay_and_dies_with_its_control_connection() {
+    use crate::test_util::TestUdpProxy;
+    let sink = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let destination = sink.local_addr().unwrap();
+    let proxy = TestUdpProxy::start(move |_, bytes| Some((destination, bytes.to_vec())))
+        .await
+        .unwrap();
+    let cfg = NetworkConfig {
+        mode: NetworkMode::Socks5(Socks5Config {
+            host: proxy.addr().ip().to_string(),
+            port: proxy.addr().port(),
+            username: None,
+            password: None,
+            remote_dns: true,
+            proxy_trackers: true,
+            proxy_dht: true,
+        }),
+        allow_ipv6: false,
+    };
+    let net = Network::start(cfg, fast_options()).await.unwrap();
+    assert!(net.settled(Duration::from_secs(3)).await.traffic_allowed);
+    let (socket, lease) = net.udp_socket(destination).await.unwrap();
+    socket.send_to(b"via proxy", destination).await.unwrap();
+    let mut bytes = [0; 64];
+    let (n, from) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&bytes[..n], b"via proxy");
+    assert_eq!(from, destination);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), sink.recv_from(&mut bytes))
+            .await
+            .is_err(),
+        "no direct UDP reached the destination"
+    );
+    assert_eq!(proxy.targets(), vec![socks5::Target::Addr(destination)]);
+    assert!(
+        socket
+            .send_to(b"v6", "[::1]:1".parse().unwrap())
+            .await
+            .is_err()
+    );
+    proxy.stop();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert!(socket.send_to(b"closed", destination).await.is_err());
+    net.apply(NetworkConfig::default()).unwrap();
+    assert!(!lease.is_valid());
+    assert!(socket.send_to(b"changed", destination).await.is_err());
+    net.shutdown();
+}
+
+#[tokio::test]
+async fn socks_udp_domain_targets_do_not_use_local_dns_and_old_leases_fail_closed() {
+    use crate::test_util::TestUdpProxy;
+    let logical: SocketAddr = "8.8.8.8:6969".parse().unwrap();
+    let proxy = TestUdpProxy::start(move |_, bytes| Some((logical, bytes.to_vec())))
+        .await
+        .unwrap();
+    let net = Network::start(
+        NetworkConfig {
+            mode: NetworkMode::Socks5(Socks5Config {
+                host: proxy.addr().ip().to_string(),
+                port: proxy.addr().port(),
+                username: None,
+                password: None,
+                remote_dns: true,
+                proxy_trackers: true,
+                proxy_dht: true,
+            }),
+            allow_ipv6: false,
+        },
+        fast_options(),
+    )
+    .await
+    .unwrap();
+    net.settled(Duration::from_secs(3)).await;
+    let (socket, target, lease) = net
+        .udp_socket_host("never-resolves.invalid", 6969)
+        .await
+        .unwrap();
+    assert!(matches!(target, socks5::Target::Domain(_, 6969)));
+    socket.send_to_target(b"domain", &target).await.unwrap();
+    let mut bytes = [0; 64];
+    let (n, from) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&bytes[..n], b"domain");
+    assert_eq!(from, logical);
+    net.apply(NetworkConfig::default()).unwrap();
+    assert!(!lease.is_valid());
+    assert!(socket.send_to_target(b"old", &target).await.is_err());
+    assert!(socket.recv_from(&mut bytes).await.is_err());
+    assert_eq!(proxy.targets().len(), 1);
     net.shutdown();
 }
 

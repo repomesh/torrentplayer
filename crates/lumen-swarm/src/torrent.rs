@@ -303,7 +303,7 @@ impl Swarm {
         let web = web_client(&cfg)?;
         let dht = cfg
             .enable_dht
-            .then(|| Arc::new(DhtNode::new(cancel.clone())));
+            .then(|| Arc::new(DhtNode::new(cancel.clone(), cfg.network.clone())));
         if let (Some(node), Some(network)) = (&dht, &cfg.network) {
             tokio::spawn(crate::dht::follow_policy(
                 Arc::clone(node),
@@ -1271,9 +1271,8 @@ struct Trackers {
 
 impl Trackers {
     /// Starts announcing under `policy`: not at all while traffic is blocked or trackers are
-    /// off, and without UDP trackers unless UDP is allowed (it is never sent around a proxy or
-    /// bound interface). When bound to an interface, UDP trackers are announced by TorrentStream's own
-    /// client through sockets bound to it (see [`crate::udp_tracker`]).
+    /// off. Protected modes use TorrentStream's own scoped UDP client through the interface,
+    /// tunnel, or proxy relay; native unbound UDP is never used (see [`crate::udp_tracker`]).
     fn start(&self, policy: Option<Policy>) -> Option<BoxStream<'static, SocketAddr>> {
         if policy.is_some_and(|p| !p.traffic_allowed || !p.trackers_allowed) {
             return None;
@@ -1387,6 +1386,7 @@ async fn next_policy(rx: &mut Option<watch::Receiver<Policy>>, last: Option<Poli
             protected: true,
             udp_allowed: false,
             bound_udp_allowed: false,
+            dht_allowed: false,
             trackers_allowed: false,
         };
         Policy {

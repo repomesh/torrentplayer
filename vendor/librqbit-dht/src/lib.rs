@@ -4,7 +4,9 @@ mod error;
 mod peer_store;
 mod persistence;
 mod routing_table;
+mod transport;
 mod utils;
+pub use transport::DhtTransport;
 
 use std::sync::Arc;
 use std::time::Duration;

@@ -21,6 +21,7 @@
 
 mod bencode;
 mod dht;
+mod dht_transport;
 mod limit;
 mod metainfo;
 mod peer;
@@ -34,6 +35,7 @@ pub mod udp_tracker;
 mod webseed;
 mod wire;
 
+pub use dht::bootstrap_peers as dht_bootstrap_peers;
 pub use metainfo::{BLOCK_LEN, MAX_WEB_SEEDS, MetaFile, Metainfo, MetainfoError};
 pub use reader::FileReader;
 pub use sched::SchedulerConfig;
