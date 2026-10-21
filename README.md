@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/app-icon.png" alt="TorrentPlayer logo: a warm ring of light" width="128" height="128">
+  <img src="assets/app-icon.png" alt="TorrentPlayer logo: a play button ringed by swarm peers" width="128" height="128">
 </p>
 
 <h1 align="center">TorrentPlayer</h1>
