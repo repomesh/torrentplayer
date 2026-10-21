@@ -16,6 +16,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Storage can cap cache size and expire old finished downloads automatically, while protecting
   everything queued or open in the player; Settings shows current use and offers a safe clear-now
   action.
+- Playback positions persist across restarts in a local library, reopening unfinished media
+  offers to resume or start over, and watch progress appears in both the Library and queue.
 
 ## [0.2.0] - 2026-10-20
 

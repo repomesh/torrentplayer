@@ -57,6 +57,13 @@
       icon: 'M3.5 7.5V18a1 1 0 0 0 1 1h15a1 1 0 0 0 1-1V9.5a1 1 0 0 0-1-1h-8l-2-2.5h-5a1 1 0 0 0-1 1z',
     },
     {
+      view: 'library',
+      label: 'Library',
+      title: 'Library and watch progress',
+      disabled: false,
+      icon: 'M5 4.5h11.5A2.5 2.5 0 0 1 19 7v12H7a2 2 0 0 1-2-2V4.5ZM7 19a2 2 0 0 1 2-2h10M9 8h6M9 11.5h5',
+    },
+    {
       view: 'torrent',
       label: 'Files',
       title: hasTorrent ? 'Files of the last opened torrent' : 'Files (open a torrent first)',

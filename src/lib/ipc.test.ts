@@ -41,6 +41,7 @@ describe('command wrappers', () => {
     await ipc.loadSubtitles(9, 4);
     await ipc.stopStream(9);
     await ipc.devAutoplay();
+    await ipc.libraryItems();
     expect(invoke.mock.calls).toEqual([
       ['add_torrent_link', { link: 'magnet:?xt=urn:btih:abc' }],
       ['start_stream', { torrentId: 3, fileIndex: 7 }],
@@ -53,6 +54,7 @@ describe('command wrappers', () => {
       ['load_subtitles', { streamId: 9, fileIndex: 4 }],
       ['stop_stream', { streamId: 9 }],
       ['dev_autoplay'],
+      ['library_items'],
     ]);
   });
 

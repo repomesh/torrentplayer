@@ -199,7 +199,7 @@ impl Queue {
 
 /// A link the queue may store: a magnet link with a BitTorrent info hash, or an http(s) link
 /// to a host other than this machine (stream URLs are loopback URLs with a session token).
-fn validate_source(source: &str) -> Result<(), &'static str> {
+pub(crate) fn validate_source(source: &str) -> Result<(), &'static str> {
     if source.is_empty() || source.len() > MAX_SOURCE_BYTES {
         return Err("source must be 1-16384 bytes.");
     }
@@ -256,7 +256,7 @@ fn validate_source(source: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn valid_text(text: &str) -> bool {
+pub(crate) fn valid_text(text: &str) -> bool {
     let chars = text.chars().count();
     (1..=MAX_TITLE_CHARS).contains(&chars) && !text.chars().any(char::is_control)
 }

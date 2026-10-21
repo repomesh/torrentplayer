@@ -1,6 +1,6 @@
 [package]
 name = "lumen-library"
-description = "Local library storage for TorrentStream: the play queue (versioned JSON), later courses and watch progress."
+description = "Local library storage for TorrentStream: the play queue, courses, watch progress, and resume positions."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,7 @@ repository.workspace = true
 publish.workspace = true
 
 [dependencies]
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

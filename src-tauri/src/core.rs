@@ -5,8 +5,9 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use lumen_library::Media;
 use lumen_stream::{RequestObserver, ServerConfig, StreamId, StreamServer};
 use lumen_torrent::{Playback, StreamEngine, StreamEngineConfig, TorrentId};
 use tokio::sync::OnceCell;
@@ -70,8 +71,46 @@ pub(crate) struct ActiveStream {
     pub(crate) file: usize,
     pub(crate) session: Playback,
     pub(crate) metrics: PlayerMetrics,
+    /// Stable metadata and the latest player report, for persistent watch progress.
+    pub(crate) media: Media,
+    pub(crate) progress: ProgressTracker,
     /// The probe of its audio and subtitle tracks, cancelled when the stream stops.
     pub(crate) tracks: TrackProbe,
+}
+
+/// The latest playback position and when it was last persisted.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ProgressTracker {
+    pub(crate) position_secs: Option<f64>,
+    pub(crate) duration_secs: Option<f64>,
+    saved_at: Option<Instant>,
+}
+
+impl ProgressTracker {
+    /// Updates the latest report and says whether it should be persisted now. The first report,
+    /// seeks, completion, and each five seconds of ordinary playback are saved.
+    pub(crate) fn update(&mut self, position_secs: f64, duration_secs: Option<f64>) -> bool {
+        let now = Instant::now();
+        let first = self.position_secs.is_none();
+        let seek = self
+            .position_secs
+            .is_some_and(|previous| (position_secs - previous).abs() > 3.0);
+        self.position_secs = Some(position_secs);
+        if duration_secs.is_some() {
+            self.duration_secs = duration_secs;
+        }
+        let completed = self
+            .duration_secs
+            .is_some_and(|duration| position_secs >= duration - 1.0);
+        let due = self
+            .saved_at
+            .is_none_or(|saved| now.duration_since(saved) >= Duration::from_secs(5));
+        let save = first || seek || completed || due;
+        if save {
+            self.saved_at = Some(now);
+        }
+        save
+    }
 }
 
 /// Decoder-level timings reported by the webview player.
@@ -160,5 +199,21 @@ impl RequestObserver for FirstByteObserver {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(stream, ms);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn progress_is_saved_on_first_report_seek_and_completion() {
+        let mut progress = ProgressTracker::default();
+        assert!(progress.update(0.0, Some(100.0)), "first report");
+        assert!(!progress.update(1.0, Some(100.0)), "ordinary next second");
+        assert!(progress.update(40.0, Some(100.0)), "seek");
+        assert!(!progress.update(41.0, None), "keeps the known duration");
+        assert!(progress.update(99.5, None), "completion");
+        assert_eq!(progress.duration_secs, Some(100.0));
     }
 }

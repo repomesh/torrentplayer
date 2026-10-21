@@ -14,6 +14,7 @@
    */
   import { tick } from 'svelte';
   import type { FileSummary } from '../bindings/FileSummary';
+  import type { LibraryItem } from '../bindings/LibraryItem';
   import type { ReadinessState } from '../bindings/ReadinessState';
   import { fileName, isPlayable, mediaNoun } from '../files';
   import {
@@ -25,6 +26,7 @@
     type ItemDownload,
   } from '../downloads';
   import { formatBytes, formatRate } from '../format';
+  import { libraryKey, watchedLabel } from '../library';
   import {
     currentIndex,
     groupQueue,
@@ -68,6 +70,8 @@
     downloads?: ReadonlyMap<string, ItemDownload>;
     /** The item downloading clearly fastest, if any (a hint to watch it now). */
     fastest?: string | null;
+    /** Saved watch progress, keyed by torrent info hash and file index. */
+    watchProgress?: ReadonlyMap<string, LibraryItem>;
     /** Pauses or resumes background downloading of items. */
     onTogglePause?: ((ids: readonly string[], paused: boolean) => void) | undefined;
     /**
@@ -96,6 +100,7 @@
     onLoadFiles,
     downloads = new Map(),
     fastest = null,
+    watchProgress = new Map(),
     onTogglePause,
     onToggleSkip,
   }: Props = $props();
@@ -210,9 +215,19 @@
     );
   }
 
+  function savedWatch(item: QueueItem | null): string | null {
+    if (item === null || item.infoHash === null || item.fileIndex === null) {
+      return null;
+    }
+    return watchedLabel(
+      watchProgress.get(libraryKey({ infoHash: item.infoHash, fileIndex: item.fileIndex })),
+    );
+  }
+
   function rowLabel(group: QueueGroup, row: TreeRow): string | null {
+    const watchedState = savedWatch(row.item);
     if (isPlaying(group, row)) {
-      return 'Playing';
+      return watchedState === null ? 'Playing' : `Playing · ${watchedState}`;
     }
     if (isBusy(group.key)) {
       return 'Loading…';
@@ -227,14 +242,20 @@
     const index = queue.items.indexOf(item);
     if (index === cursor + 1) {
       if (nextStatus !== null) {
-        return `Up next · ${nextStatus}`;
+        return watchedState === null
+          ? `Up next · ${nextStatus}`
+          : `Up next · ${watchedState} · ${nextStatus}`;
       }
-      return isReady(item) ? 'Up next · Ready' : 'Up next';
+      return watchedState === null
+        ? isReady(item)
+          ? 'Up next · Ready'
+          : 'Up next'
+        : `Up next · ${watchedState}`;
     }
     if (item.played) {
       return 'Played';
     }
-    return isReady(item) ? 'Ready' : null;
+    return watchedState ?? (isReady(item) ? 'Ready' : null);
   }
 
   /** Its torrent's download rate (its items share the torrent), while any of them moves. */

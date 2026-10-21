@@ -19,6 +19,7 @@ mod details;
 mod downloads;
 mod error;
 mod latest;
+mod library;
 mod migrate;
 mod network;
 mod prefetch;
@@ -100,6 +101,10 @@ impl Folders {
 ///
 /// Returns an error if the Tauri runtime fails to start, for example when the
 /// system webview is missing.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the builder keeps all command and managed-state wiring auditable in one place"
+)]
 pub fn run() -> anyhow::Result<()> {
     let log = init_tracing();
     tracing::info!(
@@ -122,6 +127,7 @@ pub fn run() -> anyhow::Result<()> {
             {
                 migrate::migrate(&earlier_default, &folders.downloads);
             }
+            let library = library::LibraryState::new(folders.data.clone());
             let queue = queue::QueueState::new(folders.data);
             let saved_queue = queue.load();
             settings.run_startup_maintenance(&saved_queue);
@@ -146,6 +152,7 @@ pub fn run() -> anyhow::Result<()> {
             app.manage(prefetch::PrefetchState::default());
             app.manage(thumbnails::ThumbnailState::default());
             app.manage(downloads::DownloadsState::new(saved_queue));
+            app.manage(library);
             app.manage(queue);
             app.manage(preview::PreviewState::default());
             downloads::start(app.handle());
@@ -181,6 +188,7 @@ pub fn run() -> anyhow::Result<()> {
             queue::preload_next,
             queue::queue_readiness,
             downloads::queue_downloads,
+            library::library_items,
             preview::preview_file,
             settings::get_settings,
             settings::update_settings,
@@ -220,6 +228,27 @@ fn shut_down(app: &tauri::AppHandle) {
     else {
         return;
     };
+    if let Some(library) = app.try_state::<library::LibraryState>() {
+        let progress: Vec<_> = core
+            .streams
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .filter_map(|stream| {
+                stream.progress.position_secs.map(|position| {
+                    (
+                        stream.media.clone(),
+                        position,
+                        stream.progress.duration_secs,
+                        library.revision(),
+                    )
+                })
+            })
+            .collect();
+        for (media, position, duration, revision) in progress {
+            library.record_sync(&media, position, duration, revision);
+        }
+    }
     let stopped = tauri::async_runtime::block_on(async move {
         tokio::time::timeout(SHUTDOWN_TIMEOUT, core.engine.shutdown()).await
     });

@@ -63,7 +63,7 @@ tags these "Coming in a later milestone").
 | ----------------------------- | ------- | ------------- | ------------------------------ |
 | `playback.defaultSpeed`       | `1.0`   | 0.5–3         | when the next video starts     |
 | `playback.autoplayNext`       | `true`  | on / off      | at once                        |
-| `playback.resumePosition`     | `true`  | on / off      | later                          |
+| `playback.resumePosition`     | `true`  | on / off      | when the next video starts     |
 | `playback.hardwareDecoding`   | `auto`  | `auto`, `off` | later (with the libmpv player) |
 | `playback.optimizeQueue`      | `false` | on / off      | at once                        |
 | `playback.keepCourseOrder`    | `true`  | on / off      | at once                        |
@@ -76,7 +76,9 @@ menu (or with C) is remembered for the rest of the session instead. `autoplayNex
 `optimizeQueue` ("Play ready videos first", also in the queue panel) moves queued videos that are
 ready to play (downloaded, or their start and end are) ahead of those still downloading, without
 moving the video playing; with `keepCourseOrder`, files of one torrent keep their order. Files
-saved before these two existed read them as their defaults.
+saved before these two existed read them as their defaults. With `resumePosition`, reopening an
+unfinished video at least 10 seconds in offers its saved position or a fresh start. Positions are
+kept even while this preference is off, so the Library can still show watch progress.
 
 ### Downloads and storage
 

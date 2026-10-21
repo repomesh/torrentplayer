@@ -133,12 +133,16 @@ stream server.
 | Permission | `allow-start-stream`                                    |
 
 `StreamInfo.url` contains the per-session token: give it to the player and never log or
-persist it.
+persist it. `resumePositionSecs` is a saved position worth offering when
+`playback.resumePosition` is enabled, otherwise `null`; completed media, the first 10 seconds,
+and the final 10 seconds are not offered.
 
 ### `report_playback`
 
 Reports the player's position, on every seek and about once a second. Seeks re-prioritize
-immediately.
+immediately. Playback history is persisted on the first report, after a seek, at completion,
+every five seconds during ordinary playback, on stream stop, and at shutdown. Database failures
+are logged but never interrupt playback.
 
 |            |                                                                            |
 | ---------- | -------------------------------------------------------------------------- |
@@ -571,6 +575,27 @@ command never starts the engine. Poll it (about every 700 ms) while `phase` is `
 limit), `failed` (with `error`), or `cancelled`. Match it to a result with
 `SearchResultDto.infoHash`.
 
+### Library
+
+#### `library_items`
+
+Returns the local playback library, most recently opened or watched first. A `LibraryItem` is
+identified by `infoHash` plus `fileIndex` and contains a safe replay `source`, plain-text `title`
+and `torrentName`, optional `sizeBytes` and `durationSecs`, `positionSecs`, `completed`, and
+`updatedAtSecs`. It never contains the loopback stream URL or token.
+
+|            |                                                       |
+| ---------- | ----------------------------------------------------- |
+| Arguments  | none                                                  |
+| Returns    | [`LibraryItem[]`](../src/lib/bindings/LibraryItem.ts) |
+| Errors     | `internal` if the local database cannot be read       |
+| Permission | `allow-library-items`                                 |
+
+The database is `library.sqlite3` in the per-user app-data directory. SQLite values use
+parameterized queries only. Its directory and file are forced to mode `0700` and `0600` on Unix;
+on Windows they inherit the user's app-data ACL. Writes run on blocking workers, not the async
+runtime.
+
 ### Queue
 
 The play queue is a playlist with a cursor, kept by the UI (`src/lib/queue.ts`) and saved
@@ -934,12 +959,15 @@ The status bar's latest public addresses, kept current by the app (see the publi
 | Event               | Payload                                                 | When                                                               |
 | ------------------- | ------------------------------------------------------- | ------------------------------------------------------------------ |
 | `settings-changed`  | [`Settings`](../src/lib/bindings/Settings.ts)           | After `update_settings`, `set_secret`, or `clear_secret` succeeds. |
+| `library-changed`   | [`LibraryItem`](../src/lib/bindings/LibraryItem.ts)     | After an item is opened or a playback checkpoint is saved.         |
 | `network-status`    | [`NetworkStatus`](../src/lib/bindings/NetworkStatus.ts) | At start-up and whenever the network state changes.                |
 | `network-public-ip` | [`PublicIp`](../src/lib/bindings/PublicIp.ts) or `null` | When the status bar's public addresses change (see `public_ip`).   |
 
 The main window may listen to events (`core:event:allow-listen` and `core:event:allow-unlisten`
 in `src-tauri/capabilities/main.json`; it cannot emit them). The frontend follows
 `network-status` with `followNetwork` in `src/lib/network.ts`, which calls `network_status` once
-and then applies each event. Rust subsystems get the same notifications from
-`SettingsState::subscribe` (a `watch` channel) and `Network::subscribe`. Stream statistics are polled with `stream_stats`; download progress
-events arrive in Phase 4.
+and then applies each event. `followLibrary` registers its listener before reading
+`library_items`, then overlays any changes that race the initial read. Rust subsystems get the
+same settings and network notifications from `SettingsState::subscribe` (a `watch` channel) and
+`Network::subscribe`. Stream statistics and download progress are polled about once a second;
+watch progress is event-driven.
