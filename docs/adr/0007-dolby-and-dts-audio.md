@@ -1,7 +1,7 @@
 # 0007: Dolby and DTS audio in the built-in player
 
-- **Status:** Proposed
-- **Date:** 2026-10-18
+- **Status:** Accepted; the fallback shipped first (see [Implementation](#implementation))
+- **Date:** 2026-10-18, implemented 2026-10-20
 
 ## Context
 
@@ -114,3 +114,39 @@ viable now.
   `dca`. The maintainers must decide the E-AC-3/DTS patent question before shipping binaries.
 - If the fallback sidecar is built, the threat model must cover the extra process and the stream
   token on its command line.
+
+## Implementation
+
+The FFmpeg sidecar was built first (issue #15), because it is far smaller than the libmpv work
+and makes these videos play now. libmpv stays the plan for Phase 2.
+
+- **Build:** `scripts/build-ffmpeg.sh` builds FFmpeg 9.0.2 from the checksummed release tarball
+  with `--disable-everything --disable-autodetect`, enabling only the Matroska and MOV demuxers,
+  the `ac3`, `eac3`, `truehd`, `mlp`, and `dca` decoders, the native AAC encoder, the MP4 muxer,
+  and the `pipe`, `http`, and `tcp` protocols (no file access). The script fails if the
+  configuration is GPL or non-free or lacks a needed component. The result is 3.7–3.8 MB per platform. CI builds
+  it on each platform (Windows with the runner's MinGW) and bundles it with
+  `--config src-tauri/tauri.sidecar.conf.json` as `torrentstream-ffmpeg`, next to the app's
+  executable, with FFmpeg's license files. Releases publish the source tarball. Builds without
+  it (local ones, by default) keep the notice.
+- **Codecs:** all four (AC-3, E-AC-3, `TrueHD`, DTS) are enabled; the maintainers accepted the
+  patent question above on 2026-10-20. Audio is mixed down to stereo AAC at 192 kb/s.
+- **Command:** `-ss <pos> -copyts -i <url> -map 0:V:0? -map <track> -c:v copy -c:a aac -ac 2
+-avoid_negative_ts make_non_negative -f mp4 -movflags
+frag_keyframe+empty_moov+default_base_moof+frag_discont -frag_duration 1000000 pipe:1`.
+  `-copyts` and `frag_discont` keep the original timestamps, so each conversion lands at its
+  place on the video's timeline in Media Source Extensions, with no offsets in the frontend. The
+  track is FFmpeg's `0:i:<track_ID>` in MP4 and `0:a:<n>` in Matroska, where `<n>` counts
+  disabled tracks as FFmpeg does.
+- **Input:** FFmpeg reads from a loopback stream server of its own that serves only this file,
+  with its own token, so the URL on its command line grants nothing else. Proxy variables are
+  removed from its environment.
+- **Output:** the backend reads the initialization segment, derives the MSE type
+  (`video/mp4; codecs="avc1.64001f,mp4a.40.2"`) in `lumen-media`, and publishes the output as a
+  live stream on the app's stream server (`/l/<id>`), readable once, with CORS only for the
+  app's own origins. The CSP allows `blob:` media and `fetch` to `http://127.0.0.1:*`.
+- **Seeking:** the player keeps up to 60 s ahead and 30 s behind; a seek outside that starts a
+  new conversion, and the previous FFmpeg is stopped. Measured with local test files: playback
+  resumes 1.5 s after a seek. FFmpeg converts about 70 times faster than real time.
+- **Not converted:** AC-4 (FFmpeg has no decoder), and audio in containers the probe does not
+  read (AVI, MPEG-TS).

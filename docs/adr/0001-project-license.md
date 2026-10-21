@@ -36,7 +36,9 @@ require publishing our changes to those files.
 
 libmpv and FFmpeg must be **LGPL builds**, dynamically linked, so TorrentStream stays MIT OR Apache-2.0
 and users can replace the libraries. Their license texts and source locations go in
-`THIRD_PARTY_NOTICES.md` and the About screen.
+`THIRD_PARTY_NOTICES.md` and the About screen. FFmpeg currently ships as a separate program (the
+audio conversion sidecar, see [ADR 0007](0007-dolby-and-dts-audio.md)), which is not linked at
+all and can likewise be replaced.
 
 ## Alternatives considered
 

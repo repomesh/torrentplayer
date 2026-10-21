@@ -8,6 +8,9 @@ node_modules/
 # Tauri generated files
 /src-tauri/gen/
 
+# The FFmpeg sidecar, built by scripts/build-ffmpeg.sh
+/src-tauri/binaries/
+
 # Docs build output
 /docs/book/
 

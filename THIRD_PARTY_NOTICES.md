@@ -13,8 +13,15 @@ match the MIT and Apache-2.0 texts reproduced below.
 
 ## Native libraries
 
-libmpv (LGPL-2.1-or-later) and FFmpeg (LGPL-2.1-or-later) will be bundled starting with the first
-release. Their notices and source locations will be added here when they are.
+**FFmpeg** 9.0.2 (LGPL-2.1-or-later), <https://ffmpeg.org>, ships as the separate program
+`torrentstream-ffmpeg`, which converts Dolby and DTS audio for the player. It is an LGPL build
+(no `--enable-gpl` or `--enable-nonfree`) of the unmodified release tarball, configured by
+`scripts/build-ffmpeg.sh` in this repository. FFmpeg's license files are installed beside it
+(`ffmpeg/LICENSE.md`, `ffmpeg/COPYING.LGPLv2.1`), and every release publishes the exact source
+(`ffmpeg-9.0.2.tar.xz`). You may replace the program with your own build.
+
+libmpv (LGPL-2.1-or-later) will be bundled in Phase 2; its notice and source location will be
+added here then.
 
 ## Rust crates
 

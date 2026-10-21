@@ -306,7 +306,7 @@ pub(crate) async fn start_stream(
     let published = core.server.publish(std::sync::Arc::clone(&media));
     // Reads the container header alongside the player, so the player can say if the audio
     // will be silent and list embedded subtitles.
-    let tracks = TrackProbe::start(published.id, media);
+    let tracks = TrackProbe::start(published.id, std::sync::Arc::clone(&media));
     let duration = crate::media::DurationProbe::start(
         std::sync::Arc::downgrade(core),
         tools,
@@ -327,6 +327,9 @@ pub(crate) async fn start_stream(
                 progress: ProgressTracker::default(),
                 tracks,
                 duration,
+                source: media,
+                converter: None,
+                conversion_request: crate::latest::Latest::default(),
             },
         );
     tracing::info!(
@@ -631,6 +634,11 @@ pub(crate) async fn stop_stream(
             "Unknown stream.",
         ));
     };
+    removed.conversion_request.cancel();
+    // Stops the audio conversion, if any: its output, then (dropped) its input.
+    if let Some(output) = removed.converter.and_then(|c| c.output) {
+        core.server.unpublish(output);
+    }
     if let Some(position) = removed.progress.position_secs
         && let Err(error) = library
             .record(
@@ -674,8 +682,10 @@ fn library_text(value: &str) -> String {
 }
 
 /// Development-only automation: a torrent to add and play on start-up, from the
-/// `LUMEN_DEV_AUTOPLAY` environment variable (`<link or .torrent path>|<file index>|<seeks>`,
-/// where seeks are comma-separated fractions). Used to measure real decoder timings.
+/// `LUMEN_DEV_AUTOPLAY` environment variable (`<link or .torrent path>|<file index>|<seeks>|<peers>`,
+/// where seeks are comma-separated fractions and the optional peers comma-separated addresses
+/// to connect to, such as a local `lumen-bench seed`). Used to measure real decoder timings and
+/// to play test media.
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -706,6 +716,10 @@ pub(crate) async fn dev_autoplay(
         .next()
         .map(|s| s.split(',').filter_map(|f| f.trim().parse().ok()).collect())
         .unwrap_or_default();
+    let peers = parts
+        .next()
+        .map(|s| s.split(',').filter_map(|p| p.trim().parse().ok()).collect())
+        .unwrap_or_default();
     let source = if std::path::Path::new(input).is_file() {
         let bytes = tokio::fs::read(input)
             .await
@@ -715,7 +729,7 @@ pub(crate) async fn dev_autoplay(
         TorrentSource::parse_link(input)?
     };
     let core = state.core().await?;
-    let info = core.engine.add(source).await?;
+    let info = core.engine.add_with_peers(source, peers).await?;
     let torrent = TorrentSummary::of(core, info);
     Ok(Some(DevAutoplay {
         torrent,

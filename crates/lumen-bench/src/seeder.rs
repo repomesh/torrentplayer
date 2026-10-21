@@ -56,6 +56,26 @@ impl LocalSeeder {
     ) -> anyhow::Result<Self> {
         let file = dir.join("lecture.mp4");
         generate(&file, len).await.context("writing seed data")?;
+        Self::seed(file, piece_len, upload_bps, count, trackers).await
+    }
+
+    /// Seeds an existing file from `count` sessions, like [`LocalSeeder::start`]. For playing
+    /// real media through the app (`lumen-bench seed`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or librqbit fails to seed it.
+    pub async fn seed(
+        file: PathBuf,
+        piece_len: u32,
+        upload_bps: Option<NonZeroU32>,
+        count: usize,
+        trackers: Vec<String>,
+    ) -> anyhow::Result<Self> {
+        let dir = file
+            .parent()
+            .context("the file has no parent directory")?
+            .to_path_buf();
         let created = create_torrent(
             &file,
             CreateTorrentOptions {
@@ -72,7 +92,7 @@ impl LocalSeeder {
         let mut addrs = Vec::new();
         for _ in 0..count.max(1) {
             let session = Session::new_with_opts(
-                dir.to_path_buf(),
+                dir.clone(),
                 SessionOptions {
                     dht: None,
                     disable_trackers: true,

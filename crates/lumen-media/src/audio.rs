@@ -102,6 +102,12 @@ pub struct AudioTrack {
     /// Whether the container marks it for playback by default: Matroska `FlagDefault`, or the
     /// MP4 track header's enabled flag.
     pub default: bool,
+    /// The container's identifier for the track: Matroska `TrackNumber`, or the MP4 track
+    /// header's `track_ID`. `None` if missing.
+    pub id: Option<u64>,
+    /// Its position among the container's audio tracks, counting disabled ones (which this
+    /// report leaves out) as FFmpeg does: its audio stream index in FFmpeg.
+    pub position: u32,
 }
 
 #[cfg(test)]

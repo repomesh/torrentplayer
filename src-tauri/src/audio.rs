@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use lumen_media::{AudioTrack, TrackReport};
+use lumen_media::{AudioTrack, Container, TrackReport};
 use lumen_stream::{MediaSource, StreamId};
 use serde::Serialize;
 use tauri::State;
@@ -59,6 +59,9 @@ pub(crate) struct StreamAudio {
     pub primary: Option<AudioTrackDto>,
     /// When the built-in player cannot decode `primary`, another track it can decode.
     pub alternative: Option<AudioTrackDto>,
+    /// Whether `primary` can be converted to a format the built-in player decodes (with
+    /// `convert_audio`): the player cannot decode it, and this build has the converter.
+    pub convertible: bool,
 }
 
 impl StreamAudio {
@@ -69,6 +72,7 @@ impl StreamAudio {
             track_count: 0,
             primary: None,
             alternative: None,
+            convertible: false,
         }
     }
 }
@@ -80,6 +84,7 @@ impl From<&TrackReport> for StreamAudio {
             track_count: u32::try_from(report.audio.len()).unwrap_or(u32::MAX),
             primary: report.primary().map(AudioTrackDto::from),
             alternative: report.playable_alternative().map(AudioTrackDto::from),
+            convertible: false,
         }
     }
 }
@@ -88,6 +93,8 @@ impl From<&TrackReport> for StreamAudio {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Probed {
     pub(crate) audio: StreamAudio,
+    /// FFmpeg's stream specifier for the primary audio track, for the audio conversion.
+    pub(crate) primary_stream: Option<String>,
     pub(crate) subtitles: Vec<EmbeddedSubtitleDto>,
     /// The duration in the header, in milliseconds, if it gives one.
     pub(crate) duration_ms: Option<u64>,
@@ -137,6 +144,7 @@ async fn probe(stream: StreamId, media: &dyn MediaSource) -> Probed {
     .await;
     let unknown = Probed {
         audio: StreamAudio::unknown(),
+        primary_stream: None,
         subtitles: Vec::new(),
         duration_ms: None,
     };
@@ -153,6 +161,9 @@ async fn probe(stream: StreamId, media: &dyn MediaSource) -> Probed {
             );
             Probed {
                 audio,
+                primary_stream: report
+                    .primary()
+                    .map(|t| stream_specifier(report.container, t)),
                 subtitles: embedded(&report),
                 duration_ms: report.duration_ms,
             }
@@ -171,6 +182,15 @@ async fn probe(stream: StreamId, media: &dyn MediaSource) -> Probed {
     }
 }
 
+/// FFmpeg's `-map` specifier for `track`: by track ID in MP4, whose demuxer exposes it, and by
+/// position in Matroska, whose demuxer does not.
+fn stream_specifier(container: Container, track: &AudioTrack) -> String {
+    match (container, track.id) {
+        (Container::Mp4, Some(id)) => format!("0:i:{id}"),
+        _ => format!("0:a:{}", track.position),
+    }
+}
+
 /// Returns what a stream's container header says about its audio, waiting for the probe if it
 /// is still running (at most 45 s after the stream started).
 #[tauri::command]
@@ -186,7 +206,13 @@ pub(crate) async fn stream_audio(
         .await
         .map_err(|_| IpcError::new(ErrorKind::NotFound, "Unknown stream."))?
         .clone();
-    Ok(probed.map_or_else(StreamAudio::unknown, |p| p.audio))
+    let mut audio = probed.map_or_else(StreamAudio::unknown, |p| p.audio);
+    audio.convertible = audio
+        .primary
+        .as_ref()
+        .is_some_and(|t| crate::convert::supported_codec(&t.codec))
+        && crate::convert::sidecar().is_some();
+    Ok(audio)
 }
 
 #[cfg(test)]
@@ -228,10 +254,14 @@ mod tests {
                 AudioTrack {
                     codec: AudioCodec::Eac3,
                     default: true,
+                    id: Some(1),
+                    position: 0,
                 },
                 AudioTrack {
                     codec: AudioCodec::Aac,
                     default: false,
+                    id: Some(2),
+                    position: 1,
                 },
             ],
         };
@@ -247,20 +277,31 @@ mod tests {
         let json = serde_json::to_value(&audio).unwrap();
         let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
         keys.sort();
-        assert_eq!(keys, ["alternative", "primary", "probed", "trackCount"]);
+        assert_eq!(
+            keys,
+            [
+                "alternative",
+                "convertible",
+                "primary",
+                "probed",
+                "trackCount"
+            ]
+        );
     }
 
     #[tokio::test]
     async fn probes_a_media_source() {
-        // A minimal Matroska file: EBML header, then a Segment with one AC-3 track.
+        // A minimal Matroska file: EBML header, then a Segment with one AC-3 track, number 2.
         let codec = [&[0x86, 0x85][..], b"A_AC3"].concat();
-        let entry = [&[0xAE, 0x80 | 0x0A, 0x83, 0x81, 0x02][..], &codec].concat();
-        let tracks = [&[0x16, 0x54, 0xAE, 0x6B, 0x80 | 0x0C][..], &entry].concat();
+        let fields = [&[0xD7, 0x81, 0x02, 0x83, 0x81, 0x02][..], &codec].concat();
+        let entry = [&[0xAE, 0x80 | 0x0D][..], &fields].concat();
+        let tracks = [&[0x16, 0x54, 0xAE, 0x6B, 0x80 | 0x0F][..], &entry].concat();
         let segment = [&[0x18, 0x53, 0x80, 0x67, 0xFF][..], &tracks].concat();
         let file = [&[0x1A, 0x45, 0xDF, 0xA3, 0x80][..], &segment].concat();
         let probed = probe(1, &Memory(file)).await;
         assert!(probed.audio.probed);
         assert_eq!(probed.audio.primary.unwrap().codec, "ac3");
+        assert_eq!(probed.primary_stream.as_deref(), Some("0:a:0"));
         assert_eq!(probed.subtitles, []);
 
         let unknown = probe(2, &Memory(b"RIFF....AVI ".to_vec())).await;

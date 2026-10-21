@@ -6,6 +6,7 @@
 //! lumen-bench local   [--size-mib 256] [--piece-kib 256] [--upload-mibps 8] [--rtt-ms 40]
 //!                     [--seeders 1 | --peers SPEC] [--tracker-interval SECS] [--runs 5] [OPTIONS]
 //! lumen-bench torrent <magnet | https URL | path.torrent>        [--runs 3] [OPTIONS]
+//! lumen-bench seed    <media file> <output .torrent>
 //!
 //! OPTIONS:
 //!   --file N             file index to play (default: largest video)
@@ -49,6 +50,10 @@
 //!   --web-seed SPEC      add a web seed (BEP 19) serving the file over HTTP, shaped like a
 //!                        `--peers` entry (`up=`, `rtt=`); `--peers none` leaves only it
 //! ```
+//!
+//! `seed` seeds a media file on `127.0.0.1` until stopped, writes its `.torrent`, and logs the
+//! seeder's address, for playing real media in a development build of the app (see
+//! `LUMEN_DEV_AUTOPLAY` in docs/building.md).
 
 #![forbid(unsafe_code)]
 
@@ -518,12 +523,44 @@ fn print_report(report: &Report) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `lumen-bench seed <file> <torrent>`: seeds `file` until the process is stopped.
+fn seed(file: PathBuf, torrent: &std::path::Path) -> anyhow::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async {
+        let seeder =
+            LocalSeeder::seed(std::path::absolute(file)?, 256 * 1024, None, 1, Vec::new()).await?;
+        std::fs::write(torrent, &seeder.torrent)
+            .with_context(|| format!("writing {}", torrent.display()))?;
+        let addr = seeder.addrs.first().context("no seeder")?;
+        tracing::info!("seeding at {addr}");
+        std::future::pending::<()>().await;
+        Ok(())
+    })
+}
+
 fn main() -> ExitCode {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init();
+
+    let mut positional = std::env::args().skip(1);
+    if positional.next().as_deref() == Some("seed") {
+        let (Some(file), Some(torrent)) = (positional.next(), positional.next()) else {
+            tracing::error!("usage: lumen-bench seed <media file> <output .torrent>");
+            return ExitCode::from(2);
+        };
+        return match seed(file.into(), std::path::Path::new(&torrent)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!("{error:#}");
+                ExitCode::from(2)
+            }
+        };
+    }
 
     let result = (|| -> anyhow::Result<bool> {
         let args = parse_args()?;

@@ -10,6 +10,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import type { AppInfo } from './bindings/AppInfo';
+import type { ConvertedStream } from './bindings/ConvertedStream';
 import type { DevAutoplay } from './bindings/DevAutoplay';
 import type { IpcError } from './bindings/IpcError';
 import type { PlayerMetricKind } from './bindings/PlayerMetricKind';
@@ -80,6 +81,14 @@ export function streamStats(streamId: number): Promise<StreamStats> {
  */
 export function streamAudio(streamId: number): Promise<StreamAudio> {
   return invoke<StreamAudio>('stream_audio', { streamId });
+}
+
+/**
+ * Starts converting a stream's audio (Dolby or DTS, when {@link streamAudio} says it is
+ * `convertible`) from `start` seconds, stopping its previous conversion. See converted.ts.
+ */
+export function convertAudio(streamId: number, start: number): Promise<ConvertedStream> {
+  return invoke<ConvertedStream>('convert_audio', { streamId, start });
 }
 
 // --- Subtitles ----------------------------------------------------------------------------

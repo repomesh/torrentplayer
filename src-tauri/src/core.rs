@@ -8,11 +8,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use lumen_library::Media;
-use lumen_stream::{RequestObserver, ServerConfig, StreamId, StreamServer};
+use lumen_stream::{MediaSource, RequestObserver, ServerConfig, StreamId, StreamServer};
 use lumen_torrent::{Playback, StreamEngine, StreamEngineConfig, TorrentId};
 use tokio::sync::OnceCell;
 
 use crate::audio::TrackProbe;
+use crate::convert::Converter;
 use crate::error::{ErrorKind, IpcError};
 use crate::media::DurationProbe;
 
@@ -79,6 +80,12 @@ pub(crate) struct ActiveStream {
     pub(crate) tracks: TrackProbe,
     /// Its duration from the header or `ffprobe`, for when the player reports none.
     pub(crate) duration: DurationProbe,
+    /// The file, for the audio conversion.
+    pub(crate) source: Arc<dyn MediaSource>,
+    /// Converts audio once the player asks for it.
+    pub(crate) converter: Option<Converter>,
+    /// A new seek or stream stop cancels a conversion still starting.
+    pub(crate) conversion_request: crate::latest::Latest,
 }
 
 /// The latest playback position and when it was last persisted.
@@ -135,6 +142,7 @@ impl Core {
         let first_bytes = Arc::new(FirstByteObserver::default());
         let server = StreamServer::start(ServerConfig {
             observer: Some(Arc::clone(&first_bytes) as Arc<dyn RequestObserver>),
+            allowed_origins: app_origins(),
             ..ServerConfig::default()
         })
         .await
@@ -160,6 +168,21 @@ impl Core {
             .map(f)
             .ok_or_else(|| IpcError::new(ErrorKind::NotFound, "Unknown stream."))
     }
+}
+
+/// The origins of the app's own pages, which read converted audio with `fetch`: Tauri serves
+/// them from `http://tauri.localhost` on Windows and `tauri://localhost` elsewhere, and from the
+/// Vite server in development.
+fn app_origins() -> Vec<String> {
+    let mut origins = vec![
+        "tauri://localhost".to_owned(),
+        "http://tauri.localhost".to_owned(),
+        "https://tauri.localhost".to_owned(),
+    ];
+    if cfg!(debug_assertions) {
+        origins.push("http://localhost:5173".to_owned());
+    }
+    origins
 }
 
 /// Records how long the stream server waited for the first bytes of each request.

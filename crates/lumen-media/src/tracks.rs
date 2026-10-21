@@ -165,7 +165,12 @@ mod tests {
     use crate::audio::AudioCodec;
 
     fn track(codec: AudioCodec, default: bool) -> AudioTrack {
-        AudioTrack { codec, default }
+        AudioTrack {
+            codec,
+            default,
+            id: None,
+            position: 0,
+        }
     }
 
     fn report(audio: Vec<AudioTrack>) -> TrackReport {

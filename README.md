@@ -141,8 +141,9 @@ sources, details, and where other tools are the better fit.
 - **Subtitles** found in the torrent and matched to the video, or loaded from a file.
 - **Honest status** instead of an endless spinner: download rate, peers, and seconds buffered
   ahead, plus a debug overlay (D) with a live piece map.
-- Warns you when a file's audio uses a codec your system cannot decode (such as AC-3 or DTS)
-  instead of playing silently.
+- **Dolby and DTS audio play with sound:** AC-3, E-AC-3, TrueHD, and DTS tracks, which the
+  system's web engine cannot decode, are converted to AAC on the fly by a bundled, playback-only
+  FFmpeg; the video itself is untouched.
 
 ### Find and organize
 
@@ -238,7 +239,8 @@ page with SHA-256 checksums, an SBOM, and build provenance attestations; see
 
 The player uses your system's web engine (WebView2 on Windows, WebKit on macOS and Linux), so it
 plays the formats that engine supports: commonly MP4, WebM, and MKV with H.264, VP9, or AV1
-video and AAC, Opus, or MP3 audio.
+video and AAC, Opus, or MP3 audio. Dolby (AC-3, E-AC-3, TrueHD) and DTS audio in MP4 and MKV
+files is converted to AAC as it plays.
 
 ## Building from source
 

@@ -23,6 +23,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - The duration of a video now comes from its container header (MP4, Matroska) or, with FFmpeg,
   `ffprobe` when the player cannot tell, so read-ahead and buffering work for such files too.
   FFmpeg reads only what is already downloaded and is locked down to the local stream.
+- Videos with Dolby (AC-3, E-AC-3, TrueHD) or DTS audio now play with sound: a bundled,
+  playback-only LGPL FFmpeg converts the audio to AAC as the video plays, copying the video, and
+  the player keeps the full seek bar and restarts the conversion on far seeks.
 
 ## [0.2.0] - 2026-10-20
 

@@ -21,12 +21,17 @@
 //! bitrate of files whose header gives none (read-ahead sizing, buffer estimates, and the
 //! bandwidth planner use them), and `ffmpeg` for seek-bar thumbnails. Both read the media
 //! from the loopback stream server and are locked down to it. See `docs/architecture.md`.
+//!
+//! Converted audio: [`init_segment_len`] and [`mse_type`] read the fragmented MP4 that the audio
+//! conversion writes, for Media Source Extensions.
+//!
 
 #![forbid(unsafe_code)]
 
 mod audio;
 mod cues;
 mod ffmpeg;
+mod fragmented;
 mod language;
 mod matching;
 mod mkv;
@@ -43,6 +48,7 @@ pub use ffmpeg::{
     FORMAT_WHITELIST, FfmpegError, FfmpegTools, MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_WIDTH,
     MediaInfo, version,
 };
+pub use fragmented::{InitError, MAX_INIT_SEGMENT, init_segment_len, mse_type};
 pub use language::{Language, language};
 pub use matching::{MAX_SUBTITLE_FILES, SUBTITLE_EXTENSIONS, SubtitleFile, subtitle_files};
 pub use probe::{MAX_READS, ProbeError, probe_tracks};

@@ -14,6 +14,7 @@
 mod audio;
 mod cache;
 mod commands;
+mod convert;
 mod core;
 mod details;
 mod downloads;
@@ -171,6 +172,7 @@ pub fn run() -> anyhow::Result<()> {
             commands::record_player_metric,
             commands::stream_stats,
             audio::stream_audio,
+            convert::convert_audio,
             subtitles::stream_subtitles,
             subtitles::load_subtitles,
             subtitles::parse_subtitles,

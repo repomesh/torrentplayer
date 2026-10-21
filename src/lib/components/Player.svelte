@@ -11,10 +11,12 @@
     type StreamAudio,
   } from '../audio';
   import { startPlayback } from '../autoplay';
+  import { ConvertedPlayback } from '../converted';
   import type { StreamInfo } from '../bindings/StreamInfo';
   import type { StreamStats } from '../bindings/StreamStats';
   import { loadingMessage } from '../format';
   import {
+    convertAudio,
     errorMessage,
     getSettings,
     loadSubtitles,
@@ -142,8 +144,15 @@
   let audioDecoding = $state<AudioDecoding>('unknown');
   let hasCounters = $state(false);
   let audioDismissed = $state(false);
+  // Audio the player can't decode is converted (see converted.ts); the video then plays from
+  // the conversion instead of the stream itself.
+  let convertedSrc = $state<string | null>(null);
+  let converted: ConvertedPlayback | null = null;
+  let converting = $state(false);
   const audioMessage = $derived(
-    audioDismissed || !firstFrameSeen ? null : audioNotice(audioInfo, audioDecoding, hasCounters),
+    audioDismissed || !firstFrameSeen || converting
+      ? null
+      : audioNotice(audioInfo, audioDecoding, hasCounters),
   );
 
   // Subtitles: the torrent's files and embedded tracks, files the user loaded, and the one
@@ -354,6 +363,64 @@
       video.volume = 1;
     }
     autoMuted = false;
+  }
+
+  /**
+   * Plays the video from the audio conversion instead, continuing from the current position (or
+   * the one to resume from) and playing on unless the viewer has paused.
+   */
+  function startConversion(): void {
+    if (!video || converted !== null || destroyed || !ConvertedPlayback.supported()) {
+      return;
+    }
+    const media = video;
+    const start = resumed ? media.currentTime : startAt;
+    resumed = true;
+    const resume = !media.paused || !firstFrameSeen;
+    const request = playRequest;
+    const playback = new ConvertedPlayback(media, {
+      convert: (from) => convertAudio(stream.streamId, from),
+      onReady: () => {
+        if (resume && request === playRequest) {
+          void startPlaying();
+        }
+      },
+      onError: () => {
+        stopConversion();
+      },
+    });
+    converted = playback;
+    playbackError = null;
+    converting = true;
+    convertedSrc = playback.src;
+    void playback.start(start);
+  }
+
+  /** Goes back to the stream itself (without sound) after the conversion failed. */
+  function stopConversion(): void {
+    if (!video || converted === null) {
+      return;
+    }
+    const media = video;
+    const position = media.currentTime;
+    const resume = !media.paused;
+    converted.destroy();
+    converted = null;
+    converting = false;
+    convertedSrc = null;
+    media.addEventListener(
+      'loadedmetadata',
+      () => {
+        if (destroyed) {
+          return;
+        }
+        media.currentTime = position;
+        if (resume) {
+          void startPlaying();
+        }
+      },
+      { once: true },
+    );
   }
 
   /** Samples the decoder counters until they show audio being decoded. */
@@ -719,6 +786,9 @@
       .then((info) => {
         audioInfo = info;
         probeDone = true;
+        if (info.convertible) {
+          startConversion();
+        }
         if (subtitleList?.embedded === null) {
           void refreshSubtitles();
         }
@@ -730,6 +800,7 @@
   onDestroy(() => {
     destroyed = true;
     playRequest += 1;
+    converted?.destroy();
     clearInterval(audioTimer);
     stopNetwork?.();
     window.removeEventListener('keydown', onKey, { capture: true });
@@ -778,7 +849,7 @@
   <!-- svelte-ignore a11y_media_has_caption (captions are added as text tracks from script) -->
   <video
     bind:this={video}
-    src={stream.url}
+    src={convertedSrc ?? stream.url}
     preload="auto"
     playsinline
     onclick={togglePlay}
@@ -827,6 +898,7 @@
     }}
     onseeking={() => {
       timer.seeking();
+      converted?.seeking();
       if (video) {
         currentTime = video.currentTime;
         if (gate.seeking(video.paused, video.currentTime)) {
@@ -869,6 +941,10 @@
       stalled = false;
     }}
     onerror={() => {
+      if (converted !== null) {
+        stopConversion();
+        return;
+      }
       playbackError =
         'This video could not be played by the built-in player (its format may not be supported yet).';
     }}

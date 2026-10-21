@@ -20,7 +20,9 @@ Windows. WireGuard tracker datagrams use the application-local tunnel and its DN
 they never use unbound OS UDP.
 
 The webview cannot reach the network itself: its CSP allows only `ipc:` and the loopback stream
-server.
+server (as media, and with `fetch` for converted audio). The FFmpeg sidecar that converts Dolby
+and DTS audio reads only from a loopback server, with proxy variables removed from its
+environment.
 
 ## Modes
 

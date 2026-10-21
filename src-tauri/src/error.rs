@@ -34,6 +34,8 @@ pub enum ErrorKind {
     /// The operation was cancelled: a search replaced by a newer one, or stopped with
     /// `cancel_search`. Nothing to show the user.
     Cancelled,
+    /// The audio could not be converted for the built-in player; details are in the log.
+    AudioConversion,
     /// Something unexpected went wrong; details are in the log.
     Internal,
 }

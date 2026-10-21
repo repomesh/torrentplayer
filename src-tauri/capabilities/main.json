@@ -13,6 +13,7 @@
     "allow-record-player-metric",
     "allow-stream-stats",
     "allow-stream-audio",
+    "allow-convert-audio",
     "allow-stream-subtitles",
     "allow-load-subtitles",
     "allow-parse-subtitles",

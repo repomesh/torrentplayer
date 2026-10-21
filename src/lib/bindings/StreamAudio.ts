@@ -21,4 +21,9 @@ primary: AudioTrackDto | null,
 /**
  * When the built-in player cannot decode `primary`, another track it can decode.
  */
-alternative: AudioTrackDto | null, };
+alternative: AudioTrackDto | null, 
+/**
+ * Whether `primary` can be converted to a format the built-in player decodes (with
+ * `convert_audio`): the player cannot decode it, and this build has the converter.
+ */
+convertible: boolean, };

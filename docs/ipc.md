@@ -45,6 +45,7 @@ a generic message).
 | `kill-switch`         | The selected VPN interface, proxy, or tunnel is not working, so the request was blocked; nothing was sent.     |
 | `network-unavailable` | A network request (such as the connection check) failed.                                                       |
 | `cancelled`           | The request was cancelled: a search replaced by a newer one or stopped with `cancel_search`. Show nothing.     |
+| `audio-conversion`    | The audio could not be converted for the built-in player; details are in the log.                              |
 | `internal`            | Something unexpected failed; details are in the log.                                                           |
 
 `errorMessage` in `src/lib/ipc.ts` shows `message` as is, and for `kill-switch` and
@@ -202,6 +203,7 @@ type StreamAudio = {
   trackCount: number; // 0: the video has no sound
   primary: AudioTrackDto | null; // the default track, else the first
   alternative: AudioTrackDto | null; // a decodable track, when `primary` is not
+  convertible: boolean; // `primary` does not decode, and `convert_audio` can convert it
 };
 type AudioTrackDto = {
   codec: string; // "aac", "ac3", "eac3", "truehd", "dts", ...
@@ -210,9 +212,33 @@ type AudioTrackDto = {
 };
 ```
 
-The player shows a notice when the codec cannot be decoded, after Chromium's decoder counters
-confirm that no audio is being decoded (see `src/lib/audio.ts`). The same probe lists the
-embedded subtitle tracks that `stream_subtitles` returns.
+When `convertible`, the player plays the stream through `convert_audio`. Otherwise it shows a
+notice when the codec cannot be decoded, after Chromium's decoder counters confirm that no audio
+is being decoded (see `src/lib/audio.ts`). The same probe lists the embedded subtitle tracks that
+`stream_subtitles` returns.
+
+### `convert_audio`
+
+Starts converting a stream's primary audio track (Dolby or DTS) to AAC with the bundled FFmpeg,
+from `start` seconds, and stops the stream's previous conversion. Waits for the probe and for
+FFmpeg's initialization segment (at most 60 s). The result is a live stream: fragmented MP4 with
+the video copied and the original timestamps, read once with `fetch` and fed to Media Source
+Extensions (see `src/lib/converted.ts` and [ADR 0007](adr/0007-dolby-and-dts-audio.md)).
+
+|            |                                                                                                      |
+| ---------- | ---------------------------------------------------------------------------------------------------- |
+| Arguments  | `{ streamId: number, start: number }`                                                                |
+| Returns    | [`ConvertedStream`](../src/lib/bindings/ConvertedStream.ts)                                          |
+| Errors     | `not-found`, `invalid-argument` (bad `start`, or audio that needs no conversion), `audio-conversion` |
+| Permission | `allow-convert-audio`                                                                                |
+
+```ts
+type ConvertedStream = {
+  url: string; // loopback URL with a token, readable once; do not log it
+  mime: string; // for MediaSource.addSourceBuffer: video/mp4; codecs="avc1.64001f,mp4a.40.2"
+  duration: number | null; // seconds, if the container states it
+};
+```
 
 ### `stream_subtitles`
 
@@ -287,8 +313,9 @@ Unpublishes a stream and stops prioritizing it. Downloaded data is kept.
 ### `dev_autoplay`
 
 Development builds only (always `null` in release builds): adds the torrent named by
-`LUMEN_DEV_AUTOPLAY=<link or .torrent path>|<file index>|<seek fractions>` so decoder timings
-can be measured automatically.
+`LUMEN_DEV_AUTOPLAY=<link or .torrent path>|<file index>|<seek fractions>|<peers>` so decoder
+timings can be measured automatically. The optional peers are addresses to connect to, such as
+a local `lumen-bench seed` (see [Building](building.md)).
 
 |            |                                                               |
 | ---------- | ------------------------------------------------------------- |

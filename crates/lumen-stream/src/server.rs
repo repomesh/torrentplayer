@@ -16,8 +16,8 @@ use bytes::Bytes;
 use futures_util::TryStreamExt as _;
 use futures_util::future::BoxFuture;
 use http::header::{
-    ACCEPT_RANGES, ALLOW, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, HOST, RANGE,
-    REFERRER_POLICY,
+    ACCEPT_RANGES, ACCESS_CONTROL_ALLOW_ORIGIN, ALLOW, CACHE_CONTROL, CONTENT_LENGTH,
+    CONTENT_RANGE, CONTENT_TYPE, HOST, ORIGIN, RANGE, REFERRER_POLICY, VARY,
 };
 use http::{HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::combinators::UnsyncBoxBody;
@@ -50,6 +50,15 @@ pub trait MediaSource: Send + Sync {
     fn open(&self) -> BoxFuture<'static, io::Result<Box<dyn MediaReader>>>;
 }
 
+/// A one-way stream of unknown length, such as the output of an audio conversion. It is served
+/// once, from the start, without `Range` support.
+pub trait LiveSource: Send + Sync {
+    /// MIME type sent as `Content-Type`.
+    fn content_type(&self) -> &str;
+    /// Takes the stream for a request; `None` once it has been taken.
+    fn take(&self) -> Option<Box<dyn AsyncRead + Unpin + Send>>;
+}
+
 /// Receives timing information about requests, for streaming metrics.
 pub trait RequestObserver: Send + Sync {
     /// A request for `range` of stream `stream` has arrived and passed authentication.
@@ -70,6 +79,9 @@ pub struct ServerConfig {
     pub header_read_timeout: Duration,
     /// Optional metrics hook.
     pub observer: Option<Arc<dyn RequestObserver>>,
+    /// Origins whose scripts may read live streams with `fetch` (answered with
+    /// `Access-Control-Allow-Origin`): the app's own pages. Media elements need no such header.
+    pub allowed_origins: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -78,6 +90,7 @@ impl Default for ServerConfig {
             max_connections: 16,
             header_read_timeout: Duration::from_secs(10),
             observer: None,
+            allowed_origins: Vec::new(),
         }
     }
 }
@@ -88,6 +101,7 @@ impl fmt::Debug for ServerConfig {
             .field("max_connections", &self.max_connections)
             .field("header_read_timeout", &self.header_read_timeout)
             .field("observer", &self.observer.is_some())
+            .field("allowed_origins", &self.allowed_origins)
             .finish()
     }
 }
@@ -137,6 +151,7 @@ struct Inner {
     host: String,
     token: SessionToken,
     sources: RwLock<HashMap<StreamId, Published>>,
+    live: RwLock<HashMap<StreamId, Arc<dyn LiveSource>>>,
     next_id: AtomicU64,
     config: ServerConfig,
 }
@@ -173,6 +188,7 @@ impl StreamServer {
             host: addr.to_string(),
             token,
             sources: RwLock::new(HashMap::new()),
+            live: RwLock::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             config,
         });
@@ -229,10 +245,33 @@ impl StreamServer {
         }
     }
 
-    /// Stops serving a stream. Requests already in progress finish normally.
+    /// Makes a live stream available and returns its URL. Its first request takes it.
+    pub fn publish_live(&self, source: Arc<dyn LiveSource>) -> PublishedStream {
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        self.inner
+            .live
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, source);
+        PublishedStream {
+            id,
+            url: format!(
+                "http://{}/l/{id}?t={}",
+                self.inner.host,
+                self.inner.token.as_str()
+            ),
+        }
+    }
+
+    /// Stops serving a stream, live or not. Requests already in progress finish normally.
     pub fn unpublish(&self, id: StreamId) {
         self.inner
             .sources
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        self.inner
+            .live
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
@@ -341,6 +380,10 @@ async fn respond(inner: &Inner, req: &Request<Incoming>) -> Result<Response<Body
         }
     };
 
+    if let Some(live) = req.uri().path().strip_prefix("/l/") {
+        return respond_live(inner, req, live, head);
+    }
+
     let (id, source) = id
         .zip(published.map(|(source, _)| source))
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -395,6 +438,53 @@ async fn respond(inner: &Inner, req: &Request<Incoming>) -> Result<Response<Body
                 })?
         }
         _ => empty(),
+    };
+    builder
+        .body(body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// Serves a live stream: once, whole, with a CORS header for the app's own origins.
+fn respond_live(
+    inner: &Inner,
+    req: &Request<Incoming>,
+    id: &str,
+    head: bool,
+) -> Result<Response<Body>, StatusCode> {
+    let id: StreamId = id.parse().map_err(|_| StatusCode::NOT_FOUND)?;
+    let source = inner
+        .live
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&id)
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(CACHE_CONTROL, "no-store")
+        .header("x-content-type-options", "nosniff")
+        .header(REFERRER_POLICY, "no-referrer")
+        .header(VARY, "Origin")
+        .header(
+            CONTENT_TYPE,
+            HeaderValue::from_str(source.content_type())
+                .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        );
+    if let Some(origin) = req.headers().get(ORIGIN)
+        && inner
+            .config
+            .allowed_origins
+            .iter()
+            .any(|allowed| allowed.as_bytes() == origin.as_bytes())
+    {
+        builder = builder.header(ACCESS_CONTROL_ALLOW_ORIGIN, origin.clone());
+    }
+    let body = if head {
+        empty()
+    } else {
+        let reader = source.take().ok_or(StatusCode::GONE)?;
+        let stream = ReaderStream::with_capacity(reader, 256 * 1024);
+        StreamBody::new(stream.map_ok(Frame::data)).boxed_unsync()
     };
     builder
         .body(body)

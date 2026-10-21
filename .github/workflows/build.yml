@@ -60,12 +60,28 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: rustup target add "$TARGET"
 
+      # The playback-only FFmpeg that converts Dolby and DTS audio (docs/adr/0007), built from
+      # the checksummed source and bundled through tauri.sidecar.conf.json.
+      - name: Build the FFmpeg sidecar
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            # The runner image's MinGW. FFmpeg's configure needs a POSIX temporary directory,
+            # and GCC a Windows one.
+            export PATH="/c/mingw64/bin:$PATH" MAKE=mingw32-make
+            TMPDIR=$(cygpath -u "$RUNNER_TEMP") TMP=$(cygpath -m "$RUNNER_TEMP") TEMP=$(cygpath -m "$RUNNER_TEMP")
+            export TMPDIR TMP TEMP
+          fi
+          bash scripts/build-ffmpeg.sh "$TARGET" src-tauri/binaries
+
       # Without a tag, tauri-action only builds; nothing is published.
       - name: Build installers
         id: tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         with:
-          args: --target ${{ matrix.target }}
+          args: --target ${{ matrix.target }} --config src-tauri/tauri.sidecar.conf.json
 
       - name: Collect installers
         shell: bash

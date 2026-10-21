@@ -33,15 +33,24 @@ Until libmpv lands, the webview's `<video>` element is the only player (`Player.
   pressing play, M, or the volume controls also unmutes it. A start interrupted by a pause, seek,
   or load (`AbortError`) is retried with the sound unchanged, and only while playback is still
   wanted. Nothing else mutes the video.
-- **Codecs the webview cannot decode** (`src/lib/audio.ts`, `lumen-media`): WebView2 decodes
-  AAC, MP3, Opus, Vorbis, and FLAC, but not Dolby (AC-3, E-AC-3/Atmos, `TrueHD`, AC-4) or DTS.
-  Such videos play their picture without sound. The backend reads the audio codec from the
-  container header (`stream_audio`). The player shows a dismissible notice naming the codec, and
-  any other track that would play, once Chromium's decoder counters (`webkitAudioDecodedByteCount`
-  stays 0 while `webkitVideoDecodedByteCount` grows) confirm that no audio is being decoded. If
-  the header cannot be read, three seconds of such silent playback show a general notice.
-  Without the counters, the probe alone decides. How these codecs will be played is recorded in
-  [ADR 0007](adr/0007-dolby-and-dts-audio.md).
+- **Codecs the webview cannot decode** (`src/lib/audio.ts`, `src/lib/converted.ts`,
+  `src-tauri/src/convert.rs`, `lumen-media`): WebView2 decodes AAC, MP3, Opus, Vorbis, and FLAC, but
+  not Dolby (AC-3, E-AC-3/Atmos, `TrueHD`, AC-4) or DTS. The backend reads the audio codec from the
+  container header (`stream_audio`). When the default track is AC-3, E-AC-3, `TrueHD`, or DTS in an
+  MP4, MOV, Matroska, or WebM file, the player plays a conversion instead (`convert_audio`): the
+  bundled FFmpeg reads the video from a loopback server of its own, copies the video, converts that
+  track to stereo AAC, and writes fragmented MP4 with the original timestamps. The player feeds it
+  to the `<video>` element through Media Source Extensions, so the seek bar, duration, and subtitles
+  work as usual. Reading pauses with 60 s buffered ahead (which also pauses FFmpeg), and data more
+  than 30 s behind is removed. After a seek, a new conversion starts where the buffered video at the
+  new position ends, unless the running one is about to deliver it, typically playing again within 2
+  s. A conversion that stops early is continued from where it stopped. If conversion fails, or for
+  AC-4 and other codecs it cannot convert, the video plays without sound and a dismissible notice
+  names the codec, and any other track that would play, once Chromium's decoder counters
+  (`webkitAudioDecodedByteCount` stays 0 while `webkitVideoDecodedByteCount` grows) confirm that no
+  audio is being decoded. If the header cannot be read, three seconds of such silent playback show a
+  general notice. Without the counters, the probe alone decides. See [ADR
+  0007](adr/0007-dolby-and-dts-audio.md).
 
 ## Subtitles in the built-in player (today)
 
@@ -80,5 +89,6 @@ Until libmpv lands, the webview's `<video>` element is the only player (`Player.
 
 ## Licensing
 
-libmpv and FFmpeg are bundled with the app. See [ADR 0001](adr/0001-project-license.md) for how
-their licenses interact with TorrentStream's.
+A playback-only LGPL build of FFmpeg ships with the app as a separate program
+(`torrentstream-ffmpeg`, built by `scripts/build-ffmpeg.sh`); libmpv will be bundled in Phase 2.
+See [ADR 0001](adr/0001-project-license.md) for how their licenses interact with TorrentStream's.

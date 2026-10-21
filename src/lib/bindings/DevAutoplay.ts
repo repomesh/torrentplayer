@@ -3,8 +3,10 @@ import type { TorrentSummary } from "./TorrentSummary";
 
 /**
  * Development-only automation: a torrent to add and play on start-up, from the
- * `LUMEN_DEV_AUTOPLAY` environment variable (`<link or .torrent path>|<file index>|<seeks>`,
- * where seeks are comma-separated fractions). Used to measure real decoder timings.
+ * `LUMEN_DEV_AUTOPLAY` environment variable (`<link or .torrent path>|<file index>|<seeks>|<peers>`,
+ * where seeks are comma-separated fractions and the optional peers comma-separated addresses
+ * to connect to, such as a local `lumen-bench seed`). Used to measure real decoder timings and
+ * to play test media.
  */
 export type DevAutoplay = { 
 /**

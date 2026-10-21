@@ -1,0 +1,10 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "externalBin": ["binaries/torrentstream-ffmpeg"],
+    "resources": {
+      "binaries/LICENSE.md": "ffmpeg/LICENSE.md",
+      "binaries/COPYING.LGPLv2.1": "ffmpeg/COPYING.LGPLv2.1"
+    }
+  }
+}

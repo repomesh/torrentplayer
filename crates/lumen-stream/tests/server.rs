@@ -18,9 +18,9 @@ use std::time::Duration;
 
 use futures_util::future::BoxFuture;
 use lumen_stream::{
-    MediaReader, MediaSource, RequestObserver, ServerConfig, StreamId, StreamServer,
+    LiveSource, MediaReader, MediaSource, RequestObserver, ServerConfig, StreamId, StreamServer,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 struct Memory(Arc<Vec<u8>>);
@@ -299,4 +299,110 @@ async fn private_tokens_open_only_their_own_stream() {
     let r = send(addr, &get(path, &f.host, "")).await;
     assert_eq!(r.status, 403);
     assert!(!format!("{private:?}").contains(token));
+}
+
+/// A live stream that can be taken once.
+struct Live(Mutex<Option<Vec<u8>>>);
+
+impl LiveSource for Live {
+    fn content_type(&self) -> &str {
+        "video/mp4"
+    }
+    fn take(&self) -> Option<Box<dyn AsyncRead + Unpin + Send>> {
+        let data = self.0.lock().unwrap().take()?;
+        Some(Box::new(Cursor::new(data)))
+    }
+}
+
+/// The body of a response of unknown length: chunked, or ended by closing the connection.
+fn dechunk(reply: &Reply) -> Vec<u8> {
+    let mut body = reply.body.as_slice();
+    if reply.header("transfer-encoding") != Some("chunked") {
+        return body.to_vec();
+    }
+    let mut out = Vec::new();
+    loop {
+        let line = body.windows(2).position(|w| w == b"\r\n").unwrap();
+        let size = usize::from_str_radix(std::str::from_utf8(&body[..line]).unwrap(), 16).unwrap();
+        if size == 0 {
+            return out;
+        }
+        out.extend_from_slice(&body[line + 2..line + 2 + size]);
+        body = &body[line + 4 + size..];
+    }
+}
+
+async fn live_fixture(origins: &[&str]) -> (StreamServer, String, String) {
+    let server = StreamServer::start(ServerConfig {
+        allowed_origins: origins.iter().map(|&o| o.to_owned()).collect(),
+        ..ServerConfig::default()
+    })
+    .await
+    .unwrap();
+    let published = server.publish_live(Arc::new(Live(Mutex::new(Some(b"fragments".to_vec())))));
+    let url = published.url.strip_prefix("http://").unwrap().to_owned();
+    let (host, path) = url.split_at(url.find('/').unwrap());
+    assert!(path.starts_with("/l/"));
+    (server, host.to_owned(), path.to_owned())
+}
+
+#[tokio::test]
+async fn serves_a_live_stream_once() {
+    let (server, host, path) = live_fixture(&[]).await;
+    let head = format!("HEAD {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
+    let r = send(server.local_addr(), &head).await;
+    assert_eq!(r.status, 200, "HEAD leaves the stream in place");
+    let r = send(server.local_addr(), &get(&path, &host, "")).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(dechunk(&r), b"fragments");
+    assert_eq!(r.header("content-type"), Some("video/mp4"));
+    assert_eq!(r.header("cache-control"), Some("no-store"));
+    assert!(r.header("accept-ranges").is_none());
+    let again = send(server.local_addr(), &get(&path, &host, "")).await;
+    assert_eq!(again.status, 410);
+}
+
+#[tokio::test]
+async fn live_streams_need_the_token_and_host() {
+    let (server, host, path) = live_fixture(&[]).await;
+    let no_token = path.split('?').next().unwrap();
+    let r = send(server.local_addr(), &get(no_token, &host, "")).await;
+    assert_eq!(r.status, 403);
+    let r = send(server.local_addr(), &get(&path, "localhost", "")).await;
+    assert_eq!(r.status, 403);
+    // Neither attempt took the stream.
+    let r = send(server.local_addr(), &get(&path, &host, "")).await;
+    assert_eq!(dechunk(&r), b"fragments");
+}
+
+#[tokio::test]
+async fn live_streams_allow_only_the_configured_origins() {
+    let (server, host, path) = live_fixture(&["http://tauri.localhost"]).await;
+    let r = send(
+        server.local_addr(),
+        &get(&path, &host, "Origin: https://example.com\r\n"),
+    )
+    .await;
+    assert!(r.header("access-control-allow-origin").is_none());
+    assert_eq!(r.header("vary"), Some("Origin"));
+
+    let (server, host, path) = live_fixture(&["http://tauri.localhost"]).await;
+    let r = send(
+        server.local_addr(),
+        &get(&path, &host, "Origin: http://tauri.localhost\r\n"),
+    )
+    .await;
+    assert_eq!(
+        r.header("access-control-allow-origin"),
+        Some("http://tauri.localhost")
+    );
+}
+
+#[tokio::test]
+async fn unpublished_live_streams_are_not_found() {
+    let (server, host, path) = live_fixture(&[]).await;
+    let id: StreamId = path[3..path.find('?').unwrap()].parse().unwrap();
+    server.unpublish(id);
+    let r = send(server.local_addr(), &get(&path, &host, "")).await;
+    assert_eq!(r.status, 404);
 }

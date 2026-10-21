@@ -3,4 +3,4 @@
 /**
  * Stable, machine-readable error categories. See `docs/ipc.md`.
  */
-export type ErrorKind = "invalid-argument" | "not-found" | "source-refused" | "unsafe-torrent" | "metadata-timeout" | "engine" | "search-unavailable" | "kill-switch" | "network-unavailable" | "cancelled" | "internal";
+export type ErrorKind = "invalid-argument" | "not-found" | "source-refused" | "unsafe-torrent" | "metadata-timeout" | "engine" | "search-unavailable" | "kill-switch" | "network-unavailable" | "cancelled" | "audio-conversion" | "internal";

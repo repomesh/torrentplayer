@@ -24,6 +24,7 @@ const TIMESTAMP_SCALE: u32 = 0x2A_D7B1;
 const DURATION: u32 = 0x4489;
 const TRACKS: u32 = 0x1654_AE6B;
 const TRACK_ENTRY: u32 = 0xAE;
+const TRACK_NUMBER: u32 = 0xD7;
 const TRACK_TYPE: u32 = 0x83;
 const FLAG_ENABLED: u32 = 0xB9;
 const FLAG_DEFAULT: u32 = 0x88;
@@ -257,12 +258,18 @@ fn float(data: &Sparse, field: Element) -> Result<Option<f64>, Stop> {
 
 fn tracks(data: &Sparse, el: Element, duration_ms: Option<u64>) -> Result<TrackReport, Stop> {
     let mut audio = Vec::new();
+    let mut audio_entries = 0;
     let mut subtitles = Vec::new();
     for entry in children(data, el)? {
         if entry.id != TRACK_ENTRY {
             continue;
         }
         let e = track_entry(data, entry)?;
+        // FFmpeg keeps every audio track with an audio codec ID, enabled or not.
+        let position = audio_entries;
+        if e.kind == Some(AUDIO) && e.codec.first() == Some(&b'A') {
+            audio_entries += 1;
+        }
         if !e.enabled {
             continue;
         }
@@ -270,6 +277,8 @@ fn tracks(data: &Sparse, el: Element, duration_ms: Option<u64>) -> Result<TrackR
             Some(AUDIO) if audio.len() < MAX_AUDIO_TRACKS => audio.push(AudioTrack {
                 codec: codec_from_id(&e.codec),
                 default: e.default,
+                id: e.number,
+                position,
             }),
             Some(SUBTITLE) if subtitles.len() < MAX_SUBTITLE_TRACKS => {
                 subtitles.push(SubtitleTrack {
@@ -293,6 +302,7 @@ fn tracks(data: &Sparse, el: Element, duration_ms: Option<u64>) -> Result<TrackR
 
 /// The fields of a `TrackEntry` that matter here.
 struct Entry {
+    number: Option<u64>,
     kind: Option<u64>,
     enabled: bool,
     default: bool,
@@ -307,6 +317,7 @@ struct Entry {
 fn track_entry(data: &Sparse, entry: Element) -> Result<Entry, Stop> {
     // Matroska's defaults: enabled and default 1, forced 0.
     let mut e = Entry {
+        number: None,
         kind: None,
         enabled: true,
         default: true,
@@ -319,6 +330,7 @@ fn track_entry(data: &Sparse, entry: Element) -> Result<Entry, Stop> {
     };
     for field in children(data, entry)? {
         match field.id {
+            TRACK_NUMBER => e.number = Some(uint(data, field)?),
             TRACK_TYPE => e.kind = Some(uint(data, field)?),
             FLAG_ENABLED => e.enabled = uint(data, field)? != 0,
             FLAG_DEFAULT => e.default = uint(data, field)? != 0,

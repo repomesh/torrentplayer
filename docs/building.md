@@ -67,7 +67,19 @@ Tauri needs a Common Controls v6 application manifest to start, including in tes
 
 Install the WebKitGTK packages from the README. CI uses Ubuntu 24.04.
 
-### libmpv and FFmpeg
+### FFmpeg (audio conversion)
+
+Optional for development. Without it, videos with Dolby or DTS audio play without sound and
+show a notice. `scripts/build-ffmpeg.sh <target triple> src-tauri/binaries` builds the
+playback-only LGPL FFmpeg (on Linux, macOS, or Windows with MinGW; it cross-compiles for Windows
+on Linux with mingw-w64). `npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json`
+then bundles it as CI does. Development builds also take its path from `LUMEN_FFMPEG`.
+
+To play a local file through the app, seed it with
+`cargo run -p lumen-bench --release -- seed <file> <file.torrent>`, which logs its address, and
+start a development build with `LUMEN_DEV_AUTOPLAY='<file.torrent>|0||<address>'`.
+
+### libmpv
 
 libmpv is required from Phase 2. Instructions will be added here.
 

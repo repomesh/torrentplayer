@@ -19,7 +19,7 @@ impl Default for Latest {
 impl Latest {
     /// Stops the running operation, if any, and returns a future that completes when the
     /// caller's operation is stopped in turn.
-    pub(crate) fn begin(&self) -> impl Future<Output = ()> + Send + 'static {
+    pub(crate) fn begin(&self) -> impl Future<Output = ()> + Send + 'static + use<> {
         self.cancel();
         let mut generation = self.0.subscribe();
         async move {

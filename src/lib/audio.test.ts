@@ -20,10 +20,22 @@ function probed(
   primary: AudioTrackDto | null,
   alternative: AudioTrackDto | null = null,
 ): StreamAudio {
-  return { probed: true, trackCount: primary === null ? 0 : 1, primary, alternative };
+  return {
+    probed: true,
+    trackCount: primary === null ? 0 : 1,
+    primary,
+    alternative,
+    convertible: false,
+  };
 }
 
-const unknown: StreamAudio = { probed: false, trackCount: 0, primary: null, alternative: null };
+const unknown: StreamAudio = {
+  probed: false,
+  trackCount: 0,
+  primary: null,
+  alternative: null,
+  convertible: false,
+};
 
 /** Feeds the watch samples 0.5 s apart; video bytes grow while `playing`. */
 function run(watch: AudioDecodeWatch, samples: number, audioBytes = 0, playing = true): void {

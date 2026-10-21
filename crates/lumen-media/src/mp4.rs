@@ -124,7 +124,10 @@ fn moov(data: &Sparse, moov: Bx) -> Result<TrackReport, Stop> {
             duration = movie_duration(data, b)?;
         } else if &b.kind == b"trak" {
             match track(data, b)? {
-                Some(Track::Audio(t)) if audio.len() < MAX_AUDIO_TRACKS => audio.push(t),
+                Some(Track::Audio(mut t)) if audio.len() < MAX_AUDIO_TRACKS => {
+                    t.position = u32::try_from(audio.len()).unwrap_or(u32::MAX);
+                    audio.push(t);
+                }
                 Some(Track::Subtitle(t)) if subtitles.len() < MAX_SUBTITLE_TRACKS => {
                     subtitles.push(t);
                 }
@@ -199,11 +202,21 @@ fn track(data: &Sparse, trak: Bx) -> Result<Option<Track>, Stop> {
     if !matches!(&handler, b"soun" | b"sbtl" | b"text" | b"subt" | b"clcp") {
         return Ok(None);
     }
-    // FullBox flags: bit 0 marks the track enabled.
-    let default = match child(data, trak, *b"tkhd")? {
-        Some(tkhd) if tkhd.body_len() >= 4 => data.u8_at(tkhd.body + 3)? & 1 != 0,
+    // FullBox flags: bit 0 marks the track enabled. `track_ID` follows the creation and
+    // modification times, which are 32-bit in version 0 and 64-bit in version 1.
+    let (default, id) = match child(data, trak, *b"tkhd")? {
+        Some(tkhd) if tkhd.body_len() >= 4 => {
+            let enabled = data.u8_at(tkhd.body + 3)? & 1 != 0;
+            let id_at = if data.u8_at(tkhd.body)? == 1 { 20 } else { 12 };
+            let id = if tkhd.body_len() >= id_at + 4 {
+                Some(u64::from(data.u32_at(tkhd.body + id_at)?))
+            } else {
+                None
+            };
+            (enabled, id)
+        }
         Some(_) => return Err(Stop::Invalid("tkhd box too short")),
-        None => true,
+        None => (true, None),
     };
     let entry = sample_entry(data, mdia)?;
     if &handler == b"soun" {
@@ -211,7 +224,12 @@ fn track(data: &Sparse, trak: Bx) -> Result<Option<Track>, Stop> {
             Some(entry) => audio_codec(data, entry)?,
             None => AudioCodec::Other,
         };
-        return Ok(Some(Track::Audio(AudioTrack { codec, default })));
+        return Ok(Some(Track::Audio(AudioTrack {
+            codec,
+            default,
+            id,
+            position: 0,
+        })));
     }
     let codec = match entry.map(|e| e.kind) {
         Some(kind) if &kind == b"tx3g" || &kind == b"text" => SubtitleCodec::Text,

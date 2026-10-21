@@ -61,6 +61,22 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: rustup target add "$TARGET"
 
+      # The playback-only FFmpeg that converts Dolby and DTS audio (docs/adr/0007), built from
+      # the checksummed source and bundled through tauri.sidecar.conf.json.
+      - name: Build the FFmpeg sidecar
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            # The runner image's MinGW. FFmpeg's configure needs a POSIX temporary directory,
+            # and GCC a Windows one.
+            export PATH="/c/mingw64/bin:$PATH" MAKE=mingw32-make
+            TMPDIR=$(cygpath -u "$RUNNER_TEMP") TMP=$(cygpath -m "$RUNNER_TEMP") TEMP=$(cygpath -m "$RUNNER_TEMP")
+            export TMPDIR TMP TEMP
+          fi
+          bash scripts/build-ffmpeg.sh "$TARGET" src-tauri/binaries
+
       - name: Import Windows signing certificate
         if: runner.os == 'Windows'
         shell: pwsh
@@ -120,9 +136,10 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           args: >-
             --target ${{ matrix.target }}
+            --config src-tauri/tauri.sidecar.conf.json
             ${{ runner.os == 'Windows' && hashFiles('src-tauri/tauri.signing.conf.json') != '' && '--config src-tauri/tauri.signing.conf.json' || '' }}
 
-      # TODO(phase 5): bundle LGPL builds of libmpv and FFmpeg for each platform
+      # TODO(phase 5): bundle an LGPL build of libmpv for each platform
       # (see docs/adr/0001-project-license.md).
 
       - name: Collect installers
@@ -183,6 +200,10 @@ jobs:
           fi
           cp "$sbom" release-assets/torrentstream.cdx.json
 
+      # The FFmpeg sidecar is LGPL: its exact source is published with every release.
+      - name: Add the FFmpeg source
+        run: bash scripts/build-ffmpeg.sh source release-assets
+
       - name: Generate checksums
         working-directory: release-assets
         run: sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt
@@ -196,4 +217,5 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-        run: gh release upload "$TAG" release-assets/SHA256SUMS.txt release-assets/torrentstream.cdx.json --clobber
+        run: |
+          gh release upload "$TAG" release-assets/SHA256SUMS.txt release-assets/torrentstream.cdx.json             release-assets/ffmpeg-*.tar.xz --clobber

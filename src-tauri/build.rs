@@ -16,6 +16,7 @@ fn main() {
             "record_player_metric",
             "stream_stats",
             "stream_audio",
+            "convert_audio",
             "stream_subtitles",
             "load_subtitles",
             "parse_subtitles",
