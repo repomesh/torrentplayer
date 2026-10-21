@@ -53,7 +53,12 @@ jobs:
             gh release create "$TAG" --draft --verify-tag "${prerelease[@]}" \
               --title "TorrentPlayer $TAG" \
               --notes "See CHANGELOG.md for what changed. Verify downloads as described in docs/release.md."
-            found=$(existing)
+            # The release list can lag a new draft by a few seconds; wait for it.
+            for _ in 1 2 3 4 5 6; do
+              found=$(existing)
+              [ -n "$found" ] && break
+              sleep 5
+            done
           fi
           case "$found" in
             *" true") echo "Draft release $found for $TAG" ;;
