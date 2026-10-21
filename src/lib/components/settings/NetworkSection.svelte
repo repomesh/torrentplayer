@@ -59,7 +59,7 @@
     {
       value: 'wireGuard',
       label: 'WireGuard',
-      help: 'Import a WireGuard .conf file from your VPN provider and connect inside TorrentStream. No separate VPN app or administrator rights are needed.',
+      help: 'Import a WireGuard .conf file from your VPN provider and connect inside TorrentPlayer. No separate VPN app or administrator rights are needed.',
     },
   ];
 
@@ -466,7 +466,7 @@
       id="network-proxy-dns"
       label="Resolve names through the proxy"
       path="network.socks5.proxyDns"
-      help="On: the proxy looks up host names, so your DNS server never sees them. Off: TorrentStream looks them up and sends only addresses."
+      help="On: the proxy looks up host names, so your DNS server never sees them. Off: TorrentPlayer looks them up and sends only addresses."
     >
       <Toggle
         id="network-proxy-dns"
@@ -598,7 +598,7 @@
   <section class="card" aria-labelledby="wireguard-title">
     <h3 id="wireguard-title">WireGuard configuration</h3>
     <p class="intro">
-      Import a <code>.conf</code> file from your VPN provider. TorrentStream connects through its
+      Import a <code>.conf</code> file from your VPN provider. TorrentPlayer connects through its
       own WireGuard tunnel, carrying search, trackers, and peer connections. Your keys stay in the
       system credential store. Traffic stays paused until the server authenticates. The
       configuration must include a <code>DNS</code> server for search and other host names.

@@ -1,10 +1,10 @@
 # Governance
 
-TorrentStream is a community project. This document describes how decisions are made.
+TorrentPlayer is a community project. This document describes how decisions are made.
 
 ## Roles
 
-- **Users** use TorrentStream and give feedback through issues and the
+- **Users** use TorrentPlayer and give feedback through issues and the
   [Discord server](https://discord.gg/fVkWSZAafp).
 - **Contributors** submit issues, documentation, code, reviews, or designs. Anyone can be a
   contributor.

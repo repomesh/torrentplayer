@@ -1,11 +1,11 @@
 # Introduction
 
-This guide is for people who work on TorrentStream: how it is designed, why, and how to build, test,
-benchmark, and release it. If you only want to use TorrentStream, start with the
-[README](https://github.com/torrent-stream/torrentstream#readme). Questions about anything here
-are welcome on the [TorrentStream Discord server](https://discord.gg/fVkWSZAafp).
+This guide is for people who work on TorrentPlayer: how it is designed, why, and how to build, test,
+benchmark, and release it. If you only want to use TorrentPlayer, start with the
+[README](https://github.com/torrentplayer/torrentplayer#readme). Questions about anything here
+are welcome on the [TorrentPlayer Discord server](https://discord.gg/fVkWSZAafp).
 
-TorrentStream streams any torrent, video or audio, straight from BitTorrent ("stream at the speed
+TorrentPlayer streams any torrent, video or audio, straight from BitTorrent ("stream at the speed
 of the swarm"). Its top priority is that playback starts fast, seeking feels near-instant, and
 buffering stays ahead of the playhead. Most design
 decisions in this guide follow from that goal, and from treating every byte that arrives from the

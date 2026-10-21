@@ -5,7 +5,7 @@
  */
 export type ClearCacheOutcome = { 
 /**
- * Bytes removed, including TorrentStream's small completion markers.
+ * Bytes removed, including TorrentPlayer's small completion markers.
  */
 bytesFreed: number, 
 /**

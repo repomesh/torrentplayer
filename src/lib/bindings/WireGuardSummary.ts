@@ -31,6 +31,6 @@ peers: Array<WireGuardPeerSummary>,
  */
 routesAllTraffic: boolean, 
 /**
- * Lines that were accepted but ignored (for example script hooks, which TorrentStream never runs).
+ * Lines that were accepted but ignored (for example script hooks, which TorrentPlayer never runs).
  */
 warnings: Array<string>, };

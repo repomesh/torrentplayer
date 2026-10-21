@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/app-icon.png" alt="TorrentStream logo: a warm ring of light" width="128" height="128">
+  <img src="assets/app-icon.png" alt="TorrentPlayer logo: a warm ring of light" width="128" height="128">
 </p>
 
-<h1 align="center">TorrentStream</h1>
+<h1 align="center">TorrentPlayer</h1>
 
 <p align="center">
   <strong>Stream at the speed of the swarm.</strong><br>
@@ -11,19 +11,19 @@
 </p>
 
 <p align="center">
-  <a href="https://torrentstream.io">torrentstream.io</a> ·
-  <a href="#why-torrentstream">Why TorrentStream</a> ·
+  <a href="https://torrentplayer.io">torrentplayer.io</a> ·
+  <a href="#why-torrentplayer">Why TorrentPlayer</a> ·
   <a href="#how-it-compares">Compare</a> ·
   <a href="#features">Features</a> ·
   <a href="#performance">Performance</a> ·
   <a href="#privacy">Privacy</a> ·
-  <a href="#get-torrentstream">Get it</a> ·
+  <a href="#get-torrentplayer">Get it</a> ·
   <a href="https://discord.gg/fVkWSZAafp">Discord</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/torrent-stream/torrentstream/actions/workflows/ci.yml"><img src="https://github.com/torrent-stream/torrentstream/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/torrent-stream/torrentstream/actions/workflows/build.yml"><img src="https://github.com/torrent-stream/torrentstream/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
+  <a href="https://github.com/torrentplayer/torrentplayer/actions/workflows/ci.yml"><img src="https://github.com/torrentplayer/torrentplayer/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/torrentplayer/torrentplayer/actions/workflows/build.yml"><img src="https://github.com/torrentplayer/torrentplayer/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational" alt="Platforms: Windows, macOS, Linux">
   <img src="https://img.shields.io/badge/telemetry-none-brightgreen" alt="Telemetry: none">
@@ -31,21 +31,21 @@
 </p>
 
 <p align="center">
-  <a href="assets/demo/torrentstream-demo.mp4"><img src="assets/demo/torrentstream-demo.gif" alt="Demo: searching for Sintel, pressing Play on the best pick, and clicking around the seek bar; playback starts in half a second and each skip plays again within about a second, while the queue downloads in the background" width="720"></a>
+  <a href="assets/demo/torrentplayer-demo.mp4"><img src="assets/demo/torrentplayer-demo.gif" alt="Demo: searching for Sintel, pressing Play on the best pick, and clicking around the seek bar; playback starts in half a second and each skip plays again within about a second, while the queue downloads in the background" width="720"></a>
   <br>
-  <sub>Search, play, skip. Recorded live in real time; nothing is sped up. <a href="assets/demo/torrentstream-demo.mp4">Full demo with sound (MP4, 33 s)</a>.<br>
+  <sub>Search, play, skip. Recorded live in real time; nothing is sped up. <a href="assets/demo/torrentplayer-demo.mp4">Full demo with sound (MP4, 33 s)</a>.<br>
   <em>Sintel</em> and <em>Tears of Steel</em> © Blender Foundation, CC BY 3.0.</sub>
 </p>
 
 <p align="center">
-  <img src="assets/screenshots/queue-and-player.png" alt="TorrentStream playing a film while the rest of the queue downloads in the background, each row showing its speed, peers, progress, and time left" width="900">
+  <img src="assets/screenshots/queue-and-player.png" alt="TorrentPlayer playing a film while the rest of the queue downloads in the background, each row showing its speed, peers, progress, and time left" width="900">
   <br>
   <sub><em>Tears of Steel</em>, <em>Sintel</em>, and <em>Big Buck Bunny</em> © Blender Foundation, CC BY 3.0.</sub>
 </p>
 
 ---
 
-TorrentStream is a free, open-source desktop app that **plays any torrent straight from
+TorrentPlayer is a free, open-source desktop app that **plays any torrent straight from
 BitTorrent**, video or audio, the way a streaming service would. Press play and it starts in
 seconds; drag the seek bar to minute 47 and it is playing minute 47 a moment later, long before
 the download gets there. No separate torrent client, no waiting for the file, no server in
@@ -55,17 +55,17 @@ Use it for whatever you stream from torrents: films and series, music albums, po
 audiobooks, lectures, and open media. You are responsible for having the right to download and
 share what you play.
 
-## Why TorrentStream
+## Why TorrentPlayer
 
 - **Stream it. Skip it. Instantly.** Most torrent players download from the start and make you
-  wait for the part you want. TorrentStream's own streaming engine fetches **the exact moment you
+  wait for the part you want. TorrentPlayer's own streaming engine fetches **the exact moment you
   jump to, first**, so skipping ahead resumes in under a second: 0.3 s on a fast link and 0.7 s
   (median) on a public swarm in our [measurements](#performance). Skip the intro, jump to the
   lecture's second half, scrub back and forth; it keeps up.
 - **Full speed, limited only by the swarm.** Video comes directly from the people sharing it.
   How fast it arrives depends on the torrent's seeders and peers and on your own connection,
   never on a provider's plan, a server's capacity, or a "free tier".
-- **No servers, no dependencies.** There is no TorrentStream streaming server, cloud cache, or
+- **No servers, no dependencies.** There is no TorrentPlayer streaming server, cloud cache, or
   relay, and no account to sign in to. Your computer talks to the swarm directly, so nothing
   in between can throttle it, fill up, or shut it off. (The built-in search asks a public
   torrent index; it is optional, and pasting a magnet link or opening a `.torrent` file needs
@@ -80,7 +80,7 @@ share what you play.
 
 ## How it compares
 
-|                                        | **TorrentStream**                   | Stremio (torrent add-ons)                | WebTorrent Desktop   | qBittorrent + VLC                   | Debrid / cloud services           | webtor.io (browser)           |
+|                                        | **TorrentPlayer**                   | Stremio (torrent add-ons)                | WebTorrent Desktop   | qBittorrent + VLC                   | Debrid / cloud services           | webtor.io (browser)           |
 | -------------------------------------- | ----------------------------------- | ---------------------------------------- | -------------------- | ----------------------------------- | --------------------------------- | ----------------------------- |
 | Stream and skip anywhere               | ✅ the spot you skip to comes first | ✅                                       | ✅                   | ❌ plays in order only              | Only after the service fetches it | ✅ via its servers            |
 | Video straight from peers, no server   | ✅                                  | Via a local streaming server             | ✅                   | ✅                                  | ❌ provider's servers             | ❌ webtor.io's servers        |
@@ -100,7 +100,7 @@ sources, details, and where other tools are the better fit.
 
 ### Streaming built for skipping
 
-- **TorrentStream's own engine** (`lumen-swarm`), written for playback rather than bulk
+- **TorrentPlayer's own engine** (`torrentplayer-swarm`), written for playback rather than bulk
   downloading. It requests the playhead first, then the file's index and a read-ahead window
   sized from the video's bitrate. When you skip, it cancels requests that are no longer
   urgent, sends the pieces at the new position to the fastest peers, and duplicates the most
@@ -117,7 +117,7 @@ sources, details, and where other tools are the better fit.
 
 - **Everything you queue downloads in the background** while you watch, so the next video is
   ready before you get to it. Set a maximum in Settings if you prefer fewer at once.
-- **What you are watching always comes first.** Every second TorrentStream measures your
+- **What you are watching always comes first.** Every second TorrentPlayer measures your
   connection and playback's needs. While the buffer is short, the rest of the queue gets only
   what playback leaves; if playback runs low, the rest pauses briefly to let it catch up, and
   keeps going if the video's own swarm is the bottleneck. Once you are comfortably ahead,
@@ -176,7 +176,7 @@ sources, details, and where other tools are the better fit.
 
 ## Performance
 
-Measured with the bundled benchmark tool, `lumen-bench`, which acts like a real player through
+Measured with the bundled benchmark tool, `torrentplayer-bench`, which acts like a real player through
 the app's stream server. Every run starts from an empty cache, and every seek is measured from
 a fresh session, so nothing is already downloaded. It reports **data-ready** time: until the
 player has the bytes it needs.
@@ -188,19 +188,19 @@ player has the bytes it needs.
 | Public swarm (Ubuntu 24.04 ISO, ~600 peers), capped at 10 MiB/s | 1.2–2.8 s              | **0.70 s** (1.47 s) |
 
 Public swarms vary between runs; that row comes from three runs per configuration. Since 0.2.0
-magnet links stream through TorrentStream's engine too (librqbit only fetches their metadata);
+magnet links stream through TorrentPlayer's engine too (librqbit only fetches their metadata);
 in 0.1.0 they used the embedded librqbit engine, which took 3.7 s to start and 2.7 s per skip
 on the same swarm. See [docs/performance.md](docs/performance.md) for the methodology, and run
 it yourself:
 
 ```sh
-cargo run -p lumen-bench --release -- local --upload-mibps 8 --runs 5
-cargo run -p lumen-bench --release -- torrent path/to/file.torrent --runs 3 --download-mibps 10
+cargo run -p torrentplayer-bench --release -- local --upload-mibps 8 --runs 5
+cargo run -p torrentplayer-bench --release -- torrent path/to/file.torrent --runs 3 --download-mibps 10
 ```
 
 ## Privacy
 
-TorrentStream has **no telemetry, analytics, crash reporting, or accounts**, and it does not
+TorrentPlayer has **no telemetry, analytics, crash reporting, or accounts**, and it does not
 phone home. Its only network traffic is:
 
 - **BitTorrent traffic** for what you play or queue, directly with that torrent's peers (and its
@@ -219,17 +219,17 @@ the kill switch is engaged. See the [threat model](docs/threat-model.md) and
 [network modes](docs/network.md). Your queue, settings, and watch progress stay on this computer;
 the playback library is a user-only local SQLite database and is never sent anywhere.
 
-## Get TorrentStream
+## Get TorrentPlayer
 
-TorrentStream is an early preview; there are no signed releases yet. You can:
+TorrentPlayer is an early preview; there are no signed releases yet. You can:
 
 - **Download a test build.** Every push to `main` builds unsigned installers for Windows, macOS,
-  and Linux: open the latest [Build workflow run](https://github.com/torrent-stream/torrentstream/actions/workflows/build.yml)
+  and Linux: open the latest [Build workflow run](https://github.com/torrentplayer/torrentplayer/actions/workflows/build.yml)
   and download the `installers-<platform>` artifact. Unsigned builds trigger SmartScreen on
   Windows and Gatekeeper on macOS.
 - **Build from source** (below).
 
-Signed installers will be published on the [Releases](https://github.com/torrent-stream/torrentstream/releases)
+Signed installers will be published on the [Releases](https://github.com/torrentplayer/torrentplayer/releases)
 page with SHA-256 checksums, an SBOM, and build provenance attestations; see
 [docs/release.md](docs/release.md) for how to verify them.
 
@@ -264,8 +264,8 @@ You need:
 Then:
 
 ```sh
-git clone https://github.com/torrent-stream/torrentstream.git
-cd torrentstream
+git clone https://github.com/torrentplayer/torrentplayer.git
+cd torrentplayer
 npm ci
 npm run tauri dev      # run the app with hot reload
 npm run tauri build    # build optimized installers for your platform
@@ -279,7 +279,7 @@ every CI check locally.
 - [Introduction](docs/introduction.md) and [architecture](docs/architecture.md): how torrent data
   becomes video on screen
 - [Streaming engine](docs/streaming.md) and [player](docs/player.md)
-- [How TorrentStream compares](docs/comparison.md), with sources
+- [How TorrentPlayer compares](docs/comparison.md), with sources
 - [Network modes, VPN, and kill switch](docs/network.md)
 - [Configuration](docs/configuration.md): settings, folders, and secrets
 - [Performance and benchmarking](docs/performance.md)
@@ -305,7 +305,7 @@ bandwidth limits. Next:
 
 ## FAQ
 
-**Is it legal?** BitTorrent is a distribution protocol, and TorrentStream is built for openly
+**Is it legal?** BitTorrent is a distribution protocol, and TorrentPlayer is built for openly
 licensed and public-domain material. Search covers general public torrent indexers whose results
 are **not** license-checked, so you are responsible for having the right to download and share
 what you play.
@@ -314,7 +314,7 @@ what you play.
 peers can only be as fast as they are; the queue shows each video's peers and speed so you can
 pick one that plays smoothly, or switch the queue to "Fastest first".
 
-**Does TorrentStream upload?** Yes. Both torrent engines share verified pieces while a torrent is
+**Does TorrentPlayer upload?** Yes. Both torrent engines share verified pieces while a torrent is
 active, under the global upload limit. Settings can keep sharing after playback until either a
 ratio or time target is reached.
 
@@ -322,16 +322,16 @@ ratio or time target is reached.
 the tunnel is back; nothing falls back to a direct connection. See
 [network modes](docs/network.md).
 
-**Where are videos stored?** In `TorrentStream` inside your Downloads folder, unless you choose
+**Where are videos stored?** In `TorrentPlayer` inside your Downloads folder, unless you choose
 another folder in Settings → Storage, which shows its size and limit and safely clears finished,
 unqueued downloads (see
 [configuration](docs/configuration.md)).
 
 ## Community
 
-Questions, ideas, or just want to talk about TorrentStream? Join the
-[TorrentStream Discord server](https://discord.gg/fVkWSZAafp). Bugs and feature requests are tracked in
-[GitHub issues](https://github.com/torrent-stream/torrentstream/issues), so they don't get lost
+Questions, ideas, or just want to talk about TorrentPlayer? Join the
+[TorrentPlayer Discord server](https://discord.gg/fVkWSZAafp). Bugs and feature requests are tracked in
+[GitHub issues](https://github.com/torrentplayer/torrentplayer/issues), so they don't get lost
 in chat.
 
 ## Contributing
@@ -345,16 +345,16 @@ To report a security vulnerability, **do not open a public issue**; follow
 
 ## License
 
-TorrentStream is licensed under either of
+TorrentPlayer is licensed under either of
 
 - Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <https://www.apache.org/licenses/LICENSE-2.0>)
 - MIT License ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
 
 at your option. Unless you explicitly state otherwise, any contribution intentionally submitted
-for inclusion in TorrentStream by you, as defined in the Apache-2.0 license, shall be dual
+for inclusion in TorrentPlayer by you, as defined in the Apache-2.0 license, shall be dual
 licensed as above, without any additional terms or conditions.
 
-TorrentStream builds on open-source software under its own licenses, including
+TorrentPlayer builds on open-source software under its own licenses, including
 [Tauri](https://tauri.app), [librqbit](https://github.com/ikatson/rqbit),
 [boringtun](https://github.com/cloudflare/boringtun), and [Svelte](https://svelte.dev); see
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). Content you watch belongs to its creators.

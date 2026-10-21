@@ -19,7 +19,7 @@ distribution.
 4. Open a PR titled `chore(release): vx.y.z`, get it reviewed, and merge it.
 5. Tag the merge commit and push the tag:
    ```sh
-   git tag -s vx.y.z -m "TorrentStream vx.y.z"
+   git tag -s vx.y.z -m "TorrentPlayer vx.y.z"
    git push origin vx.y.z
    ```
 6. The workflow builds and signs installers for Windows, macOS, and Linux, then creates a
@@ -48,5 +48,5 @@ be published as releases.
 sha256sum --check --ignore-missing SHA256SUMS.txt
 
 # Check that the file was built by this repository's release workflow
-gh attestation verify TorrentStream_x.y.z_x64-setup.exe --repo torrent-stream/torrentstream
+gh attestation verify TorrentPlayer_x.y.z_x64-setup.exe --repo torrentplayer/torrentplayer
 ```

@@ -27,7 +27,7 @@ ignore = [
 ]
 
 [licenses]
-# Every license here must be compatible with distributing TorrentStream under MIT OR Apache-2.0.
+# Every license here must be compatible with distributing TorrentPlayer under MIT OR Apache-2.0.
 # Only licenses actually used are listed; adding one needs maintainer review (see CONTRIBUTING.md).
 allow = [
   "MIT",

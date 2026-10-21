@@ -964,7 +964,7 @@ impl core::fmt::Debug for ResponseOrError {
     }
 }
 
-/// Added for Lumen. Whether a receive error concerns one datagram rather than the socket.
+/// Added for TorrentPlayer. Whether a receive error concerns one datagram rather than the socket.
 /// Windows reports an ICMP port-unreachable reply to an earlier send as a connection reset
 /// (WSAECONNRESET), and a datagram larger than the buffer as WSAEMSGSIZE (10040); any DHT
 /// node can cause either, and neither means the socket stopped working.
@@ -1228,7 +1228,7 @@ impl DhtWorker {
         let reader = async {
             let mut buf = vec![0u8; 16384];
             loop {
-                // Modified for Lumen: errors about a single datagram no longer end the node.
+                // Modified for TorrentPlayer: errors about a single datagram no longer end the node.
                 let (size, addr) = match socket.recv_from(&mut buf).await {
                     Ok(received) => received,
                     Err(e) if datagram_error(&e) => {
@@ -1401,7 +1401,7 @@ impl DhtState {
                 {
                     let state = state.clone();
                     async move {
-                        // Added for Lumen: a failed scoped transport must not leave a cached,
+                        // Added for TorrentPlayer: a failed scoped transport must not leave a cached,
                         // apparently live node. Notify callers when the worker exits too.
                         let _finished = state.cancellation_token.clone().drop_guard();
                         let worker = DhtWorker { socket, dht: state };

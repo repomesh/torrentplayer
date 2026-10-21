@@ -23,10 +23,14 @@
   let ip = $state<PublicIp | null>(null);
 
   /** Remembered per computer: whether the public address is shown or masked. */
-  const REVEAL_KEY = 'torrentstream.revealIp';
+  const REVEAL_KEY = 'torrentplayer.revealIp';
+  /** The key before the rename to TorrentPlayer. */
+  const LEGACY_REVEAL_KEY = 'torrentstream.revealIp';
   function readReveal(): boolean {
     try {
-      return localStorage.getItem(REVEAL_KEY) === 'true';
+      return (
+        (localStorage.getItem(REVEAL_KEY) ?? localStorage.getItem(LEGACY_REVEAL_KEY)) === 'true'
+      );
     } catch {
       return false;
     }

@@ -130,7 +130,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: TorrentStream ${{ github.ref_name }}
+          releaseName: TorrentPlayer ${{ github.ref_name }}
           releaseBody: See CHANGELOG.md for what changed. Verify downloads as described in docs/release.md.
           releaseDraft: true
           prerelease: ${{ contains(github.ref_name, '-') }}
@@ -190,15 +190,15 @@ jobs:
       - name: Generate SBOM
         run: |
           cargo cyclonedx --manifest-path src-tauri/Cargo.toml --format json --spec-version 1.5 \
-            --override-filename torrentstream
+            --override-filename torrentplayer
           # cargo-cyclonedx versions differ in the extension they add (.json or .cdx.json).
-          sbom=$(find src-tauri -maxdepth 1 -name 'torrentstream*.json' | head -n 1)
+          sbom=$(find src-tauri -maxdepth 1 -name 'torrentplayer*.json' | head -n 1)
           if [ -z "$sbom" ]; then
-            echo "::error::cargo cyclonedx wrote no torrentstream*.json in src-tauri"
+            echo "::error::cargo cyclonedx wrote no torrentplayer*.json in src-tauri"
             ls -la src-tauri
             exit 1
           fi
-          cp "$sbom" release-assets/torrentstream.cdx.json
+          cp "$sbom" release-assets/torrentplayer.cdx.json
 
       # The FFmpeg sidecar is LGPL: its exact source is published with every release.
       - name: Add the FFmpeg source
@@ -218,4 +218,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release upload "$TAG" release-assets/SHA256SUMS.txt release-assets/torrentstream.cdx.json             release-assets/ffmpeg-*.tar.xz --clobber
+          gh release upload "$TAG" release-assets/SHA256SUMS.txt release-assets/torrentplayer.cdx.json             release-assets/ffmpeg-*.tar.xz --clobber

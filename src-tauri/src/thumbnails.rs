@@ -18,11 +18,11 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::Engine as _;
-use lumen_stream::StreamId;
-use lumen_torrent::Thumbnail;
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::Channel;
+use torrentplayer_stream::StreamId;
+use torrentplayer_torrent::Thumbnail;
 use ts_rs::TS;
 
 use crate::core::AppState;
@@ -178,7 +178,7 @@ fn data_url(thumbnail: &Thumbnail) -> String {
 
 #[cfg(test)]
 mod tests {
-    use lumen_torrent::thumbnail::ImageType;
+    use torrentplayer_torrent::thumbnail::ImageType;
 
     use super::*;
 

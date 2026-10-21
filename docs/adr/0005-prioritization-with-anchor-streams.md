@@ -1,6 +1,6 @@
 # 0005: Prioritization on librqbit with anchor streams
 
-- **Status:** Accepted for the librqbit engine; superseded for TorrentStream's own engine by
+- **Status:** Accepted for the librqbit engine; superseded for TorrentPlayer's own engine by
   [0006](0006-streaming-engine.md)
 - **Date:** 2026-10-17
 
@@ -14,8 +14,8 @@ after the stream's position, interleaved across all open streams.
 
 ## Decision
 
-`lumen-prioritize` computes a pure, testable _plan_: an ordered list of anchors, each on the
-first missing byte of a region that matters. `lumen-torrent`'s `PlaybackSession` carries out the
+`torrentplayer-prioritize` computes a pure, testable _plan_: an ordered list of anchors, each on the
+first missing byte of a region that matters. `torrentplayer-torrent`'s `PlaybackSession` carries out the
 plan by parking one librqbit stream per anchor (never read, only positioned) and moving or
 reopening them as the plan changes, at most 4 per playback because streams share librqbit's
 pool with disk I/O.

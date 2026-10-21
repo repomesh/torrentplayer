@@ -1,10 +1,10 @@
 # Default reviewers for everything. Replace with the real maintainer team or handles.
-* @torrent-stream
+* @torrentplayer
 
 # Sensitive areas: GOVERNANCE.md requires two maintainer approvals for changes here.
-/crates/lumen-player/ @torrent-stream
-/crates/lumen-net/    @torrent-stream
-/.github/workflows/   @torrent-stream
-/deny.toml            @torrent-stream
-/src-tauri/capabilities/ @torrent-stream
-/src-tauri/tauri.conf.json @torrent-stream
+/crates/torrentplayer-player/ @torrentplayer
+/crates/torrentplayer-net/    @torrentplayer
+/.github/workflows/   @torrentplayer
+/deny.toml            @torrentplayer
+/src-tauri/capabilities/ @torrentplayer
+/src-tauri/tauri.conf.json @torrentplayer

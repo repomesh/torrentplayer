@@ -13,7 +13,7 @@ beforeEach(() => {
 
 describe('getAppInfo', () => {
   it('invokes the app_info command with no arguments', async () => {
-    const info = { name: 'TorrentStream', version: '0.1.0', license: 'MIT OR Apache-2.0' };
+    const info = { name: 'TorrentPlayer', version: '0.1.0', license: 'MIT OR Apache-2.0' };
     invoke.mockResolvedValue(info);
 
     await expect(ipc.getAppInfo()).resolves.toEqual(info);

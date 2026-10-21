@@ -263,7 +263,7 @@ export function followPublicIp(onIp: (ip: PublicIp | null) => void): () => void 
 /** Guidance for local virtual switches and mesh VPNs that do not imply internet routing. */
 export function interfaceAdvice(name: string): string | null {
   if (/^vEthernet \((?:Default Switch\)|WSL(?:[ (]|\)))/i.test(name)) {
-    return 'This is a local Hyper-V virtual network, not a VPN tunnel. It normally has no internet route for TorrentStream. Select your VPN app’s tunnel adapter instead.';
+    return 'This is a local Hyper-V virtual network, not a VPN tunnel. It normally has no internet route for TorrentPlayer. Select your VPN app’s tunnel adapter instead.';
   }
   if (/tailscale/i.test(name)) {
     return 'For internet access through Tailscale, select an exit node in Tailscale first. A normal mesh connection only reaches your Tailscale devices.';

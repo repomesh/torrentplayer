@@ -3,7 +3,7 @@
 //! Settings commands: read and update `settings.json`, set or clear secrets in the OS credential
 //! store, and report or clear the download cache.
 //!
-//! Every update is validated by `lumen_settings::apply_patch`, saved atomically, and announced
+//! Every update is validated by `torrentplayer_settings::apply_patch`, saved atomically, and announced
 //! with a [`SETTINGS_CHANGED`] event (to the webview) and a [`watch`] channel (to Rust
 //! subsystems). Secrets can be set and cleared here but are never sent back to the webview.
 
@@ -14,16 +14,16 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use lumen_settings::{
-    EngineSetting, KEYRING_SERVICE, KeyringStore, LogLevel, PatchError, SecretError, SecretKey,
-    SecretStatus, SecretStore, SecretString, Settings, SettingsStore, WireGuardSettings,
-    Zeroize as _, apply_patch,
-};
-use lumen_torrent::{ENGINE_ENV_VAR, EngineChoice, StreamEngineConfig};
 use serde::Serialize;
 use serde_json::Value;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::watch;
+use torrentplayer_settings::{
+    EngineSetting, KEYRING_SERVICE, KeyringStore, LEGACY_KEYRING_SERVICE, LogLevel, PatchError,
+    SecretError, SecretKey, SecretStatus, SecretStore, SecretString, Settings, SettingsStore,
+    WireGuardSettings, Zeroize as _, apply_patch,
+};
+use torrentplayer_torrent::{ENGINE_ENV_VAR, EngineChoice, StreamEngineConfig};
 use ts_rs::TS;
 
 use crate::core::AppState;
@@ -63,7 +63,8 @@ impl SettingsState {
         default_download_dir: PathBuf,
         log: Option<LogApplier>,
     ) -> Self {
-        let secrets = Arc::new(KeyringStore::new(KEYRING_SERVICE));
+        let secrets =
+            Arc::new(KeyringStore::new(KEYRING_SERVICE).with_legacy(LEGACY_KEYRING_SERVICE));
         Self::new(
             SettingsStore::new(config_dir),
             secrets,
@@ -113,7 +114,7 @@ impl SettingsState {
     }
 
     /// The torrent engine configuration for this run: the download folder and engine choice
-    /// from the settings, unless `LUMEN_ENGINE` overrides the engine.
+    /// from the settings, unless `TORRENTPLAYER_ENGINE` overrides the engine.
     pub(crate) fn engine_config(&self) -> StreamEngineConfig {
         let mut config = StreamEngineConfig::new(self.download_dir(&self.startup));
         if engine_override().is_none() {
@@ -130,7 +131,7 @@ impl SettingsState {
 
     /// Applies the storage policy before the engine starts. A clear marker from an older version
     /// is treated as "clear finished downloads" and then retired; queued hashes stay protected.
-    pub(crate) fn run_startup_maintenance(&self, queue: &lumen_library::Queue) {
+    pub(crate) fn run_startup_maintenance(&self, queue: &torrentplayer_library::Queue) {
         let marker = self.store.dir().join(CLEAR_PENDING);
         let legacy_clear = fs::read_to_string(&marker).ok().is_some_and(|value| {
             let target = PathBuf::from(value.trim());
@@ -310,7 +311,7 @@ impl SettingsState {
 
 /// The download and upload limits of `bandwidth`, in bytes per second (0 KiB/s: unlimited).
 pub(crate) fn rate_limits(
-    bandwidth: &lumen_settings::BandwidthSettings,
+    bandwidth: &torrentplayer_settings::BandwidthSettings,
 ) -> (Option<std::num::NonZeroU32>, Option<std::num::NonZeroU32>) {
     let bps = |kib: u32| std::num::NonZeroU32::new(kib.saturating_mul(1024));
     (
@@ -319,7 +320,7 @@ pub(crate) fn rate_limits(
     )
 }
 
-/// `LUMEN_ENGINE`, if set; it overrides the engine setting (for development).
+/// `TORRENTPLAYER_ENGINE`, if set; it overrides the engine setting (for development).
 fn engine_override() -> Option<String> {
     std::env::var(ENGINE_ENV_VAR)
         .ok()
@@ -342,13 +343,13 @@ pub(crate) struct SettingsView {
     pub(crate) default_download_dir: String,
     /// The download folder in use this run.
     pub(crate) active_download_dir: String,
-    /// The `LUMEN_ENGINE` value, if set; it overrides `advanced.engine`.
+    /// The `TORRENTPLAYER_ENGINE` value, if set; it overrides `advanced.engine`.
     pub(crate) engine_override: Option<String>,
     /// Whether `RUST_LOG` overrides `advanced.logLevel`.
     pub(crate) log_level_override: bool,
 }
 
-/// How much space TorrentStream's download cache uses.
+/// How much space TorrentPlayer's download cache uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -372,7 +373,7 @@ pub(crate) struct CacheUsage {
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
 pub(crate) struct ClearCacheOutcome {
-    /// Bytes removed, including TorrentStream's small completion markers.
+    /// Bytes removed, including TorrentPlayer's small completion markers.
     pub(crate) bytes_freed: u64,
     /// Finished downloads removed.
     pub(crate) downloads_removed: u32,
@@ -635,7 +636,7 @@ pub(crate) async fn choose_download_dir(
 ) -> Result<Option<String>, IpcError> {
     let start = state.download_dir(&state.current());
     let mut dialog = rfd::AsyncFileDialog::new()
-        .set_title("Choose where TorrentStream saves downloaded videos")
+        .set_title("Choose where TorrentPlayer saves downloaded videos")
         .set_parent(&window);
     // The picker cannot start in a folder that does not exist yet.
     if start.is_dir() {
@@ -673,7 +674,7 @@ fn check_writable(dir: &Path) -> io::Result<()> {
     if !fs::metadata(dir)?.is_dir() {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a folder"));
     }
-    let probe = dir.join(".lumen-write-test");
+    let probe = dir.join(".torrentplayer-write-test");
     fs::write(&probe, b"")?;
     fs::remove_file(&probe)
 }
@@ -681,11 +682,11 @@ fn check_writable(dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lumen_settings::MemoryStore;
+    use torrentplayer_settings::MemoryStore;
 
     #[test]
     fn bandwidth_limits_become_engine_rates() {
-        let mut b = lumen_settings::BandwidthSettings::default();
+        let mut b = torrentplayer_settings::BandwidthSettings::default();
         assert_eq!(rate_limits(&b), (None, None), "0 is unlimited");
         b.download_limit_kib = 2048;
         b.upload_limit_kib = 100;
@@ -750,12 +751,12 @@ mod tests {
         let marker = dir.path().join("config").join(CLEAR_PENDING);
 
         fs::write(&marker, dir.path().join("other").display().to_string()).unwrap();
-        state.run_startup_maintenance(&lumen_library::Queue::default());
+        state.run_startup_maintenance(&torrentplayer_library::Queue::default());
         assert!(other.exists(), "an unknown folder is never cleared");
         assert!(!marker.exists());
 
         fs::write(&marker, dir.path().join("downloads").display().to_string()).unwrap();
-        state.run_startup_maintenance(&lumen_library::Queue::default());
+        state.run_startup_maintenance(&torrentplayer_library::Queue::default());
         // Old unmarked layouts are not identifiable as finished and remain untouched.
         assert!(cache.exists());
         assert!(!marker.exists());

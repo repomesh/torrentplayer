@@ -13,6 +13,6 @@ name: string,
  */
 version: string, 
 /**
- * SPDX license expression for TorrentStream's own code.
+ * SPDX license expression for TorrentPlayer's own code.
  */
 license: string, };

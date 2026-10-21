@@ -2,8 +2,8 @@
 
 //! The error type every IPC command returns.
 
-use lumen_torrent::{EngineError, SourceError};
 use serde::Serialize;
+use torrentplayer_torrent::{EngineError, SourceError};
 use ts_rs::TS;
 
 /// Stable, machine-readable error categories. See `docs/ipc.md`.

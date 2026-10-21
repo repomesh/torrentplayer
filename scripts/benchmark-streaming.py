@@ -87,13 +87,13 @@ at each seek. These are byte-level workloads; they do not decode 4K frames.</p>
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, default=ROOT / "target/release/lumen-bench")
+    parser.add_argument("--binary", type=Path, default=ROOT / "target/release/torrentplayer-bench")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--runs", type=int, default=5)
     parser.add_argument("--scenario", choices=SCENARIOS, action="append")
     parser.add_argument("--engine", choices=["rqbit", "swarm"], action="append")
     parser.add_argument("--queue-ms", type=int, help="Override the swarm engine request queue only")
-    parser.add_argument("--label", default="TorrentStream streaming benchmarks")
+    parser.add_argument("--label", default="TorrentPlayer streaming benchmarks")
     args = parser.parse_args()
     if args.runs < 1 or (args.queue_ms is not None and args.queue_ms < 1):
         parser.error("runs and queue-ms must be positive")
@@ -101,8 +101,8 @@ def main():
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output = (args.out or ROOT / "target/streaming-benchmarks" / stamp).resolve()
     output.mkdir(parents=True, exist_ok=False)
-    source_files = ["Cargo.lock", "crates/lumen-swarm/src/sched.rs", "crates/lumen-bench/src/lib.rs", "crates/lumen-bench/src/seeder.rs",
-                    "crates/lumen-bench/src/http.rs", "crates/lumen-torrent/src/backend.rs"]
+    source_files = ["Cargo.lock", "crates/torrentplayer-swarm/src/sched.rs", "crates/torrentplayer-bench/src/lib.rs", "crates/torrentplayer-bench/src/seeder.rs",
+                    "crates/torrentplayer-bench/src/http.rs", "crates/torrentplayer-torrent/src/backend.rs"]
     manifest = {
         "label": args.label, "started_utc": stamp, "runs_per_case": args.runs,
         "platform": platform.platform(), "cpu_count": os.cpu_count(),

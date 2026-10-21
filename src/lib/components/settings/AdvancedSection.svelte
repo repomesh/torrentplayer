@@ -104,8 +104,8 @@
     label="Torrent engine"
     path="advanced.engine"
     help={view.engineOverride === null
-      ? "Automatic uses TorrentStream's streaming engine for every source; librqbit resolves magnet metadata only."
-      : `The LUMEN_ENGINE environment variable (${view.engineOverride}) overrides this setting.`}
+      ? "Automatic uses TorrentPlayer's streaming engine for every source; librqbit resolves magnet metadata only."
+      : `The TORRENTPLAYER_ENGINE environment variable (${view.engineOverride}) overrides this setting.`}
   >
     <select
       id="advanced-engine"
@@ -116,7 +116,7 @@
       }}
     >
       <option value="auto">Automatic</option>
-      <option value="swarm">TorrentStream engine (lumen-swarm)</option>
+      <option value="swarm">TorrentPlayer engine (torrentplayer-swarm)</option>
       <option value="rqbit">librqbit</option>
     </select>
   </Field>
@@ -163,7 +163,7 @@
     id="advanced-ffmpeg"
     label="FFmpeg folder"
     path="advanced.ffmpegDir"
-    help="Optional. With FFmpeg installed, TorrentStream finds the length of videos whose header does not give it (so buffering works for them) and shows previews on the seek bar. It reads only what is already downloaded. Empty: look on PATH."
+    help="Optional. With FFmpeg installed, TorrentPlayer finds the length of videos whose header does not give it (so buffering works for them) and shows previews on the seek bar. It reads only what is already downloaded. Empty: look on PATH."
     error={errors['advanced.ffmpegDir']}
   >
     <div class="folder">

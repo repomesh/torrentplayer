@@ -12,12 +12,12 @@ VS" prompt, or move the Visual Studio tools before `/usr/bin` on your `PATH`. Se
 
 The Common Controls v6 manifest was not embedded. `src-tauri/build.rs` does this for every
 target; make sure you have not replaced its `WindowsAttributes` settings, then run
-`cargo clean -p lumen-app` and rebuild.
+`cargo clean -p torrentplayer-app` and rebuild.
 
 ### `frontendDist ... doesn't exist`
 
 Tauri embeds the built frontend at compile time. Run `npm ci && npm run build` before building
-`lumen-app` with `cargo`.
+`torrentplayer-app` with `cargo`.
 
 ### Linux: `webkit2gtk-4.1` not found
 

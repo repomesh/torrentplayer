@@ -27,7 +27,7 @@ defaultDownloadDir: string,
  */
 activeDownloadDir: string, 
 /**
- * The `LUMEN_ENGINE` value, if set; it overrides `advanced.engine`.
+ * The `TORRENTPLAYER_ENGINE` value, if set; it overrides `advanced.engine`.
  */
 engineOverride: string | null, 
 /**

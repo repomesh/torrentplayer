@@ -17,7 +17,7 @@ uploadLimitKib: number,
  */
 seedAfterWatching: boolean, 
 /**
- * Stop seeding a torrent at this upload/download ratio; 0 keeps seeding while TorrentStream runs.
+ * Stop seeding a torrent at this upload/download ratio; 0 keeps seeding while TorrentPlayer runs.
  */
 seedRatioTarget: number, 
 /**

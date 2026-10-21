@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT OR Apache-2.0
 #
-# Builds the playback-only FFmpeg that TorrentStream runs to convert Dolby and DTS audio, which
+# Builds the playback-only FFmpeg that TorrentPlayer runs to convert Dolby and DTS audio, which
 # the built-in player cannot decode, to AAC (see docs/adr/0007-dolby-and-dts-audio.md).
 #
 # Usage: scripts/build-ffmpeg.sh <rust-target-triple> <output-dir>
 #        scripts/build-ffmpeg.sh source <output-dir>
 #
-# Writes <output-dir>/torrentstream-ffmpeg-<triple>[.exe], the name Tauri expects for a sidecar
+# Writes <output-dir>/torrentplayer-ffmpeg-<triple>[.exe], the name Tauri expects for a sidecar
 # (bundle.externalBin; see src-tauri/tauri.sidecar.conf.json), with FFmpeg's license files.
 # `source` only downloads and verifies the source tarball, which releases publish for the LGPL.
 #
@@ -113,11 +113,11 @@ cd "$src"
   --enable-parser=ac3,mlp,dca,aac,h264,hevc,av1,vp9,mpegaudio,opus,vorbis,flac \
   --enable-bsf=aac_adtstoasc,extract_extradata,vp9_superframe \
   --enable-filter=aresample,aformat,anull,null,abuffer,abuffersink,buffer,buffersink \
-  --extra-version=torrentstream
+  --extra-version=torrentplayer
 
 "${MAKE:-make}" -j"$jobs" "ffmpeg$ext"
 
-binary="$out/torrentstream-ffmpeg-$target$ext"
+binary="$out/torrentplayer-ffmpeg-$target$ext"
 cp "ffmpeg$ext" "$binary"
 strip_tool=strip
 if [ "$ext" = .exe ] && [ "$(uname -s)" = Linux ]; then

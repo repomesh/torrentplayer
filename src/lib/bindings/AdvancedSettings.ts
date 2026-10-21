@@ -7,7 +7,7 @@ import type { LogLevel } from "./LogLevel";
  */
 export type AdvancedSettings = { 
 /**
- * Torrent engine for new torrents. The `LUMEN_ENGINE` environment variable overrides it.
+ * Torrent engine for new torrents. The `TORRENTPLAYER_ENGINE` environment variable overrides it.
  */
 engine: EngineSetting, 
 /**

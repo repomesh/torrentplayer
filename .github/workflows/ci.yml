@@ -40,7 +40,7 @@ jobs:
         run: |
           if ! git diff --exit-code -- src/lib/bindings \
             || [ -n "$(git ls-files --others --exclude-standard -- src/lib/bindings)" ]; then
-            echo "::error::IPC bindings are out of date. Run 'cargo test -p lumen-app' and commit src/lib/bindings."
+            echo "::error::IPC bindings are out of date. Run 'cargo test -p torrentplayer-app' and commit src/lib/bindings."
             exit 1
           fi
 

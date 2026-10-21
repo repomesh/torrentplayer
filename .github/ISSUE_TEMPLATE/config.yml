@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/torrent-stream/torrentstream/security/advisories/new
+    url: https://github.com/torrentplayer/torrentplayer/security/advisories/new
     about: Please report vulnerabilities privately, never in a public issue.
   - name: Ask a question or come talk
     url: https://discord.gg/fVkWSZAafp
-    about: Questions, ideas, and help with setup are welcome on the TorrentStream Discord server.
+    about: Questions, ideas, and help with setup are welcome on the TorrentPlayer Discord server.

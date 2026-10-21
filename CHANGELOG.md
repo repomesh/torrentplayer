@@ -7,12 +7,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- TorrentStream is now TorrentPlayer (torrentplayer.io, `github.com/torrentplayer/torrentplayer`).
+  The app identifier is `io.torrentplayer.desktop` and the binary `TorrentPlayer`. Settings, the
+  queue, the download cache, the default `DownloadsTorrentStream` folder, and stored secrets
+  move to the new names at start-up. The `LUMEN_*` environment variables are now
+  `TORRENTPLAYER_*`, and the crates are named `torrentplayer-*`.
+
 ### Added
 
 - DHT peer discovery now uses bound VPN sockets and the built-in WireGuard tunnel. SOCKS5
   proxies with UDP ASSOCIATE support carry DHT and UDP trackers, including magnet metadata
   discovery, without falling back to direct UDP or target DNS.
-- lumen-swarm now uploads verified pieces with cancellable, bounded reads, reports per-torrent
+- torrentplayer-swarm now uploads verified pieces with cancellable, bounded reads, reports per-torrent
   and total upload rates, and shares the global upload limit with librqbit.
 - Seeding can continue after playback until a ratio or time target is reached, and the configured
   peer cap now applies to both engines.
@@ -275,6 +283,6 @@ The first public preview: stream any torrent, video or audio, and skip to any mo
   never unmuted. It now mutes only when the autoplay policy refuses sound, then shows a "click
   to unmute" button. Interruptions are retried with the sound unchanged.
 
-[Unreleased]: https://github.com/torrent-stream/torrentstream/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/torrent-stream/torrentstream/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/torrent-stream/torrentstream/releases/tag/v0.1.0
+[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/torrentplayer/torrentplayer/releases/tag/v0.1.0

@@ -5,7 +5,7 @@
 
 ## Context
 
-TorrentStream has several subsystems with very different needs: pure logic that should be exhaustively
+TorrentPlayer has several subsystems with very different needs: pure logic that should be exhaustively
 tested (prioritization, natural sorting, range parsing), async network code, a C FFI boundary
 (libmpv), and a Tauri shell. We want fast tests, clear ownership, and a small surface that needs
 `unsafe` review.
@@ -15,10 +15,10 @@ tested (prioritization, natural sorting, range parsing), async network code, a C
 A Cargo workspace with one library crate per subsystem under `crates/`, plus the Tauri app shell
 in `src-tauri/` (the location Tauri tooling expects):
 
-- `lumen-torrent`, `lumen-prioritize`, `lumen-stream`, `lumen-media`, `lumen-player`,
-  `lumen-course`, `lumen-library`, `lumen-net`, and `lumen-app`.
-- Pure logic crates (`lumen-prioritize`, `lumen-course`) have no I/O, Tauri, or FFI dependencies.
-- Only `lumen-player` may contain `unsafe` code. Every other crate declares
+- `torrentplayer-torrent`, `torrentplayer-prioritize`, `torrentplayer-stream`, `torrentplayer-media`, `torrentplayer-player`,
+  `torrentplayer-course`, `torrentplayer-library`, `torrentplayer-net`, and `torrentplayer-app`.
+- Pure logic crates (`torrentplayer-prioritize`, `torrentplayer-course`) have no I/O, Tauri, or FFI dependencies.
+- Only `torrentplayer-player` may contain `unsafe` code. Every other crate declares
   `#![forbid(unsafe_code)]`.
 - Shared settings live in the root `Cargo.toml`: `[workspace.package]` for metadata,
   `[workspace.dependencies]` for versions, and `[workspace.lints]` for lint policy.

@@ -18,7 +18,7 @@ it. This keeps disk use and swarm load proportional to what is actually watched.
 
 ## Piece priorities
 
-Priorities are computed by `lumen-prioritize`, which is pure logic: given the file layout, piece
+Priorities are computed by `torrentplayer-prioritize`, which is pure logic: given the file layout, piece
 availability, the playhead, and the bitrate, it returns an ordered set of piece requests. That
 makes the policy exhaustively testable.
 

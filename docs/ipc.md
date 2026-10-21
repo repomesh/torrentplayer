@@ -11,7 +11,7 @@ The webview talks to the Rust backend only through Tauri commands (request/respo
 - **Validate in Rust.** Treat every argument as untrusted. Validate ranges, lengths, and formats
   before use, and return a typed error rather than panicking.
 - **Generated types.** Payload types derive `ts_rs::TS` with `#[ts(export)]`. Running
-  `cargo test -p lumen-app` writes them to `src/lib/bindings/`. Never edit those files by hand;
+  `cargo test -p torrentplayer-app` writes them to `src/lib/bindings/`. Never edit those files by hand;
   CI fails if they are out of date.
 - **One wrapper module.** Frontend code calls commands only through `src/lib/ipc.ts`.
 - **Naming.** Commands are `snake_case` verbs or nouns (`app_info`, `add_torrent`). Events are
@@ -54,14 +54,14 @@ itself; check Settings → Network).
 
 ## Engines
 
-Torrents are served by one of two engines behind the same commands (`lumen_torrent::StreamEngine`):
+Torrents are served by one of two engines behind the same commands (`torrentplayer_torrent::StreamEngine`):
 
-- **lumen-swarm**, TorrentStream's own streaming-first engine, for `.torrent` files and http(s) links to
+- **torrentplayer-swarm**, TorrentPlayer's own streaming-first engine, for `.torrent` files and http(s) links to
   them. See [ADR 0006](adr/0006-streaming-engine.md).
-- **librqbit** for magnet links (lumen-swarm resolves magnets from milestone M3). It starts
+- **librqbit** for magnet links (torrentplayer-swarm resolves magnets from milestone M3). It starts
   lazily, the first time a magnet link is added.
 
-The `LUMEN_ENGINE` environment variable overrides the choice: `auto` (default), `swarm` (magnet
+The `TORRENTPLAYER_ENGINE` environment variable overrides the choice: `auto` (default), `swarm` (magnet
 links are refused with `source-refused`), or `rqbit` (everything through librqbit). The engine
 serving a stream is reported in `StreamStats.engine` and logged when the stream starts.
 
@@ -80,7 +80,7 @@ Returns static information about the running build, for the About screen.
 
 ```ts
 type AppInfo = {
-  name: string; // "TorrentStream"
+  name: string; // "TorrentPlayer"
   version: string; // semantic version, e.g. "0.1.0"
   license: string; // SPDX expression, "MIT OR Apache-2.0"
 };
@@ -97,7 +97,7 @@ adds, preloads, and prefetches resolve links the same way). What each link gave 
 (256 links), so following it again sends no request; links are never logged, since search sites
 put tokens in them. The search service's own download links count against the search rate
 limiter. Adding a torrent that is already present returns the existing one. `TorrentSummary.magnet` is a magnet link that adds the torrent again; for
-torrents in lumen-swarm it carries up to 20 of their trackers (about 4 KiB at most).
+torrents in torrentplayer-swarm it carries up to 20 of their trackers (about 4 KiB at most).
 
 |            |                                                                  |
 | ---------- | ---------------------------------------------------------------- |
@@ -180,13 +180,13 @@ Live statistics for a stream, polled about once a second by the debug overlay.
 
 Fields include transfer rates, peer counts, buffered bytes (and seconds once the duration is
 reported), a 200-cell `pieceMap` (0–255 per cell), player timings, and `engine`
-(`"lumen-swarm"` or `"librqbit"`). `anchors` (prioritized positions) is filled only by the
-librqbit engine; lumen-swarm schedules by deadline instead.
+(`"torrentplayer-swarm"` or `"librqbit"`). `anchors` (prioritized positions) is filled only by the
+librqbit engine; torrentplayer-swarm schedules by deadline instead.
 
 ### `stream_audio`
 
 The stream's audio tracks, read from its container header (MP4, MOV, Matroska, or WebM) by
-`lumen-media` when the stream starts. The probe reads only box and element headers through the
+`torrentplayer-media` when the stream starts. The probe reads only box and element headers through the
 stream's own reader, which waits for those pieces, and gives up after 45 s. The command waits for
 the probe, so the player calls it once.
 
@@ -264,7 +264,7 @@ The subtitles available for a stream, at once (it does not wait).
 
 Downloads one subtitle file of the stream's torrent and returns its cues. The file is downloaded
 at background priority (`StreamEngine::read_small_file`), so the video keeps priority, and read
-only once complete; the command gives up after 60 s. Parsing happens in Rust (`lumen-media`):
+only once complete; the command gives up after 60 s. Parsing happens in Rust (`torrentplayer-media`):
 SRT and WebVTT fully, ASS/SSA dialogue text only; UTF-8 (with or without a byte order mark),
 UTF-16, or Windows-1252. The text is plain (markup and control characters removed); at most
 5 MiB, 20 000 cues, and 600 characters per cue.
@@ -313,9 +313,9 @@ Unpublishes a stream and stops prioritizing it. Downloaded data is kept.
 ### `dev_autoplay`
 
 Development builds only (always `null` in release builds): adds the torrent named by
-`LUMEN_DEV_AUTOPLAY=<link or .torrent path>|<file index>|<seek fractions>|<peers>` so decoder
+`TORRENTPLAYER_DEV_AUTOPLAY=<link or .torrent path>|<file index>|<seek fractions>|<peers>` so decoder
 timings can be measured automatically. The optional peers are addresses to connect to, such as
-a local `lumen-bench seed` (see [Building](building.md)).
+a local `torrentplayer-bench seed` (see [Building](building.md)).
 
 |            |                                                               |
 | ---------- | ------------------------------------------------------------- |
@@ -330,7 +330,7 @@ Searches public torrent indexers through [search.emberglow.tech](https://search.
 using all of its indexers, in one `/search` request. The service answers within about 6 s,
 leaving out indexers slower than that; prefer
 [`search_torrents_progressive`](#search_torrents_progressive). Results are validated in
-`lumen-search`: titles are plain text (at most 300 characters, no control characters), magnet
+`torrentplayer-search`: titles are plain text (at most 300 characters, no control characters), magnet
 links have the form `magnet:?xt=urn:btih:…` (built from the info hash when the indexer gave
 none), details links are http(s) only, results that cannot be added are dropped, duplicates are
 merged by info hash (or by download link), and adult results (an adult category label, or a Torznab category id in
@@ -352,14 +352,14 @@ magnet link arrives or another indexer's copy of the same torrent is merged into
 by info hash once it is known). Only links on the service's own host, under `/download/`,
 with no credentials, are kept, because the best pick's link is followed without the user asking
 (to preload it). Following a new link costs the service a request to the indexer (up to about
-6 s), so TorrentStream follows one only to add, preload, or prefetch it (see
+6 s), so TorrentPlayer follows one only to add, preload, or prefetch it (see
 [`prefetch_torrents`](#prefetch_torrents)).
 
 Results are ranked by relevance first (titles containing every query word, then more of
 them), then by a watch score: seeders (log-scaled) and swarm health, resolution, source
 (camera copies, telesyncs, and screeners rank last), HDR, whether the built-in player can play
 the container, and a size check that flags fake 4K. The formula is documented in
-`crates/lumen-search/src/rank.rs`. Each result carries its parsed `quality`, a short `reason`
+`crates/torrentplayer-search/src/rank.rs`. Each result carries its parsed `quality`, a short `reason`
 (for example `1080p WEB-DL · 412 seeders · plays in built-in player`), its `quality.kind`
 (`video`, `notVideo` for audio, ebooks, software, and games, or `unknown`; with
 `quality.audio` and `quality.audioPlays` for the audio codec the title names; `health` and
@@ -400,7 +400,7 @@ events): one request per search, one `indexer` event per indexer as it finishes 
 after about 0.2 s, the first results after 0.4–0.7 s), a `magnet` event for each result offered
 only as a download link whose magnet link the service looked up (matched by its `download`
 link; the row is updated in place), then a `done` event after the slowest indexer answers or
-the service's 20 s limit. TorrentStream merges and ranks every indexer's results
+the service's 20 s limit. TorrentPlayer merges and ranks every indexer's results
 itself, so the final list is not cut to the service's seeder-ranked top 100. The indexer list
 (`GET /indexers`, kept for 10 minutes) is fetched alongside the stream to give `total`, the
 number of indexers; until it arrives `total` is 0.
@@ -415,7 +415,7 @@ through `/search`: fast indexers four at a time, slow ones on their own, at most
 once; indexers the service skips, excludes by default (1337x), or that are adult-only (unless
 `search.hideAdult` is off) are not asked. A `422`, a rate limit after one retry, or a backend
 outage (`502`–`504`, or the stream's `error` event before any results) fails the search
-instead. A client-side rate limiter (burst 20, 50 a minute) keeps TorrentStream under the service's
+instead. A client-side rate limiter (burst 20, 50 a minute) keeps TorrentPlayer under the service's
 limit either way.
 
 Progress reaches the channel at most every 150 ms (the last report at once), so the burst of
@@ -429,7 +429,7 @@ the `search.preloadTopResult` setting is on: when it has stayed the best pick fo
 the search finishes, whichever is first. If a late indexer changes the best pick after that,
 the final one is preloaded when the search finishes, so a search starts at most two preloads
 (usually one). A search that finishes without a best pick evicts the previous preload. The
-rule is `lumen_search::settle`.
+rule is `torrentplayer_search::settle`.
 
 |            |                                                                                                                                      |
 | ---------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -472,7 +472,7 @@ call, or a new search, stops the running one. For a magnet link librqbit fetches
 from peers (no files are created, nothing is downloaded or uploaded); a `.torrent` link is
 downloaded. The metadata gets the same checks as an add (file paths, file count) and is kept in
 the engine with the peers seen (64 torrents, 64 MiB at most, least recently used evicted), so
-adding or preloading that torrent later skips asking peers for it: in lumen-swarm it uses the
+adding or preloading that torrent later skips asking peers for it: in torrentplayer-swarm it uses the
 kept metadata and peers, and with librqbit (automatic engine, magnet links) it is added from
 the kept metadata and still finds peers through the DHT and trackers. Concurrent fetches of the
 same torrent (a prefetch and an add) wait for each other. Failures are only logged; playing a
@@ -504,13 +504,13 @@ the results on screen whose metadata is known (prefetched with
 fetched). A newer call, or a new search, stops the running one. Does nothing while
 `search.preloadTopResult` is off.
 
-The picture is chosen from the torrent's file list (`lumen_torrent::thumbnail`): JPEG, PNG, or
+The picture is chosen from the torrent's file list (`torrentplayer_torrent::thumbnail`): JPEG, PNG, or
 WebP only (never SVG or GIF), 2 KiB to 2 MiB, preferring `__ia_thumb.jpg` (Internet Archive),
 then names like poster, cover, folder, thumb, and screenshot, and never an indexer's banner
 (names with `www`, `yts`, `rarbg`, `torrent`, or ending in a domain such as `.com`). Only that
 file's pieces are downloaded, at most 8 MiB of them, and checked against the torrent's hashes; a
-torrent already in lumen-swarm gives the picture from there, any other is fetched by a separate
-lumen-swarm limited to 2 MiB/s and 8 peers, from the peers seen while fetching its metadata and
+torrent already in torrentplayer-swarm gives the picture from there, any other is fetched by a separate
+torrentplayer-swarm limited to 2 MiB/s and 8 peers, from the peers seen while fetching its metadata and
 its trackers and web seeds, uploading nothing, and its cache is deleted afterwards. The bytes
 must start like a JPEG, PNG, or WebP file, whatever the name says, and reach the webview only as
 a `data:image/…;base64,` URL (the content security policy allows `data:` images and nothing
@@ -584,7 +584,7 @@ search's best pick has settled (see [`search_torrents_progressive`](#search_torr
 preloading is on, and no video is playing, the backend
 fetches the torrent's metadata (librqbit, metadata only) and downloads the start of its best
 video file (the largest the built-in player can open, or the first episode of a series pack)
-into lumen-swarm: about three minutes' worth (the file size ÷ 30, between 24 and 96 MiB) plus
+into torrentplayer-swarm: about three minutes' worth (the file size ÷ 30, between 24 and 96 MiB) plus
 its last 2 MiB. Limits: one preload at a time (the next search's best pick evicts it, deleting
 its cache), a 3-minute time limit, a byte cap of 1.5 × the target + 8 MiB, and nothing is
 uploaded. Adding the same magnet link with `add_torrent_link` returns the preloaded torrent
@@ -677,7 +677,7 @@ playback are left and the rest of the file arrives in under half that time
   file is fetched first; one that redirects to a magnet link preloads that. While a video
   plays, this preload wins over a search's best pick: a search neither replaces nor evicts it.
 - **A torrent already added** (`torrentId`, usually the course playing, after "Queue all") is
-  prepared inside it: lumen-swarm downloads the file's start and end at background priority,
+  prepared inside it: torrentplayer-swarm downloads the file's start and end at background priority,
   after the playhead's read-ahead; librqbit selects the whole file and, for the torrent
   playing, prioritizes its start and end in the last minute of playback.
 
@@ -763,7 +763,7 @@ A file that does not arrive within 20 s gives a `note` ("Still downloading…").
 only what is already downloaded (`StreamEngine::stored_media`): they download nothing, change no
 priorities, and fail at once on a missing part. Each run is locked down to that URL
 (`-protocol_whitelist http,tcp` and a `-format_whitelist` of media containers), has no console
-window or standard input, a time limit, and bounded output. See `lumen_media::FfmpegTools`.
+window or standard input, a time limit, and bounded output. See `torrentplayer_media::FfmpegTools`.
 
 `start_stream` starts a duration probe: the container header's duration (MP4 `mvhd`, Matroska
 `Info`), or, if it has none, `ffprobe` (up to six tries, 5 s apart, while the header downloads).
@@ -820,7 +820,7 @@ run their file and credential-store work off the async runtime.
 Returns the saved settings plus what the Settings page needs to explain them: `warnings` (load
 problems and incomplete choices such as a proxy without a host), `restartRequired` (dotted paths
 of changes that apply after a restart), `defaultDownloadDir`, `activeDownloadDir`,
-`engineOverride` (the `LUMEN_ENGINE` value, if set), and `logLevelOverride` (`RUST_LOG` is set).
+`engineOverride` (the `TORRENTPLAYER_ENGINE` value, if set), and `logLevelOverride` (`RUST_LOG` is set).
 
 |            |                                                       |
 | ---------- | ----------------------------------------------------- |
@@ -885,8 +885,8 @@ returns a secret's value.
 
 #### `cache_usage`
 
-Size, configured limit, file count, and safely reclaimable finished data in TorrentStream's cache
-folders (`lumen-swarm/`, `librqbit/`) in the download folder in use. Symbolic links are not
+Size, configured limit, file count, and safely reclaimable finished data in TorrentPlayer's cache
+folders (`torrentplayer-swarm/`, `librqbit/`) in the download folder in use. Symbolic links are not
 followed; counting stops after 200 000 entries (`complete: false`).
 
 |            |                                                   |
@@ -899,7 +899,7 @@ followed; counting stops after 200 000 entries (`complete: false`).
 #### `clear_cache`
 
 Deletes finished downloads that are no longer queued and have no open player stream. Only validated
-info-hash directories under `lumen-swarm/` and `librqbit/` are removed; symbolic links, legacy
+info-hash directories under `torrentplayer-swarm/` and `librqbit/` are removed; symbolic links, legacy
 layouts, and unrelated files are left alone. The result reports bytes and downloads removed. The
 frontend asks for confirmation first.
 

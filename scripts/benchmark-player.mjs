@@ -1,13 +1,13 @@
 // Run with native Windows Node against an app in a disposable profile with one fixture queued.
 // Usage: node scripts/benchmark-player.mjs OUTPUT.json [playback|decoder4k]
-// LUMEN_BENCH_CDP_PORT overrides the default isolated-app port, 46129.
+// TORRENTPLAYER_BENCH_CDP_PORT overrides the default isolated-app port, 46129.
 // Session-bearing stream URLs stay inside the WebView and are never printed or saved.
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 const output = process.argv[2];
-const cdpPort = Number(process.env.LUMEN_BENCH_CDP_PORT ?? 46129);
+const cdpPort = Number(process.env.TORRENTPLAYER_BENCH_CDP_PORT ?? 46129);
 assert(output, 'An output JSON path is required');
 const mode = process.argv[3] ?? 'playback';
 assert(['playback', 'decoder4k'].includes(mode));

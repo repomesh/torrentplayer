@@ -7,7 +7,7 @@ import type { SearchSettings } from "./SearchSettings";
 import type { StorageSettings } from "./StorageSettings";
 
 /**
- * All of TorrentStream's settings. Secrets (passwords, private keys) are never part of this struct;
+ * All of TorrentPlayer's settings. Secrets (passwords, private keys) are never part of this struct;
  * they live in the OS credential store (see [`crate::SecretKey`]).
  */
 export type Settings = { 

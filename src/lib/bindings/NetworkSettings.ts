@@ -6,7 +6,7 @@ import type { Socks5Settings } from "./Socks5Settings";
 import type { WireGuardSettings } from "./WireGuardSettings";
 
 /**
- * How torrent traffic reaches the internet. This is the contract `lumen-net` implements.
+ * How torrent traffic reaches the internet. This is the contract `torrentplayer-net` implements.
  *
  * Passwords and private keys are not here: read them with [`crate::SecretStore::get`] using
  * [`crate::SecretKey::Socks5Password`], [`crate::SecretKey::WireGuardPrivateKey`], and

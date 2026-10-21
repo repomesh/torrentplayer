@@ -82,7 +82,7 @@
     id="bandwidth-ratio"
     label="Stop seeding at ratio"
     path="bandwidth.seedRatioTarget"
-    help="Uploaded ÷ downloaded. 0 keeps seeding while TorrentStream runs."
+    help="Uploaded ÷ downloaded. 0 keeps seeding while TorrentPlayer runs."
     error={errors['bandwidth.seedRatioTarget']}
   >
     <input

@@ -1,7 +1,7 @@
 # Summary
 
 [Introduction](introduction.md)
-[How TorrentStream compares](comparison.md)
+[How TorrentPlayer compares](comparison.md)
 
 # Design
 

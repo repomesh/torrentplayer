@@ -1,0 +1,34 @@
+[package]
+name = "torrentplayer-torrent"
+description = "Torrent engines for TorrentPlayer: torrentplayer-swarm and librqbit behind one streaming API."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+bytes.workspace = true
+futures-util.workspace = true
+librqbit.workspace = true
+torrentplayer-net.workspace = true
+torrentplayer-prioritize.workspace = true
+torrentplayer-stream.workspace = true
+torrentplayer-swarm.workspace = true
+reqwest.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+torrentplayer-net = { workspace = true, features = ["test-util"] }
+proptest.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "fs"] }
+
+[lints]
+workspace = true

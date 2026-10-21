@@ -2,16 +2,18 @@
 
 //! Subtitles for a stream: the subtitle files in its torrent (matched to the playing video),
 //! its embedded tracks (from the container probe), and the cues of one file, downloaded and
-//! parsed here so the webview only ever receives plain text. See `lumen_media` for the parsers.
+//! parsed here so the webview only ever receives plain text. See `torrentplayer_media` for the parsers.
 
 use std::time::Duration;
 
-use lumen_media::{MAX_SUBTITLE_BYTES, SubtitleFile, SubtitleTrack, TrackReport, subtitle_files};
-use lumen_stream::StreamId;
-use lumen_torrent::FileKind;
 use serde::Serialize;
 use tauri::State;
 use tauri::ipc::{InvokeBody, Request};
+use torrentplayer_media::{
+    MAX_SUBTITLE_BYTES, SubtitleFile, SubtitleTrack, TrackReport, subtitle_files,
+};
+use torrentplayer_stream::StreamId;
+use torrentplayer_torrent::FileKind;
 use ts_rs::TS;
 
 use crate::core::AppState;
@@ -125,7 +127,10 @@ pub(crate) fn embedded(report: &TrackReport) -> Vec<EmbeddedSubtitleDto> {
 }
 
 fn embedded_track(i: usize, track: &SubtitleTrack) -> EmbeddedSubtitleDto {
-    let known = track.language.as_deref().and_then(lumen_media::language);
+    let known = track
+        .language
+        .as_deref()
+        .and_then(torrentplayer_media::language);
     let label = track
         .name
         .clone()
@@ -146,7 +151,7 @@ fn embedded_track(i: usize, track: &SubtitleTrack) -> EmbeddedSubtitleDto {
 
 fn cues_dto(bytes: &[u8]) -> Result<SubtitleCues, IpcError> {
     // The parser's messages are plain sentences without a capital or full stop.
-    let parsed = lumen_media::parse_subtitles(bytes)
+    let parsed = torrentplayer_media::parse_subtitles(bytes)
         .map_err(|error| IpcError::invalid(format!("{}.", capitalize(&error.to_string()))))?;
     Ok(SubtitleCues {
         format: parsed.format.id().to_owned(),
@@ -276,13 +281,13 @@ pub(crate) async fn parse_subtitles(request: Request<'_>) -> Result<SubtitleCues
 
 fn is_subtitle_file(path: &str) -> bool {
     path.rsplit_once('.').is_some_and(|(_, ext)| {
-        lumen_media::SUBTITLE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
+        torrentplayer_media::SUBTITLE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use lumen_media::{Container, SubtitleCodec};
+    use torrentplayer_media::{Container, SubtitleCodec};
 
     use super::*;
 

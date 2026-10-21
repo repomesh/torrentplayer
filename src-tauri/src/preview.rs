@@ -16,11 +16,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use base64::Engine as _;
-use lumen_stream::StreamId;
-use lumen_torrent::thumbnail::{MAX_IMAGE_BYTES, MIN_IMAGE_BYTES, image_type};
-use lumen_torrent::{FileKind, TorrentId};
 use serde::Serialize;
 use tauri::State;
+use torrentplayer_stream::StreamId;
+use torrentplayer_torrent::thumbnail::{MAX_IMAGE_BYTES, MIN_IMAGE_BYTES, image_type};
+use torrentplayer_torrent::{FileKind, TorrentId};
 use ts_rs::TS;
 
 use crate::core::{AppState, Core};
