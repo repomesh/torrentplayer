@@ -1050,7 +1050,7 @@ The status bar's latest public addresses, kept current by the app (see the publi
 | `library-changed`   | [`LibraryItem`](../src/lib/bindings/LibraryItem.ts)     | After an item is opened or a playback checkpoint is saved.         |
 | `network-status`    | [`NetworkStatus`](../src/lib/bindings/NetworkStatus.ts) | At start-up and whenever the network state changes.                |
 | `network-public-ip` | [`PublicIp`](../src/lib/bindings/PublicIp.ts) or `null` | When the status bar's public addresses change (see `public_ip`).   |
-| `seeding-started`   | none                                                    | When a torrent starts seeding after its playback ended.            |
+| `seeding-started`   | none                                                    | When a torrent starts seeding after a playback ends (once each).   |
 
 The main window may listen to events (`core:event:allow-listen` and `core:event:allow-unlisten`
 in `src-tauri/capabilities/main.json`; it cannot emit them). The frontend follows

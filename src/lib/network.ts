@@ -6,8 +6,8 @@
  * keeps it current (`network_status` once, then every `network-status` event).
  */
 
-import { listen } from '@tauri-apps/api/event';
 import type { IncomingPeersStatus } from './bindings/IncomingPeersStatus';
+import { follow } from './follow';
 import type { NetworkModeKind } from './bindings/NetworkModeKind';
 import {
   NETWORK_STATUS_EVENT,
@@ -160,35 +160,7 @@ export function pausedMessage(status: NetworkStatus | null): string | null {
  * returned function is called.
  */
 export function followNetwork(onStatus: (status: NetworkStatus) => void): () => void {
-  let stopped = false;
-  let heard = false;
-  let unlisten: (() => void) | null = null;
-  listen<NetworkStatus>(NETWORK_STATUS_EVENT, (event) => {
-    if (!stopped) {
-      heard = true;
-      onStatus(event.payload);
-    }
-  })
-    .then((stop) => {
-      if (stopped) {
-        stop();
-      } else {
-        unlisten = stop;
-      }
-    })
-    .catch(() => undefined);
-  networkStatus()
-    .then((status) => {
-      // An event that arrived first is newer.
-      if (!stopped && !heard) {
-        onStatus(status);
-      }
-    })
-    .catch(() => undefined);
-  return () => {
-    stopped = true;
-    unlisten?.();
-  };
+  return follow(NETWORK_STATUS_EVENT, onStatus, networkStatus);
 }
 
 /** An address with every digit hidden, keeping its shape: `•••.•••.•••.•••`, `••••:••••:…`. */
@@ -230,35 +202,7 @@ export function describePublicIp(
  * Returns a function that stops following.
  */
 export function followPublicIp(onIp: (ip: PublicIp | null) => void): () => void {
-  let stopped = false;
-  let heard = false;
-  let unlisten: (() => void) | null = null;
-  listen<PublicIp | null>(PUBLIC_IP_EVENT, (event) => {
-    if (!stopped) {
-      heard = true;
-      onIp(event.payload);
-    }
-  })
-    .then((stop) => {
-      if (stopped) {
-        stop();
-      } else {
-        unlisten = stop;
-      }
-    })
-    .catch(() => undefined);
-  publicIp()
-    .then((ip) => {
-      // An event that arrived first is newer.
-      if (!stopped && !heard) {
-        onIp(ip);
-      }
-    })
-    .catch(() => undefined);
-  return () => {
-    stopped = true;
-    unlisten?.();
-  };
+  return follow(PUBLIC_IP_EVENT, onIp, publicIp);
 }
 
 /**

@@ -24,7 +24,7 @@
   import SettingsPage from './lib/components/settings/SettingsPage.svelte';
   import type { FileSummary } from './lib/bindings/FileSummary';
   import { fileName, isPlayable, playTarget, readTorrentFile } from './lib/files';
-  import { dismissVpnHint, followSeedingStarted, showVpnHint } from './lib/vpnHint';
+  import { dismissVpnHint, followSeedingStarted, followVpnHint, showVpnHint } from './lib/vpnHint';
   import { explorerTorrents, torrentKeys, type ExplorerTorrent } from './lib/explorer';
   import {
     addTorrentFile,
@@ -164,8 +164,12 @@
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let announcement = $state('');
   // The VPN note, once per run, when the first torrent starts seeding in Direct mode.
-  let seedingHint = $state(false);
-  let seedingHintChecked = false;
+  // It disappears as soon as it no longer applies (dismissed anywhere, or another mode chosen).
+  let vpnHintApplies = $state(false);
+  let seedingHintOpen = $state(false);
+  let seedingHintShown = false;
+  let seedingHintError = $state<string | null>(null);
+  const seedingHint = $derived(seedingHintOpen && vpnHintApplies);
 
   let upNext = $state<{ item: QueueItem; secondsLeft: number } | null>(null);
   const countdown = new Countdown(
@@ -1328,16 +1332,15 @@
     const stopLibrary = followLibrary((items) => {
       library = items;
     });
+    const stopVpnHint = followVpnHint((network) => {
+      vpnHintApplies = showVpnHint(network.mode, network.vpnHintDismissed);
+    });
     const stopSeeding = followSeedingStarted(() => {
-      if (seedingHintChecked) {
-        return;
+      // Used up only once it is actually shown.
+      if (!seedingHintShown && vpnHintApplies) {
+        seedingHintShown = true;
+        seedingHintOpen = true;
       }
-      seedingHintChecked = true;
-      getSettings()
-        .then(({ settings }) => {
-          seedingHint = showVpnHint(settings.network.mode, settings.network.vpnHintDismissed);
-        })
-        .catch(() => undefined);
     });
     loadQueue()
       .then((saved) => {
@@ -1372,6 +1375,7 @@
       clearTimeout(toastTimer);
       clearTimeout(nextPreloadTimer);
       stopLibrary();
+      stopVpnHint();
       stopSeeding();
       void saver.flush();
     };
@@ -1636,14 +1640,19 @@
         <strong>Seeding started</strong>
         <VpnHint
           onDismiss={() => {
-            seedingHint = false;
-            dismissVpnHint().catch((reason: unknown) => {
-              showToast(`The setting could not be saved: ${errorMessage(reason)}`, { error: true });
-            });
+            seedingHintError = null;
+            dismissVpnHint()
+              .then(() => {
+                seedingHintOpen = false;
+              })
+              .catch((reason: unknown) => {
+                seedingHintError = `The setting could not be saved: ${errorMessage(reason)}`;
+              });
           }}
           onClose={() => {
-            seedingHint = false;
+            seedingHintOpen = false;
           }}
+          error={seedingHintError}
         />
       </div>
     {/if}

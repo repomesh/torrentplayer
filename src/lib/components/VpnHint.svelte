@@ -12,9 +12,11 @@
     onDismiss: () => void;
     /** Hides the note until it is shown again. */
     onClose?: () => void;
+    /** Why the last dismissal could not be saved, if it failed. */
+    error?: string | null;
   }
 
-  let { onDismiss, onClose }: Props = $props();
+  let { onDismiss, onClose, error = null }: Props = $props();
 </script>
 
 <div class="hint" role="note">
@@ -26,6 +28,9 @@
       <button type="button" class="quiet" onclick={onClose}>Close</button>
     {/if}
   </div>
+  {#if error}
+    <p class="error" role="alert">{error}</p>
+  {/if}
 </div>
 
 <style>
@@ -40,6 +45,11 @@
 
   p {
     margin: 0;
+  }
+
+  .error {
+    margin-top: 0.4rem;
+    color: #e8907a;
   }
 
   .actions {

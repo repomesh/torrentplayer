@@ -3,11 +3,12 @@
 /**
  * The note that recommends a VPN in Direct mode: in Settings → Network, beside the status bar's
  * network indicator, and once per run when seeding starts. Dismissing it anywhere hides it
- * everywhere (`network.vpnHintDismissed`).
+ * everywhere (`network.vpnHintDismissed`); every place follows the saved settings.
  */
 
-import { listen } from '@tauri-apps/api/event';
-import type { NetworkModeKind } from './bindings/NetworkModeKind';
+import type { NetworkMode } from './bindings/NetworkMode';
+import type { NetworkSettings } from './bindings/NetworkSettings';
+import { follow } from './follow';
 import {
   SEEDING_STARTED_EVENT,
   SETTINGS_CHANGED_EVENT,
@@ -25,7 +26,7 @@ export const VPN_HINT =
 export const VPN_POST_URL = 'https://torrentplayer.io/blog/vpn-for-torrenting/';
 
 /** Whether the note applies: Direct mode, and not dismissed. */
-export function showVpnHint(mode: NetworkModeKind, dismissed: boolean): boolean {
+export function showVpnHint(mode: NetworkMode, dismissed: boolean): boolean {
   return mode === 'direct' && !dismissed;
 }
 
@@ -34,58 +35,28 @@ export function openVpnPost(): void {
   void openLink(VPN_POST_URL).catch(() => undefined);
 }
 
-/** Hides the note for good. */
+/** Hides the note for good. Rejects if the setting could not be saved. */
 export function dismissVpnHint(): Promise<void> {
   return updateSettings({ network: { vpnHintDismissed: true } }).then(() => undefined);
 }
 
-/** Registers `onEvent` for a backend event; the returned function stops it. */
-function follow(event: string, onEvent: (payload: unknown) => void): () => void {
-  let stopped = false;
-  let unlisten: (() => void) | null = null;
-  listen(event, (e) => {
-    if (!stopped) {
-      onEvent(e.payload);
-    }
-  })
-    .then((stop) => {
-      if (stopped) {
-        stop();
-      } else {
-        unlisten = stop;
-      }
-    })
-    .catch(() => undefined);
-  return () => {
-    stopped = true;
-    unlisten?.();
-  };
-}
-
 /**
- * Calls `onDismissed` with whether the note is dismissed, now and after every settings change,
- * until the returned function is called.
+ * Calls `onNetwork` with the saved network settings (mode and dismissal), now and after every
+ * settings change, until the returned function is called.
  */
-export function followVpnHintDismissed(onDismissed: (dismissed: boolean) => void): () => void {
-  let heard = false;
-  const stop = follow(SETTINGS_CHANGED_EVENT, (payload) => {
-    heard = true;
-    onDismissed((payload as Settings).network.vpnHintDismissed);
-  });
-  getSettings()
-    .then((view) => {
-      // An event that arrived first is newer.
-      if (!heard) {
-        onDismissed(view.settings.network.vpnHintDismissed);
-      }
-    })
-    .catch(() => undefined);
-  return stop;
+export function followVpnHint(onNetwork: (network: NetworkSettings) => void): () => void {
+  return follow<Settings>(
+    SETTINGS_CHANGED_EVENT,
+    (settings) => {
+      onNetwork(settings.network);
+    },
+    () => getSettings().then((view) => view.settings),
+  );
 }
 
-/** Calls `onStart` each time a torrent starts seeding after playback. */
+/** Calls `onStart` when a torrent starts seeding after its playback ended. */
 export function followSeedingStarted(onStart: () => void): () => void {
-  return follow(SEEDING_STARTED_EVENT, () => {
+  return follow<null>(SEEDING_STARTED_EVENT, () => {
     onStart();
   });
 }

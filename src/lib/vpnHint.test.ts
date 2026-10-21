@@ -12,7 +12,7 @@ const {
   VPN_POST_URL,
   dismissVpnHint,
   followSeedingStarted,
-  followVpnHintDismissed,
+  followVpnHint,
   openVpnPost,
   showVpnHint,
 } = await import('./vpnHint');
@@ -71,7 +71,7 @@ describe('the VPN note', () => {
       }),
     );
     const seen: boolean[] = [];
-    const stop = followVpnHintDismissed((d) => seen.push(d));
+    const stop = followVpnHint((network) => seen.push(network.vpnHintDismissed));
     handlerFor('settings-changed')({ payload: (view(true) as { settings: unknown }).settings });
     answer(view(false));
     await Promise.resolve();

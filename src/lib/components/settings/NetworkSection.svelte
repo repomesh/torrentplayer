@@ -32,7 +32,7 @@
     followNetwork,
     interfaceAdvice,
   } from '../../network';
-  import { showVpnHint } from '../../vpnHint';
+  import { followVpnHint, showVpnHint } from '../../vpnHint';
   import VpnHint from '../VpnHint.svelte';
   import Field from './Field.svelte';
   import SecretField from './SecretField.svelte';
@@ -98,6 +98,8 @@
   let checking = $state(false);
   let check = $state<PublicIp | null>(null);
   let checkMessage = $state<string | null>(null);
+  // Dismissed elsewhere (the status bar) since this page loaded its settings.
+  let hintDismissedElsewhere = $state(false);
 
   // WireGuard import: check first (a summary without keys), then save.
   let importText = $state('');
@@ -150,9 +152,16 @@
 
   onMount(() => {
     loadInterfaces();
-    return followNetwork((next) => {
+    const stopHint = followVpnHint((network) => {
+      hintDismissedElsewhere = network.vpnHintDismissed;
+    });
+    const stopNetwork = followNetwork((next) => {
       status = next;
     });
+    return () => {
+      stopHint();
+      stopNetwork();
+    };
   });
 
   function time(ms: number): string {
@@ -341,7 +350,7 @@
     {/each}
   </fieldset>
 
-  {#if showVpnHint(n.mode, n.vpnHintDismissed)}
+  {#if showVpnHint(n.mode, n.vpnHintDismissed || hintDismissedElsewhere)}
     <div class="vpn-hint">
       <VpnHint
         onDismiss={() => {
