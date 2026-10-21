@@ -5,13 +5,13 @@
 
 ## Context
 
-TorrentStream is an open source desktop app written mostly in Rust. We want a license that:
+TorrentPlayer is an open source desktop app written mostly in Rust. We want a license that:
 
 - is familiar to Rust contributors and compatible with the crates we depend on,
 - lets the code be reused widely, including in other open source projects under the GPL, and
 - includes a patent grant.
 
-TorrentStream also bundles native libraries with their own licenses:
+TorrentPlayer also bundles native libraries with their own licenses:
 
 | Component                                                                            | License                                                            | How it is used                       |
 | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------ | ------------------------------------ |
@@ -24,7 +24,7 @@ TorrentStream also bundles native libraries with their own licenses:
 
 ## Decision
 
-TorrentStream's own code is dual licensed **MIT OR Apache-2.0**, the Rust ecosystem convention. Every
+TorrentPlayer's own code is dual licensed **MIT OR Apache-2.0**, the Rust ecosystem convention. Every
 source file carries an `SPDX-License-Identifier: MIT OR Apache-2.0` header, and every crate sets
 `license.workspace = true`.
 
@@ -34,7 +34,7 @@ only for the specific Tauri dependencies listed above, through per-crate excepti
 available, which is satisfied because we use them unmodified from crates.io. Modifying them would
 require publishing our changes to those files.
 
-libmpv and FFmpeg must be **LGPL builds**, dynamically linked, so TorrentStream stays MIT OR Apache-2.0
+libmpv and FFmpeg must be **LGPL builds**, dynamically linked, so TorrentPlayer stays MIT OR Apache-2.0
 and users can replace the libraries. Their license texts and source locations go in
 `THIRD_PARTY_NOTICES.md` and the About screen. FFmpeg currently ships as a separate program (the
 audio conversion sidecar, see [ADR 0007](0007-dolby-and-dts-audio.md)), which is not linked at
@@ -44,7 +44,7 @@ all and can likewise be replaced.
 
 - **GPL-3.0-or-later for the whole app.** This would let us bundle any libmpv or FFmpeg build,
   including the common prebuilt GPL ones, without worrying about build flags. Rejected for now
-  because it limits reuse of TorrentStream's crates (for example the prioritizer and range server) in
+  because it limits reuse of TorrentPlayer's crates (for example the prioritizer and range server) in
   permissively licensed projects.
 - **MIT only or Apache-2.0 only.** Dual licensing gives users the patent grant of Apache-2.0 and
   the GPL-2.0 compatibility of MIT.

@@ -4,22 +4,22 @@
 //! result once it has settled (see [`crate::preload`]).
 //!
 //! `search_torrents_progressive` sends merged results over a channel as indexers answer (first
-//! results in about half a second; the service streams them, see `lumen_search`), at most
+//! results in about half a second; the service streams them, see `torrentplayer_search`), at most
 //! every [`PROGRESS_INTERVAL`]. Starting another search, or `cancel_search`, stops it.
 //! `search_torrents` returns everything at once.
 
 use std::time::Duration;
 
-use lumen_search::{
-    Codec, Container, ContentKind, EmberglowProvider, Playability, Quality, Query, SearchError,
-    SearchProgress, SearchProvider as _, SearchResponse, SearchResult, Settle, SettleAction,
-    Source,
-};
 use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager as _, State};
 use tokio::sync::{OnceCell, mpsc, watch};
 use tokio::time::Instant;
+use torrentplayer_search::{
+    Codec, Container, ContentKind, EmberglowProvider, Playability, Quality, Query, SearchError,
+    SearchProgress, SearchProvider as _, SearchResponse, SearchResult, Settle, SettleAction,
+    Source,
+};
 use ts_rs::TS;
 
 use crate::core::AppState;
@@ -40,7 +40,7 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(150);
 pub(crate) struct SearchState {
     provider: OnceCell<EmberglowProvider>,
     /// Search requests go through the network manager (VPN interface, proxy, kill switch).
-    network: lumen_net::Network,
+    network: torrentplayer_net::Network,
     /// One progressive search at a time: a new one stops the one running.
     searches: Latest,
 }
@@ -60,7 +60,7 @@ impl SearchState {
         self.provider.get().cloned()
     }
 
-    pub(crate) fn new(network: lumen_net::Network) -> Self {
+    pub(crate) fn new(network: torrentplayer_net::Network) -> Self {
         Self {
             provider: OnceCell::new(),
             network,
@@ -74,7 +74,7 @@ impl SearchState {
         let shared = self
             .provider
             .get_or_try_init(|| async {
-                let base = url::Url::parse(lumen_search::DEFAULT_BASE_URL)
+                let base = url::Url::parse(torrentplayer_search::DEFAULT_BASE_URL)
                     .map_err(|e| IpcError::internal(&e))?;
                 let client = self
                     .network
@@ -192,7 +192,9 @@ impl From<&Quality> for QualityDto {
                 ContentKind::Unknown => ContentKindDto::Unknown,
             },
             audio: q.audio.map(|a| a.label().to_owned()),
-            audio_plays: q.audio.map(lumen_search::quality::Audio::plays_in_webview),
+            audio_plays: q
+                .audio
+                .map(torrentplayer_search::quality::Audio::plays_in_webview),
         }
     }
 }
@@ -529,9 +531,9 @@ async fn apply_preloads(mut decided: mpsc::UnboundedReceiver<SettleAction>, hand
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use lumen_search::rank::rank;
-    use lumen_search::results::{Candidate, build_response};
     use tauri::ipc::InvokeResponseBody;
+    use torrentplayer_search::rank::rank;
+    use torrentplayer_search::results::{Candidate, build_response};
 
     use super::*;
 
@@ -588,7 +590,7 @@ mod tests {
         );
         assert!(decided.try_recv().is_err(), "not settled yet");
 
-        tokio::time::sleep(lumen_search::settle::SETTLE_TIME).await;
+        tokio::time::sleep(torrentplayer_search::settle::SETTLE_TIME).await;
         let Ok(SettleAction::Preload { key, .. }) = decided.try_recv() else {
             panic!("the settled best pick is preloaded");
         };

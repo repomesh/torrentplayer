@@ -13,7 +13,7 @@
 </script>
 
 {#if status === 'restart'}
-  <span class="tag restart" title="Saved now; TorrentStream uses it the next time it starts">
+  <span class="tag restart" title="Saved now; TorrentPlayer uses it the next time it starts">
     Applies on next start
   </span>
 {:else if status === 'later'}

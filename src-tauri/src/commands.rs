@@ -6,12 +6,12 @@
 //! Tauri rejects calls to it. Every argument is validated here; the webview is not trusted.
 //! The contract is documented in `docs/ipc.md`.
 
-use lumen_prioritize::{Anchor, Purpose};
-use lumen_stream::StreamId;
-use lumen_torrent::{FileKind, TorrentInfo, TorrentSource, TorrentState, magnet_link};
 use serde::{Deserialize, Serialize};
 use tauri::ipc::{InvokeBody, Request};
 use tauri::{AppHandle, State};
+use torrentplayer_prioritize::{Anchor, Config as PrioritizeConfig, Purpose};
+use torrentplayer_stream::StreamId;
+use torrentplayer_torrent::{FileKind, TorrentInfo, TorrentSource, TorrentState, magnet_link};
 use ts_rs::TS;
 
 use crate::audio::TrackProbe;
@@ -32,7 +32,7 @@ async fn capped<T>(
 ) -> Result<T, IpcError> {
     tokio::time::timeout(limit, work)
         .await
-        .map_err(|_| IpcError::from(lumen_torrent::EngineError::MetadataTimeout))?
+        .map_err(|_| IpcError::from(torrentplayer_torrent::EngineError::MetadataTimeout))?
 }
 
 /// Number of cells in the piece map sent to the UI.
@@ -51,7 +51,7 @@ pub struct AppInfo {
     pub name: String,
     /// Semantic version of this build.
     pub version: String,
-    /// SPDX license expression for TorrentStream's own code.
+    /// SPDX license expression for TorrentPlayer's own code.
     pub license: String,
 }
 
@@ -60,7 +60,7 @@ impl AppInfo {
     #[must_use]
     pub fn current() -> Self {
         Self {
-            name: "TorrentStream".to_owned(),
+            name: "TorrentPlayer".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             license: env!("CARGO_PKG_LICENSE").to_owned(),
         }
@@ -272,7 +272,7 @@ pub(crate) async fn start_stream(
         .next()
         .unwrap_or(&entry.path)
         .to_owned();
-    let library_media = lumen_library::Media {
+    let library_media = torrentplayer_library::Media {
         info_hash: info.info_hash.to_ascii_lowercase(),
         file_index: u32::try_from(file_index)
             .map_err(|_| IpcError::invalid("fileIndex is out of range."))?,
@@ -296,7 +296,7 @@ pub(crate) async fn start_stream(
     let (session, media) = capped(START_TIMEOUT, async {
         let session = core
             .engine
-            .start_playback(torrent_id, file_index, lumen_prioritize::Config::default())
+            .start_playback(torrent_id, file_index, PrioritizeConfig::default())
             .await?;
         let media = core.engine.media_source(torrent_id, file_index).await?;
         Ok((session, media))
@@ -341,7 +341,7 @@ pub(crate) async fn start_stream(
     );
     let resume_position_secs = match library.opened(&app, library_media).await {
         Ok(item) if settings.current().playback.resume_position => {
-            lumen_library::resume_position(&item)
+            torrentplayer_library::resume_position(&item)
         }
         Ok(_) => None,
         Err(error) => {
@@ -451,7 +451,7 @@ pub(crate) async fn record_player_metric(
     Ok(())
 }
 
-/// Why an anchor exists (mirrors `lumen_prioritize::Purpose`).
+/// Why an anchor exists (mirrors `torrentplayer_prioritize::Purpose`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -542,7 +542,7 @@ pub(crate) struct StreamStats {
     pub last_seek_ms: Option<f64>,
     /// Number of seeks measured.
     pub seeks: u32,
-    /// Engine serving the stream: `lumen-swarm` or `librqbit`.
+    /// Engine serving the stream: `torrentplayer-swarm` or `librqbit`.
     pub engine: Option<String>,
 }
 
@@ -672,7 +672,7 @@ fn library_text(value: &str) -> String {
     let mut chars = trimmed.chars();
     let clipped: String = chars
         .by_ref()
-        .take(lumen_library::MAX_TITLE_CHARS)
+        .take(torrentplayer_library::MAX_TITLE_CHARS)
         .collect();
     if clipped.is_empty() {
         "Untitled".to_owned()
@@ -682,9 +682,9 @@ fn library_text(value: &str) -> String {
 }
 
 /// Development-only automation: a torrent to add and play on start-up, from the
-/// `LUMEN_DEV_AUTOPLAY` environment variable (`<link or .torrent path>|<file index>|<seeks>|<peers>`,
+/// `TORRENTPLAYER_DEV_AUTOPLAY` environment variable (`<link or .torrent path>|<file index>|<seeks>|<peers>`,
 /// where seeks are comma-separated fractions and the optional peers comma-separated addresses
-/// to connect to, such as a local `lumen-bench seed`). Used to measure real decoder timings and
+/// to connect to, such as a local `torrentplayer-bench seed`). Used to measure real decoder timings and
 /// to play test media.
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -706,7 +706,7 @@ pub(crate) async fn dev_autoplay(
     if !cfg!(debug_assertions) {
         return Ok(None);
     }
-    let Ok(spec) = std::env::var("LUMEN_DEV_AUTOPLAY") else {
+    let Ok(spec) = std::env::var("TORRENTPLAYER_DEV_AUTOPLAY") else {
         return Ok(None);
     };
     let mut parts = spec.split('|');
@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn app_info_matches_package_metadata() {
         let info = AppInfo::current();
-        assert_eq!(info.name, "TorrentStream");
+        assert_eq!(info.name, "TorrentPlayer");
         assert_eq!(info.version, env!("CARGO_PKG_VERSION"));
         assert_eq!(info.license, "MIT OR Apache-2.0");
     }
@@ -776,10 +776,10 @@ mod tests {
         assert_eq!(library_text("  Lecture\n2\t "), "Lecture 2");
         assert_eq!(library_text("\0\n"), "Untitled");
         assert_eq!(
-            library_text(&"x".repeat(lumen_library::MAX_TITLE_CHARS + 5))
+            library_text(&"x".repeat(torrentplayer_library::MAX_TITLE_CHARS + 5))
                 .chars()
                 .count(),
-            lumen_library::MAX_TITLE_CHARS
+            torrentplayer_library::MAX_TITLE_CHARS
         );
     }
 }

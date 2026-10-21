@@ -20,12 +20,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use lumen_search::EmberglowProvider;
-use lumen_torrent::{EngineError, TorrentSource};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use tauri::ipc::Channel;
 use tokio::task::JoinSet;
+use torrentplayer_search::EmberglowProvider;
+use torrentplayer_torrent::{EngineError, TorrentSource};
 use ts_rs::TS;
 use url::Url;
 

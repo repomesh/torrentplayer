@@ -2,10 +2,10 @@
 
 //! Preloading the best search result, so that playing it starts at once.
 //!
-//! When a search's best pick has settled (see `lumen_search::settle`: it stayed best for 2 s,
+//! When a search's best pick has settled (see `torrentplayer_search::settle`: it stayed best for 2 s,
 //! or the search finished) and [`PreloadPolicy::preload_top_result`] allows it, the engine
 //! downloads the start and end of that torrent's best video in the background (see
-//! `lumen_torrent::preload` for the limits: one at a time, at most about 100 MB, never
+//! `torrentplayer_torrent::preload` for the limits: one at a time, at most about 100 MB, never
 //! uploaded). A search starts at most two preloads: the settled pick, and the final one if a
 //! late indexer changed it. A search that finishes without a best pick, or with preloading
 //! turned off, evicts the previous preload. Adding the same magnet link later reuses the
@@ -21,10 +21,10 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use lumen_search::SearchResponse;
-use lumen_torrent::{PreloadPhase, PreloadStatus, TorrentSource, magnet_info_hash};
 use serde::Serialize;
 use tauri::State;
+use torrentplayer_search::SearchResponse;
+use torrentplayer_torrent::{PreloadPhase, PreloadStatus, TorrentSource, magnet_info_hash};
 use ts_rs::TS;
 
 use crate::core::{AppState, Core};
@@ -294,8 +294,8 @@ pub(crate) fn preload_status(state: State<'_, PreloadState>) -> Option<PreloadSt
 
 #[cfg(test)]
 mod tests {
-    use lumen_search::rank::rank;
-    use lumen_search::results::{Candidate, build_response};
+    use torrentplayer_search::rank::rank;
+    use torrentplayer_search::results::{Candidate, build_response};
 
     use super::*;
 

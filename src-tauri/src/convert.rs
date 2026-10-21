@@ -18,18 +18,18 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use lumen_stream::{LiveSource, MediaSource, ServerConfig, StreamId, StreamServer};
 use serde::Serialize;
 use tauri::State;
 use tokio::io::{AsyncRead, AsyncReadExt as _, ReadBuf};
 use tokio::process::{Child, ChildStdout, Command};
+use torrentplayer_stream::{LiveSource, MediaSource, ServerConfig, StreamId, StreamServer};
 use ts_rs::TS;
 
 use crate::core::{AppState, Core};
 use crate::error::{ErrorKind, IpcError};
 
 /// The sidecar's file name, without the `.exe` suffix on Windows.
-const SIDECAR: &str = "torrentstream-ffmpeg";
+const SIDECAR: &str = "torrentplayer-ffmpeg";
 /// How long FFmpeg may take to write the initialization segment. It must first read the
 /// container's index and the first frames, which may still be downloading.
 const INIT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -57,12 +57,12 @@ pub(crate) struct ConvertedStream {
 }
 
 /// The bundled FFmpeg, if this build has one: next to the app's executable, where Tauri puts
-/// sidecars. Debug builds also accept a path in `LUMEN_FFMPEG`.
+/// sidecars. Debug builds also accept a path in `TORRENTPLAYER_FFMPEG`.
 pub(crate) fn sidecar() -> Option<&'static Path> {
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
     PATH.get_or_init(|| {
         #[cfg(debug_assertions)]
-        if let Some(path) = std::env::var_os("LUMEN_FFMPEG") {
+        if let Some(path) = std::env::var_os("TORRENTPLAYER_FFMPEG") {
             return Some(PathBuf::from(path));
         }
         let exe = std::env::current_exe().ok()?;
@@ -233,7 +233,7 @@ enum ConversionError {
     #[error("FFmpeg stopped before writing any video: {0}")]
     Ended(String),
     #[error("{0}")]
-    Init(#[from] lumen_media::InitError),
+    Init(#[from] torrentplayer_media::InitError),
     #[error("the video's codec can't be played: {0}")]
     Codec(String),
     #[error("reading FFmpeg's output failed: {0}")]
@@ -283,7 +283,7 @@ impl Conversion {
             .await
             .map_err(|_| ConversionError::Timeout)??;
         let (len, bytes) = init;
-        let mime = lumen_media::mse_type(&bytes[..len])
+        let mime = torrentplayer_media::mse_type(&bytes[..len])
             .ok_or_else(|| ConversionError::Codec(log.tail()))?;
         Ok(Self {
             output: Output::new(bytes, stdout, child),
@@ -350,7 +350,7 @@ async fn read_init(
     let mut bytes = Vec::new();
     let mut chunk = vec![0; READ_CHUNK];
     loop {
-        if let Some(len) = lumen_media::init_segment_len(&bytes) {
+        if let Some(len) = torrentplayer_media::init_segment_len(&bytes) {
             return Ok((len?, bytes));
         }
         let n = stdout
@@ -509,8 +509,9 @@ mod tests {
     /// Optional real-sidecar smoke test, with a locally generated Dolby/DTS fixture.
     #[tokio::test]
     async fn real_sidecar_converts_and_seeks() {
-        type Open =
-            Pin<Box<dyn Future<Output = io::Result<Box<dyn lumen_stream::MediaReader>>> + Send>>;
+        type Open = Pin<
+            Box<dyn Future<Output = io::Result<Box<dyn torrentplayer_stream::MediaReader>>> + Send>,
+        >;
         struct Memory(Arc<[u8]>);
         impl MediaSource for Memory {
             fn byte_len(&self) -> u64 {
@@ -522,13 +523,14 @@ mod tests {
             fn open(&self) -> Open {
                 let data = Arc::clone(&self.0);
                 Box::pin(async move {
-                    Ok(Box::new(io::Cursor::new(data)) as Box<dyn lumen_stream::MediaReader>)
+                    Ok(Box::new(io::Cursor::new(data))
+                        as Box<dyn torrentplayer_stream::MediaReader>)
                 })
             }
         }
         let (Some(ffmpeg), Some(fixture)) = (
-            std::env::var_os("LUMEN_TEST_FFMPEG"),
-            std::env::var_os("LUMEN_TEST_DOLBY_FILE"),
+            std::env::var_os("TORRENTPLAYER_TEST_FFMPEG"),
+            std::env::var_os("TORRENTPLAYER_TEST_DOLBY_FILE"),
         ) else {
             return;
         };

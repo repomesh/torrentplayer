@@ -3,7 +3,7 @@
 //! Downloads the play queue in the background, sharing the link with the video being watched.
 //!
 //! About once a second the downloader measures every queued torrent, asks
-//! [`lumen_torrent::bandwidth::Planner`] which items should download and how fast, and carries
+//! [`torrentplayer_torrent::bandwidth::Planner`] which items should download and how fast, and carries
 //! that out: every queued item downloads at once (or as many as the user's maximum allows),
 //! files of active items are selected and the others deselected, queued torrents nothing needs
 //! are paused, and while playback needs the bandwidth background torrents get only what it
@@ -18,12 +18,12 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use lumen_library::{DownloadOrder, Queue, QueueItem};
-use lumen_torrent::bandwidth::{self, Candidate, Foreground, Planner, Pressure};
-use lumen_torrent::{FileReadiness, TorrentId, TorrentSource, TorrentStats};
 use serde::Serialize;
 use tauri::{AppHandle, Manager as _, State};
 use tokio::sync::Notify;
+use torrentplayer_library::{DownloadOrder, Queue, QueueItem};
+use torrentplayer_torrent::bandwidth::{self, Candidate, Foreground, Planner, Pressure};
+use torrentplayer_torrent::{FileReadiness, TorrentId, TorrentSource, TorrentStats};
 use ts_rs::TS;
 
 use crate::core::{AppState, Core};
@@ -346,7 +346,7 @@ struct TorrentRun {
     was_watching: bool,
     /// When the most recent playback ended; starts the optional seeding timer.
     seed_since: Option<Instant>,
-    /// The lumen-swarm upload switch last requested.
+    /// The torrentplayer-swarm upload switch last requested.
     upload_enabled: Option<bool>,
 }
 
@@ -369,7 +369,7 @@ fn group_of(item: &QueueItem) -> String {
 /// independently mean no limit; whichever configured target is reached first stops seeding.
 fn post_playback_seeding(
     since: Option<Instant>,
-    bandwidth: &lumen_settings::BandwidthSettings,
+    bandwidth: &torrentplayer_settings::BandwidthSettings,
     downloaded: u64,
     uploaded: u64,
     now: Instant,
@@ -927,10 +927,10 @@ mod tests {
     fn post_playback_seeding_stops_at_the_first_target() {
         let since = Instant::now();
         let now = since + Duration::from_secs(30 * 60);
-        let bandwidth = lumen_settings::BandwidthSettings {
+        let bandwidth = torrentplayer_settings::BandwidthSettings {
             seed_ratio_target: 2.0,
             seed_time_limit_minutes: 60,
-            ..lumen_settings::BandwidthSettings::default()
+            ..torrentplayer_settings::BandwidthSettings::default()
         };
         assert!(post_playback_seeding(
             Some(since),
@@ -958,10 +958,10 @@ mod tests {
     #[test]
     fn post_playback_seeding_can_be_unlimited_or_disabled() {
         let now = Instant::now();
-        let mut bandwidth = lumen_settings::BandwidthSettings {
+        let mut bandwidth = torrentplayer_settings::BandwidthSettings {
             seed_ratio_target: 0.0,
             seed_time_limit_minutes: 0,
-            ..lumen_settings::BandwidthSettings::default()
+            ..torrentplayer_settings::BandwidthSettings::default()
         };
         assert!(post_playback_seeding(
             Some(now.checked_sub(Duration::from_secs(1)).unwrap_or(now)),

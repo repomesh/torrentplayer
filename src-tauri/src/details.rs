@@ -7,9 +7,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use lumen_torrent::TorrentSource;
 use serde::Serialize;
 use tauri::State;
+use torrentplayer_torrent::TorrentSource;
 use ts_rs::TS;
 use url::Url;
 
@@ -52,7 +52,7 @@ pub(crate) struct TorrentDetailsDto {
     pub created_ms: Option<i64>,
 }
 
-fn dto(d: lumen_torrent::details::TorrentDetails) -> TorrentDetailsDto {
+fn dto(d: torrentplayer_torrent::details::TorrentDetails) -> TorrentDetailsDto {
     let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     TorrentDetailsDto {
         files: d
@@ -121,13 +121,13 @@ pub(crate) async fn torrent_details(
                     .await
             }
             (None, Some(source)) => core.engine.prefetch_metadata(source).await,
-            (None, None) => Err(lumen_torrent::EngineError::Unsupported(
+            (None, None) => Err(torrentplayer_torrent::EngineError::Unsupported(
                 "This result has no link to fetch its details from.",
             )),
         }
     })
     .await
-    .map_err(|_| IpcError::from(lumen_torrent::EngineError::MetadataTimeout))??;
+    .map_err(|_| IpcError::from(torrentplayer_torrent::EngineError::MetadataTimeout))??;
     Ok(core.engine.torrent_details(&fetched).map(dto))
 }
 

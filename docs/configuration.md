@@ -13,22 +13,23 @@ made and saved automatically about half a second later.
 | ----------------------- | --------------------------------------------------------------------------- |
 | Settings                | `settings.json` in the app config folder (see below)                        |
 | Passwords and keys      | The OS credential store, never in `settings.json` (see [Secrets](#secrets)) |
-| Downloaded lecture data | `TorrentStream` in your Downloads folder, unless you choose another folder  |
+| Downloaded lecture data | `TorrentPlayer` in your Downloads folder, unless you choose another folder  |
 
-The app config folder is `%APPDATA%\io.torrentstream.desktop` on Windows,
-`~/Library/Application Support/io.torrentstream.desktop` on macOS, and
-`~/.config/io.torrentstream.desktop` on Linux. The default download folder is
-`TorrentStream` in your Downloads folder (`%USERPROFILE%\Downloads\TorrentStream`,
-`~/Downloads/TorrentStream`), or `downloads` in the app's local data folder on systems without
+The app config folder is `%APPDATA%\io.torrentplayer.desktop` on Windows,
+`~/Library/Application Support/io.torrentplayer.desktop` on macOS, and
+`~/.config/io.torrentplayer.desktop` on Linux. The default download folder is
+`TorrentPlayer` in your Downloads folder (`%USERPROFILE%\Downloads\TorrentPlayer`,
+`~/Downloads/TorrentPlayer`), or `downloads` in the app's local data folder on systems without
 one. Earlier versions kept downloads in the local data folder (`%LOCALAPPDATA%\<identifier>\downloads`);
 unless you chose a folder yourself, they are moved to the new default at start-up. Inside it,
-`lumen-swarm` holds TorrentStream's engine cache (one `pieces.dat` per torrent, not playable
+`torrentplayer-swarm` holds TorrentPlayer's engine cache (one `pieces.dat` per torrent, not playable
 files) and `librqbit` holds downloads made with the librqbit engine (the `rqbit` engine
 choice) as their own files.
 
-Versions from before the rename to TorrentStream used `io.github.lumen-app.lumen` for these
-folders. At start-up, TorrentStream moves anything still there into the new folders (settings,
-the queue, and the download cache; nothing is overwritten), so the old folder disappears once
+Versions from before the rename to TorrentPlayer used `io.torrentstream.desktop` (and, earlier
+still, `io.github.lumen-app.lumen`) for these folders, `TorrentStream` in the Downloads folder,
+and `lumen-swarm` for the engine cache. At start-up, TorrentPlayer moves anything still there into the new folders (settings,
+the queue, downloads, and the download cache; nothing is overwritten), so the old folder disappears once
 it is empty. Close any old copy of the app first: files it has open are moved at a later start.
 
 `settings.json` is plain JSON with a `version` field. It is written atomically (to a temporary
@@ -42,18 +43,18 @@ Loading never fails:
 - A damaged file (not JSON) is renamed to `settings.invalid.json` and the defaults are used.
 - A section with a wrong type (for example text where a number belongs) is reset to its
   defaults; the other sections are kept. Out-of-range values are reset individually.
-- A file written by a newer TorrentStream is read as far as possible, and a copy is kept as
+- A file written by a newer TorrentPlayer is read as far as possible, and a copy is kept as
   `settings.newer.json`, because saving drops the fields this version does not know.
 
 Every problem is logged and shown at the top of the Settings page. Older files are upgraded by
-`lumen_settings::migrate`, which gains one step per schema change. Version 2 removed
+`torrentplayer_settings::migrate`, which gains one step per schema change. Version 2 removed
 `network.killSwitch` (the kill switch is always on in protected modes, see [Network](#network));
 a version 1 file loads normally and the field is dropped the next time settings are saved.
 Version 3 added the optional seeding time target; older files keep ratio-only seeding.
 
 ## Settings
 
-**When it applies:** _now_ means immediately; _next start_ means the next time TorrentStream starts;
+**When it applies:** _now_ means immediately; _next start_ means the next time TorrentPlayer starts;
 _later_ means the setting is saved now and takes effect when the feature ships (the Settings page
 tags these "Coming in a later milestone").
 
@@ -92,17 +93,17 @@ downloaded; it needs FFmpeg (see `advanced.ffmpegDir`).
 | `storage.cacheLimitGb`     | `null`  | `null` (unlimited) or 1–100 000                   | now        |
 | `storage.cleanupAfterDays` | `null`  | `null` (never) or 1–3650                          | now        |
 
-The download folder holds everything TorrentStream downloads: the videos themselves and its cache, in
-`lumen-swarm/` and `librqbit/` folders inside it. Type a path, or press **Choose folder…** to
+The download folder holds everything TorrentPlayer downloads: the videos themselves and its cache, in
+`torrentplayer-swarm/` and `librqbit/` folders inside it. Type a path, or press **Choose folder…** to
 pick one with the system folder picker. The new folder is used from the next start (the page says
 so); data already downloaded stays in the old folder, and **Use default** goes back to the
 default folder.
 
 A download folder must be a full path (not relative), must not be the root of a drive, and cannot
-contain `.` or `..` components, control characters, or device prefixes (`\\?\`, `\\.\`). TorrentStream
+contain `.` or `..` components, control characters, or device prefixes (`\\?\`, `\\.\`). TorrentPlayer
 creates it if needed and checks that it can write there before saving.
 
-The **Cache** row shows the current use and configured limit. TorrentStream marks a download as
+The **Cache** row shows the current use and configured limit. TorrentPlayer marks a download as
 finished when playback reaches the end, then checks the storage policy at startup, after playback,
 and periodically while it runs. It removes the oldest eligible downloads first until the cache is
 within the limit; the age setting independently removes eligible downloads older than the selected
@@ -110,7 +111,7 @@ number of days.
 
 **Clear now…** removes every finished download that is no longer in the queue. A queued torrent or
 one with an open player stream is always protected. Cleanup deletes only validated info-hash
-folders inside TorrentStream's own `lumen-swarm/` and `librqbit/` cache folders. Unrecognized and
+folders inside TorrentPlayer's own `torrentplayer-swarm/` and `librqbit/` cache folders. Unrecognized and
 legacy layouts count toward the displayed size but are not removed automatically because they
 cannot be associated safely with a finished torrent.
 
@@ -154,7 +155,7 @@ turns the metadata prefetch of the other results on screen on or off (see
 
 ### Network
 
-The network layer (`lumen-net`) applies these as soon as they are saved; see
+The network layer (`torrentplayer-net`) applies these as soon as they are saved; see
 [Network modes and kill switch](network.md).
 
 | Setting                        | Default   | Valid values                                          | Applies                    |
@@ -164,7 +165,7 @@ The network layer (`lumen-net`) applies these as soon as they are saved; see
 | `network.socks5.host`          | `""`      | a host name or IP address, without scheme or port     | now                        |
 | `network.socks5.port`          | `1080`    | 1–65535                                               | now                        |
 | `network.socks5.username`      | `null`    | 1–255 bytes                                           | now                        |
-| `network.socks5.proxyDns`      | `true`    | on: the proxy resolves names; off: TorrentStream does | now                        |
+| `network.socks5.proxyDns`      | `true`    | on: the proxy resolves names; off: TorrentPlayer does | now                        |
 | `network.socks5.proxyTrackers` | `true`    | on: trackers through the proxy; off: none at all      | now                        |
 | `network.socks5.proxyDht`      | `true`    | DHT through UDP ASSOCIATE; requires proxy UDP support | now                        |
 | `network.wireguard`            | empty     | set by importing a `.conf` file (non-secret parts)    | now in WireGuard mode      |
@@ -173,18 +174,18 @@ The network layer (`lumen-net`) applies these as soon as they are saved; see
 
 **Kill switch:** always on when a VPN or proxy mode is selected, so there is no setting for it.
 If the interface or proxy stops working, torrent traffic pauses and searches are refused; traffic
-resumes by itself when it works again. TorrentStream never falls back to a direct connection. Earlier versions
+resumes by itself when it works again. TorrentPlayer never falls back to a direct connection. Earlier versions
 had a `network.killSwitch` toggle that had no effect; it is dropped on upgrade.
 
 **DHT:** uses sockets bound to the VPN adapter or inside WireGuard. In SOCKS5 mode,
 `proxyDht` enables discovery through UDP ASSOCIATE; proxies without UDP support cannot
-provide DHT, and TorrentStream never sends it around them.
+provide DHT, and TorrentPlayer never sends it around them.
 
 **VPN:** use an existing VPN app connection (including OpenVPN or a provider's app), then choose
 its tunnel adapter. This is saved as `bindInterface` for compatibility. Hyper-V local switches
 cannot establish a VPN. Tailscale requires an exit node for internet destinations.
 
-**WireGuard:** choose **WireGuard** and import a provider's `.conf` file to connect inside TorrentStream.
+**WireGuard:** choose **WireGuard** and import a provider's `.conf` file to connect inside TorrentPlayer.
 **Check configuration** previews it without keys; **Save configuration** stores the keys in the
 credential store and the remaining fields in `network.wireguard`, then connects. A missing key
 or failed handshake blocks traffic. No external VPN app or administrator rights are required.
@@ -202,13 +203,13 @@ The SOCKS5 password and the WireGuard private and preshared keys are [secrets](#
 | `advanced.logLevel`     | `info`  | `error`, `warn`, `info`, `debug`, `trace` | now        |
 | `advanced.ffmpegDir`    | `null`  | `null` (look on `PATH`) or a full path    | now        |
 
-`auto` and `swarm` use TorrentStream's engine (lumen-swarm) for every source. For a magnet link,
-librqbit fetches only the metadata, then hands the torrent and the peers it found to lumen-swarm.
+`auto` and `swarm` use TorrentPlayer's engine (torrentplayer-swarm) for every source. For a magnet link,
+librqbit fetches only the metadata, then hands the torrent and the peers it found to torrentplayer-swarm.
 `rqbit` is the compatibility choice that uses librqbit for the download too. The environment variables below override `engine` and
 `logLevel`, and the Settings page says so when they do.
 
 FFmpeg is optional and not bundled yet. With `ffprobe` and `ffmpeg` in `ffmpegDir` (or its
-`bin` folder), or on `PATH` when it is `null`, TorrentStream finds the duration of videos whose
+`bin` folder), or on `PATH` when it is `null`, TorrentPlayer finds the duration of videos whose
 header gives none, so read-ahead and the buffer estimate work for them, and shows seek-bar
 previews. The Settings page shows what was found and its version. An LGPL build is enough (for
 example the `lgpl` builds at <https://github.com/BtbN/FFmpeg-Builds/releases>, or a package
@@ -219,9 +220,10 @@ stream server; see [IPC](ipc.md#ffmpeg-optional).
 
 Proxy passwords and WireGuard keys are stored in the OS credential store: Windows Credential
 Manager, the macOS Keychain, or the Secret Service on Linux (GNOME Keyring or KWallet). Entries
-are filed under the service `io.github.lumen-app.lumen` with the account names
+are filed under the service `io.torrentplayer.desktop` with the account names
 `network.socks5.password`, `network.wireguard.private-key`, and
-`network.wireguard.preshared-key`.
+`network.wireguard.preshared-key`. Entries saved by earlier versions under
+`io.github.lumen-app.lumen` move to the new service the first time they are read.
 
 - They never appear in `settings.json`, logs, error messages, or `Debug` output. In memory they
   are held in zeroizing, redacting `secrecy::SecretString` values.
@@ -232,8 +234,8 @@ are filed under the service `io.github.lumen-app.lumen` with the account names
 
 ## Environment variables
 
-| Variable            | Default | Effect                                                                                                                                                                                                                                 |
-| ------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `RUST_LOG`          | unset   | Log filter, using [`tracing-subscriber` `EnvFilter` syntax](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html), for example `RUST_LOG=lumen_stream=debug,info`. Overrides `advanced.logLevel`. |
-| `LUMEN_ENGINE`      | unset   | `auto`, `swarm`, or `rqbit`, for development. Overrides `advanced.engine`.                                                                                                                                                             |
-| `LUMEN_PROFILE_DIR` | unset   | An absolute folder for a separate profile: settings in `config`, the queue in `data`, downloads in `local`. For tests and portable installs. On Windows, set `WEBVIEW2_USER_DATA_FOLDER` too to move the webview's data.               |
+| Variable                    | Default | Effect                                                                                                                                                                                                                                         |
+| --------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RUST_LOG`                  | unset   | Log filter, using [`tracing-subscriber` `EnvFilter` syntax](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html), for example `RUST_LOG=torrentplayer_stream=debug,info`. Overrides `advanced.logLevel`. |
+| `TORRENTPLAYER_ENGINE`      | unset   | `auto`, `swarm`, or `rqbit`, for development. Overrides `advanced.engine`.                                                                                                                                                                     |
+| `TORRENTPLAYER_PROFILE_DIR` | unset   | An absolute folder for a separate profile: settings in `config`, the queue in `data`, downloads in `local`. For tests and portable installs. On Windows, set `WEBVIEW2_USER_DATA_FOLDER` too to move the webview's data.                       |

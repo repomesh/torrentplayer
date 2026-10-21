@@ -3,7 +3,7 @@
 /**
  * Helpers for the Settings page.
  *
- * Validation here mirrors the Rust rules in `lumen-settings` so messages appear while the user
+ * Validation here mirrors the Rust rules in `torrentplayer-settings` so messages appear while the user
  * types; Rust re-validates every update and stays authoritative. Also: building patches from
  * dotted paths, bandwidth units, which settings apply now or later, and a debounced saver.
  */
@@ -19,7 +19,7 @@ export type SettingsSection =
 
 // --- Validation ---------------------------------------------------------------------------
 
-/** Inclusive ranges, matching `lumen-settings`. */
+/** Inclusive ranges, matching `torrentplayer-settings`. */
 export const LIMITS = {
   speed: [0.5, 3],
   rateKib: [0, 1024 * 1024],
@@ -225,7 +225,7 @@ export function describeRate(kib: number): string {
 // --- What applies when --------------------------------------------------------------------
 
 /**
- * When a setting takes effect: `live` immediately, `restart` the next time TorrentStream starts,
+ * When a setting takes effect: `live` immediately, `restart` the next time TorrentPlayer starts,
  * `later` once the feature it controls ships (it is saved now).
  */
 export type Availability = 'live' | 'restart' | 'later';

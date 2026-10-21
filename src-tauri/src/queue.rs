@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The play queue: persisted in `queue.json` (see `lumen_library::QueueStore`).
+//! The play queue: persisted in `queue.json` (see `torrentplayer_library::QueueStore`).
 //!
 //! The UI owns the queue's logic (order, cursor, auto-play) and saves the whole queue after
 //! each change; the backend validates it and writes it atomically. Items hold torrent links,
@@ -14,10 +14,10 @@ use std::collections::hash_map::Entry;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use lumen_library::{MAX_ID_BYTES, MAX_QUEUE_ITEMS, Queue, QueueStore, StoreError};
-use lumen_torrent::{FileReadiness, TorrentSource};
 use serde::{Deserialize, Serialize};
 use tauri::State;
+use torrentplayer_library::{MAX_ID_BYTES, MAX_QUEUE_ITEMS, Queue, QueueStore, StoreError};
+use torrentplayer_torrent::{FileReadiness, TorrentSource};
 use ts_rs::TS;
 
 use crate::core::AppState;
@@ -241,7 +241,7 @@ pub(crate) async fn queue_readiness(
 
 #[cfg(test)]
 mod tests {
-    use lumen_library::QueueItem;
+    use torrentplayer_library::QueueItem;
 
     use super::*;
 
@@ -264,7 +264,7 @@ mod tests {
                 played: false,
             }],
             current: Some("a".into()),
-            order: lumen_library::DownloadOrder::Fastest,
+            order: torrentplayer_library::DownloadOrder::Fastest,
         };
         state.save(&queue).unwrap();
         assert_eq!(state.load(), queue);

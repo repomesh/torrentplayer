@@ -17,9 +17,9 @@ Many popular releases carry only these codecs: WEB-DL releases usually have E-AC
 (`DDP5.1`), Blu-ray rips DTS-HD or `TrueHD`, and older rips AC-3. Users reported "no audio for
 some videos".
 
-As of this change TorrentStream detects the problem and says so, without fixing it:
+As of this change TorrentPlayer detects the problem and says so, without fixing it:
 
-- `lumen-media` reads the container header (MP4/MOV `stsd` sample entries, Matroska `Tracks`)
+- `torrentplayer-media` reads the container header (MP4/MOV `stsd` sample entries, Matroska `Tracks`)
   and the player shows "This video's audio is Dolby Digital (AC-3), which the built-in player
   can't play yet", mentioning a playable alternative track if there is one. Chromium's
   `webkitAudioDecodedByteCount` confirms the silence, and catches what probing cannot.
@@ -30,7 +30,7 @@ This ADR records how to actually play these codecs.
 
 ## Decision
 
-1. **Primary: libmpv in Phase 2**, through `lumen-player`, as already planned (see
+1. **Primary: libmpv in Phase 2**, through `torrentplayer-player`, as already planned (see
    [Player integration](../player.md)). libmpv's FFmpeg decodes all of these codecs natively
    (`ac3`, `eac3`, `truehd`/`mlp`, and `dca` for DTS core, DTS-HD MA lossless, and DTS Express),
    so nothing extra is needed for audio. The detection above stays as the fallback player's
@@ -42,7 +42,7 @@ This ADR records how to actually play these codecs.
 
 ## Alternatives considered
 
-### libmpv via `lumen-player` (chosen as primary)
+### libmpv via `torrentplayer-player` (chosen as primary)
 
 - **Licensing:** libmpv is LGPL-2.1+ when built with `-Dgpl=false`; FFmpeg is LGPL-2.1+ without
   `--enable-gpl`/`--enable-nonfree`. The AC-3, E-AC-3, `TrueHD`, and DTS decoders are FFmpeg's own
@@ -54,7 +54,7 @@ This ADR records how to actually play these codecs.
   before release (this is not legal advice). Building without `eac3`/`dca` is possible if needed.
 - **Size:** about 25–40 MB for an LGPL libmpv plus FFmpeg DLLs built for playback only (popular
   prebuilt full GPL builds are 80–120 MB).
-- **Windows packaging:** the DLLs are installed next to `lumen.exe` as Tauri bundle resources and
+- **Windows packaging:** the DLLs are installed next to `torrentplayer.exe` as Tauri bundle resources and
   signed with the app. They are built in CI with `-Dgpl=false`, because prebuilt Windows libmpv
   builds are usually GPL.
 - **Effort:** large (weeks): the FFI wrapper, the rendering approach (an ADR still to be
@@ -89,7 +89,7 @@ Source Extensions (or a second stream-server endpoint).
 
 Many Windows 10/11 editions include a Dolby Digital (Plus) decoder MFT, but N editions do not, and
 there is nothing for DTS or `TrueHD`. Using it needs Win32/COM FFI (`unsafe`, so only in
-`lumen-player`), and WebView2 does not use it for `<video src>` playback (measured above). It is
+`torrentplayer-player`), and WebView2 does not use it for `<video src>` playback (measured above). It is
 Windows-only, with partial coverage, so it was not chosen.
 
 ### Decoding in the webview with WebAssembly
@@ -126,7 +126,7 @@ and makes these videos play now. libmpv stays the plan for Phase 2.
   and the `pipe`, `http`, and `tcp` protocols (no file access). The script fails if the
   configuration is GPL or non-free or lacks a needed component. The result is 3.7–3.8 MB per platform. CI builds
   it on each platform (Windows with the runner's MinGW) and bundles it with
-  `--config src-tauri/tauri.sidecar.conf.json` as `torrentstream-ffmpeg`, next to the app's
+  `--config src-tauri/tauri.sidecar.conf.json` as `torrentplayer-ffmpeg`, next to the app's
   executable, with FFmpeg's license files. Releases publish the source tarball. Builds without
   it (local ones, by default) keep the notice.
 - **Codecs:** all four (AC-3, E-AC-3, `TrueHD`, DTS) are enabled; the maintainers accepted the
@@ -142,7 +142,7 @@ frag_keyframe+empty_moov+default_base_moof+frag_discont -frag_duration 1000000 p
   with its own token, so the URL on its command line grants nothing else. Proxy variables are
   removed from its environment.
 - **Output:** the backend reads the initialization segment, derives the MSE type
-  (`video/mp4; codecs="avc1.64001f,mp4a.40.2"`) in `lumen-media`, and publishes the output as a
+  (`video/mp4; codecs="avc1.64001f,mp4a.40.2"`) in `torrentplayer-media`, and publishes the output as a
   live stream on the app's stream server (`/l/<id>`), readable once, with CORS only for the
   app's own origins. The CSP allows `blob:` media and `fetch` to `http://127.0.0.1:*`.
 - **Seeking:** the player keeps up to 60 s ahead and 30 s behind; a seek outside that starts a

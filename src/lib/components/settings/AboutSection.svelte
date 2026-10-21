@@ -39,11 +39,11 @@
     <dt>License</dt>
     <dd>{info?.license ?? 'MIT OR Apache-2.0'} — free and open source</dd>
     <dt>Website</dt>
-    <dd>torrentstream.io</dd>
+    <dd>torrentplayer.io</dd>
   </dl>
   <h4>Third-party software</h4>
   <p class="intro">
-    TorrentStream is built on open-source software. Each component keeps its own license; the full
+    TorrentPlayer is built on open-source software. Each component keeps its own license; the full
     texts are below.
   </p>
   {#if summary.length > 0}

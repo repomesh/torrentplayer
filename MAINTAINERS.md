@@ -10,7 +10,7 @@ security and Code of Conduct reports. How people become maintainers is described
 
 ## Contacts
 
-- **Security reports:** [GitHub private vulnerability reporting](https://github.com/torrent-stream/torrentstream/security/advisories/new)
+- **Security reports:** [GitHub private vulnerability reporting](https://github.com/torrentplayer/torrentplayer/security/advisories/new)
   (preferred), or email _security contact to be filled in_.
 - **Code of Conduct reports:** email _conduct contact to be filled in_. Reports are kept
   confidential.

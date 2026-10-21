@@ -115,7 +115,7 @@
   }
 
   const HOME: View = { name: 'search', search: null };
-  const PLAYLIST_KEY = 'lumen.playlistOpen';
+  const PLAYLIST_KEY = 'torrentplayer.playlistOpen';
   /** How often the next queued video's preload conditions are checked while playing. */
   const NEXT_CHECK_MS = 2000;
   const TOAST_MS = 4500;

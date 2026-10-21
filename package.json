@@ -1,5 +1,5 @@
 {
-  "name": "lumen",
+  "name": "torrentplayer",
   "private": true,
   "version": "0.2.0",
   "description": "Stream openly licensed lecture libraries from torrents.",

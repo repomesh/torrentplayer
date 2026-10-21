@@ -16,7 +16,7 @@
 - [ ] `CHANGELOG.md` updated under `[Unreleased]` (for user-facing changes)
 - [ ] Docs updated (`docs/`, including `docs/ipc.md` for IPC changes)
 - [ ] New dependencies are justified below, with their licenses
-- [ ] No new `unsafe` outside `lumen-player`; any `unsafe` has `// SAFETY:` comments
+- [ ] No new `unsafe` outside `torrentplayer-player`; any `unsafe` has `// SAFETY:` comments
 - [ ] All commits are signed off (`git commit -s`)
 
 ## New dependencies

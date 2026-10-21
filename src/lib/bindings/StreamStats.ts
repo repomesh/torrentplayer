@@ -74,6 +74,6 @@ lastSeekMs: number | null,
  */
 seeks: number, 
 /**
- * Engine serving the stream: `lumen-swarm` or `librqbit`.
+ * Engine serving the stream: `torrentplayer-swarm` or `librqbit`.
  */
 engine: string | null, };

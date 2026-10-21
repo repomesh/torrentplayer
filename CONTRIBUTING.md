@@ -1,11 +1,11 @@
-# Contributing to TorrentStream
+# Contributing to TorrentPlayer
 
-Thanks for helping build TorrentStream! This guide explains how to propose changes and what reviewers
+Thanks for helping build TorrentPlayer! This guide explains how to propose changes and what reviewers
 look for. By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Ways to contribute
 
-- **Come talk** on the [TorrentStream Discord server](https://discord.gg/fVkWSZAafp): ask questions, share ideas,
+- **Come talk** on the [TorrentPlayer Discord server](https://discord.gg/fVkWSZAafp): ask questions, share ideas,
   and help other users. Decisions are still made in issues and pull requests, so anything worth
   keeping ends up there.
 - **Report bugs or performance regressions** with the issue templates. For streaming problems,
@@ -63,7 +63,7 @@ docs(adr): record the stream_cb vs HTTP feed decision
 ```
 
 Common types: `feat`, `fix`, `perf`, `docs`, `test`, `refactor`, `build`, `ci`, `chore`.
-Use the crate name without the `lumen-` prefix as the scope (`stream`, `net`, `player`, `ui`, ...).
+Use the crate name without the `torrentplayer-` prefix as the scope (`stream`, `net`, `player`, `ui`, ...).
 
 ## Developer Certificate of Origin
 
@@ -93,7 +93,7 @@ The rules are enforced by tooling, so in most cases you only need to run the for
   denied outside tests. Return typed errors (`thiserror`) from library crates and use `anyhow`
   only in the app shell.
 - **No `println!`.** Use `tracing` with structured fields. Never log secrets.
-- **No `unsafe`** except in `lumen-player`, which wraps libmpv. There, every `unsafe` block needs a
+- **No `unsafe`** except in `torrentplayer-player`, which wraps libmpv. There, every `unsafe` block needs a
   `// SAFETY:` comment, and adding new unsafe code needs maintainer sign-off.
 - Async code uses Tokio. Do not block async threads (use `spawn_blocking`), do not hold locks
   across `.await`, and use bounded channels.
@@ -104,7 +104,7 @@ The rules are enforced by tooling, so in most cases you only need to run the for
 
 - TypeScript in strict mode, formatted by Prettier and linted by ESLint.
 - All backend calls go through `src/lib/ipc.ts`. IPC payload types are generated from Rust by
-  `ts-rs` into `src/lib/bindings/` (run `cargo test -p lumen-app` to regenerate) and must not be
+  `ts-rs` into `src/lib/bindings/` (run `cargo test -p torrentplayer-app` to regenerate) and must not be
   edited by hand.
 
 ### File headers
@@ -124,5 +124,5 @@ Every source file starts with an SPDX license identifier:
 ## Licensing of contributions
 
 Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in
-TorrentStream by you, as defined in the Apache-2.0 license, shall be dual licensed under MIT OR
+TorrentPlayer by you, as defined in the Apache-2.0 license, shall be dual licensed under MIT OR
 Apache-2.0, without any additional terms or conditions.

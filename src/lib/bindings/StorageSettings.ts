@@ -5,7 +5,7 @@
  */
 export type StorageSettings = { 
 /**
- * Download folder; `None` uses TorrentStream's default folder.
+ * Download folder; `None` uses TorrentPlayer's default folder.
  */
 downloadDir: string | null, 
 /**

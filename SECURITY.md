@@ -1,12 +1,12 @@
 # Security Policy
 
-TorrentStream handles untrusted data from the internet (torrent metadata, peer traffic, media files,
+TorrentPlayer handles untrusted data from the internet (torrent metadata, peer traffic, media files,
 subtitles) and protects users' network privacy (VPN, WireGuard, and proxy modes with a kill
 switch). We take security reports seriously and appreciate responsible disclosure.
 
 ## Supported versions
 
-TorrentStream has not had a release yet. Once it does, security fixes will be made for the latest
+TorrentPlayer has not had a release yet. Once it does, security fixes will be made for the latest
 minor release only.
 
 | Version | Supported |
@@ -19,7 +19,7 @@ minor release only.
 requests, or the Discord server.**
 
 Report them privately through
-[GitHub private vulnerability reporting](https://github.com/torrent-stream/torrentstream/security/advisories/new).
+[GitHub private vulnerability reporting](https://github.com/torrentplayer/torrentplayer/security/advisories/new).
 If you cannot use GitHub, email the security contact listed in [MAINTAINERS.md](MAINTAINERS.md).
 
 Please include as much of the following as you can:
@@ -57,5 +57,5 @@ an attacker who already has full control of the user's account.
 
 ## Security practices
 
-How TorrentStream is designed to resist these threats is documented in the
+How TorrentPlayer is designed to resist these threats is documented in the
 [threat model](docs/threat-model.md).

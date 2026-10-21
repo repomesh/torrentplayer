@@ -7,10 +7,10 @@ use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use lumen_library::Media;
-use lumen_stream::{MediaSource, RequestObserver, ServerConfig, StreamId, StreamServer};
-use lumen_torrent::{Playback, StreamEngine, StreamEngineConfig, TorrentId};
 use tokio::sync::OnceCell;
+use torrentplayer_library::Media;
+use torrentplayer_stream::{MediaSource, RequestObserver, ServerConfig, StreamId, StreamServer};
+use torrentplayer_torrent::{Playback, StreamEngine, StreamEngineConfig, TorrentId};
 
 use crate::audio::TrackProbe;
 use crate::convert::Converter;
@@ -24,13 +24,13 @@ pub(crate) struct AppState {
     /// Download folder and engine choice, from the settings at start-up.
     config: StreamEngineConfig,
     /// The network manager all engine traffic goes through.
-    network: lumen_net::Network,
+    network: torrentplayer_net::Network,
     /// Serializes lazy core startup.
     starting: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
-    pub(crate) fn new(config: StreamEngineConfig, network: lumen_net::Network) -> Self {
+    pub(crate) fn new(config: StreamEngineConfig, network: torrentplayer_net::Network) -> Self {
         Self {
             core: OnceCell::new(),
             config,
@@ -134,10 +134,10 @@ pub(crate) struct PlayerMetrics {
 impl Core {
     async fn start(
         config: StreamEngineConfig,
-        network: lumen_net::Network,
+        network: torrentplayer_net::Network,
     ) -> Result<Self, IpcError> {
-        // By default lumen-swarm serves every source; librqbit only resolves magnet metadata.
-        // The engine setting and LUMEN_ENGINE override (see lumen_torrent::EngineChoice).
+        // By default torrentplayer-swarm serves every source; librqbit only resolves magnet metadata.
+        // The engine setting and TORRENTPLAYER_ENGINE override (see torrentplayer_torrent::EngineChoice).
         let engine = StreamEngine::start_with_network(config, Some(network)).await?;
         let first_bytes = Arc::new(FirstByteObserver::default());
         let server = StreamServer::start(ServerConfig {

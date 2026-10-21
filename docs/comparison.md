@@ -1,4 +1,4 @@
-# How TorrentStream compares
+# How TorrentPlayer compares
 
 There are several ways to watch a torrent without waiting for the whole download. This page
 compares the common ones on the things that matter for watching: where the video actually
@@ -10,7 +10,7 @@ repositories, and documentation (sources below). Products change; corrections ar
 
 ## At a glance
 
-|                                       | TorrentStream                                            | Stremio (torrent add-ons)                               | WebTorrent Desktop            | qBittorrent + VLC                                         | Debrid / cloud (Real-Debrid, Seedr)          | webtor.io (browser)                              |
+|                                       | TorrentPlayer                                            | Stremio (torrent add-ons)                               | WebTorrent Desktop            | qBittorrent + VLC                                         | Debrid / cloud (Real-Debrid, Seedr)          | webtor.io (browser)                              |
 | ------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------- | ----------------------------- | --------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------ |
 | Video comes from                      | Peers, directly to your app                              | A local streaming server on your machine, from peers    | Peers, directly               | Peers, directly                                           | The provider's servers                       | webtor.io's servers                              |
 | Stream and skip anywhere              | Yes: the spot you skip to is fetched first               | Yes (local cache); seek performance not documented      | Yes                           | Plays in order only; skipping ahead of the download fails | Once the provider has fetched the file       | Yes, from the server (transcoded when needed)    |
@@ -22,9 +22,9 @@ repositories, and documentation (sources below). Products change; corrections ar
 | Telemetry                             | None                                                     | Analytics and error monitoring (per its privacy policy) | Basic usage stats             | None documented                                           | Not checked                                  | Not checked                                      |
 | Maintained                            | Active                                                   | Active                                                  | Last release 2020             | Active                                                    | Operating                                    | Active                                           |
 
-## What makes TorrentStream different
+## What makes TorrentPlayer different
 
-- **Skipping is the point, not an afterthought.** TorrentStream's engine (`lumen-swarm`) was
+- **Skipping is the point, not an afterthought.** TorrentPlayer's engine (`torrentplayer-swarm`) was
   written for playback: when you jump, it cancels requests that are no longer urgent, asks the
   fastest peers for the exact pieces at the new position, and duplicates the most urgent blocks
   to a second peer so one slow peer cannot stall you. Measured data-ready seek times are 0.27 s
@@ -32,11 +32,11 @@ repositories, and documentation (sources below). Products change; corrections ar
   General-purpose clients download in order or rarest-first; in qBittorrent, for example, a
   player can only read what has already arrived in sequence.
 - **No server in the path.** Cloud and debrid services fetch the torrent on their servers and
-  send you a copy, so their plan, capacity, and storage limits become yours. TorrentStream
+  send you a copy, so their plan, capacity, and storage limits become yours. TorrentPlayer
   talks to the swarm directly from your computer: the only speed limits are the swarm's
   seeders and peers and your own connection, and nothing can be capped, queued, or switched
   off by a provider.
-- **Privacy controls built in.** Other desktop players leave the VPN to you. TorrentStream
+- **Privacy controls built in.** Other desktop players leave the VPN to you. TorrentPlayer
   includes a userspace WireGuard client (no administrator rights or separate VPN app), binding
   to your VPN app's adapter, and SOCKS5, all with a kill switch that never falls back to a
   direct connection, plus a status bar that shows the public addresses the internet sees.
@@ -49,14 +49,14 @@ repositories, and documentation (sources below). Products change; corrections ar
 ## Where others are a better fit
 
 - **Watching on a TV, phone, or tablet:** Stremio and Kodi run on far more devices.
-  TorrentStream is a desktop app (Windows, macOS, Linux).
+  TorrentPlayer is a desktop app (Windows, macOS, Linux).
 - **Codecs the system web engine cannot play** (for example AC-3 or DTS audio on Windows):
-  players built on VLC or libmpv play more formats today. TorrentStream warns you about such
+  players built on VLC or libmpv play more formats today. TorrentPlayer warns you about such
   files; a libmpv player is on the roadmap.
 - **Hiding your address from the swarm without a VPN:** cloud services join the swarm for you.
-  With TorrentStream, use its WireGuard or proxy modes.
-- **Sharing back:** TorrentStream's own engine does not upload yet, so it takes from the swarm
-  without seeding. Full download clients seed; seeding controls are on TorrentStream's roadmap.
+  With TorrentPlayer, use its WireGuard or proxy modes.
+- **Sharing back:** TorrentPlayer's own engine does not upload yet, so it takes from the swarm
+  without seeding. Full download clients seed; seeding controls are on TorrentPlayer's roadmap.
 
 ## Sources
 

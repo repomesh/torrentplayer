@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! The network commands, and the wiring that keeps TorrentStream's network manager (`lumen-net`) in line
+//! The network commands, and the wiring that keeps TorrentPlayer's network manager (`torrentplayer-net`) in line
 //! with the saved network settings.
 //!
 //! The manager starts with the saved settings before anything connects, then follows every
@@ -13,18 +13,18 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use lumen_net::wireguard::{WgInterface, WgPeer};
-use lumen_net::{
-    InterfaceInfo, NetError, Network, NetworkConfig, NetworkMode, NetworkOptions, NetworkStatus,
-    PublicIp, Secret, Socks5Config, WireGuardConfig, WireGuardSummary,
-};
-use lumen_settings::{
-    ExposeSecret as _, Ipv6Policy, NetworkSettings, SecretError, SecretKey, SecretStatus,
-    SecretStore, SecretString, Settings, WireGuardSettings, Zeroize as _,
-};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::watch;
+use torrentplayer_net::wireguard::{WgInterface, WgPeer};
+use torrentplayer_net::{
+    InterfaceInfo, NetError, Network, NetworkConfig, NetworkMode, NetworkOptions, NetworkStatus,
+    PublicIp, Secret, Socks5Config, WireGuardConfig, WireGuardSummary,
+};
+use torrentplayer_settings::{
+    ExposeSecret as _, Ipv6Policy, NetworkSettings, SecretError, SecretKey, SecretStatus,
+    SecretStore, SecretString, Settings, WireGuardSettings, Zeroize as _,
+};
 use ts_rs::TS;
 
 use crate::core::AppState;
@@ -212,7 +212,7 @@ async fn apply(app: &AppHandle, network: &Network, config: NetworkConfig) {
 
 /// The network configuration for `settings`, with the proxy password read from the credential
 /// store. Settings that cannot work (a missing host or interface, a username without its
-/// password) still select their mode, which then blocks traffic and says why: TorrentStream never falls
+/// password) still select their mode, which then blocks traffic and says why: TorrentPlayer never falls
 /// back to a direct connection.
 ///
 /// There is no kill-switch setting: every mode except direct always fails closed. `proxy_dht`
@@ -223,11 +223,11 @@ pub(crate) fn config_from_settings(
     secrets: &dyn SecretStore,
 ) -> NetworkConfig {
     let mode = match settings.mode {
-        lumen_settings::NetworkMode::Direct => NetworkMode::Direct,
-        lumen_settings::NetworkMode::BindInterface => NetworkMode::BindInterface {
+        torrentplayer_settings::NetworkMode::Direct => NetworkMode::Direct,
+        torrentplayer_settings::NetworkMode::BindInterface => NetworkMode::BindInterface {
             interface: settings.interface.clone().unwrap_or_default(),
         },
-        lumen_settings::NetworkMode::Socks5 => {
+        torrentplayer_settings::NetworkMode::Socks5 => {
             let s = &settings.socks5;
             let username = s.username.clone().filter(|u| !u.is_empty());
             let password = username
@@ -243,7 +243,7 @@ pub(crate) fn config_from_settings(
                 proxy_dht: s.proxy_dht,
             })
         }
-        lumen_settings::NetworkMode::WireGuard => {
+        torrentplayer_settings::NetworkMode::WireGuard => {
             NetworkMode::WireGuard(wireguard(&settings.wireguard, secrets))
         }
     };
@@ -289,7 +289,7 @@ fn wireguard(s: &WireGuardSettings, secrets: &dyn SecretStore) -> WireGuardConfi
 
 impl From<NetError> for IpcError {
     fn from(error: NetError) -> Self {
-        // lumen-net messages are written for users and contain no secrets.
+        // torrentplayer-net messages are written for users and contain no secrets.
         let kind = match error {
             NetError::KillSwitch(_) => ErrorKind::KillSwitch,
             NetError::InvalidConfig(_) => ErrorKind::InvalidArgument,
@@ -332,7 +332,7 @@ pub(crate) async fn recheck_network(
 /// The machine's network interfaces, for choosing the one to bind to.
 #[tauri::command]
 pub(crate) async fn list_interfaces() -> Result<Vec<InterfaceInfo>, IpcError> {
-    tauri::async_runtime::spawn_blocking(lumen_net::list_interfaces)
+    tauri::async_runtime::spawn_blocking(torrentplayer_net::list_interfaces)
         .await
         .map_err(|e| IpcError::internal(&e))?
         .map_err(|e| IpcError::internal(&e))
@@ -385,7 +385,7 @@ fn parse_import(text: &str, name: Option<String>) -> Result<ParsedImport, IpcErr
     })?;
     let [peer] = config.peers.as_slice() else {
         return Err(IpcError::invalid(format!(
-            "This configuration has {} [Peer] sections; TorrentStream supports exactly one.",
+            "This configuration has {} [Peer] sections; TorrentPlayer supports exactly one.",
             config.peers.len()
         )));
     };
@@ -454,7 +454,7 @@ pub(crate) async fn import_wireguard_config(
     })
 }
 
-/// Asks the connection-check service (icanhazip.com, see `lumen_net::IP_CHECK_V4_URL`) for the
+/// Asks the connection-check service (icanhazip.com, see `torrentplayer_net::IP_CHECK_V4_URL`) for the
 /// public IPv4 and IPv6 addresses, through the current mode, now. While the kill switch is
 /// engaged it fails without sending anything. The answer also updates the status bar.
 #[tauri::command]
@@ -480,13 +480,13 @@ pub(crate) async fn check_connection(
 
 #[cfg(test)]
 mod tests {
-    use lumen_settings::{ExposeSecret, MemoryStore};
+    use torrentplayer_settings::{ExposeSecret, MemoryStore};
 
     use super::*;
 
     fn socks_settings(username: Option<&str>) -> NetworkSettings {
         let mut s = NetworkSettings {
-            mode: lumen_settings::NetworkMode::Socks5,
+            mode: torrentplayer_settings::NetworkMode::Socks5,
             ..NetworkSettings::default()
         };
         s.socks5.host = "10.0.0.1".into();
@@ -502,7 +502,7 @@ mod tests {
         assert_eq!(direct, NetworkConfig::default());
 
         let mut bind = NetworkSettings {
-            mode: lumen_settings::NetworkMode::BindInterface,
+            mode: torrentplayer_settings::NetworkMode::BindInterface,
             interface: Some("wg0".into()),
             ipv6: Ipv6Policy::Tunnel,
             ..NetworkSettings::default()
@@ -523,7 +523,7 @@ mod tests {
         );
 
         let mut wg = NetworkSettings {
-            mode: lumen_settings::NetworkMode::WireGuard,
+            mode: torrentplayer_settings::NetworkMode::WireGuard,
             ..NetworkSettings::default()
         };
         wg.wireguard.peer_endpoint = Some("198.51.100.1:51820".into());
@@ -543,7 +543,7 @@ mod tests {
             None,
         ).unwrap();
         let settings = NetworkSettings {
-            mode: lumen_settings::NetworkMode::WireGuard,
+            mode: torrentplayer_settings::NetworkMode::WireGuard,
             wireguard: parsed.settings,
             ..NetworkSettings::default()
         };

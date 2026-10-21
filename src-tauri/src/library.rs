@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lumen_library::{LibraryError, LibraryItem, LibraryStore, Media};
 use tauri::{AppHandle, Emitter as _, State};
+use torrentplayer_library::{LibraryError, LibraryItem, LibraryStore, Media};
 
 use crate::error::{ErrorKind, IpcError};
 

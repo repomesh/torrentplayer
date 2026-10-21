@@ -17,7 +17,7 @@ picks up the pinned toolchain from `rust-toolchain.toml` automatically.
 | Open API docs                              | `cargo doc --workspace --no-deps --open` |
 | Preview this guide                         | `mdbook serve docs`                      |
 
-Note that `cargo` commands that build `lumen-app` need the frontend built first (`npm run build`),
+Note that `cargo` commands that build `torrentplayer-app` need the frontend built first (`npm run build`),
 because Tauri embeds `dist/` at compile time.
 
 ## Running the CI checks locally
@@ -44,7 +44,7 @@ npm test
 
 ```text
 crates/           Rust library crates, one per subsystem (see architecture.md)
-src-tauri/        Tauri app shell (lumen-app): commands, capabilities, bundling config
+src-tauri/        Tauri app shell (torrentplayer-app): commands, capabilities, bundling config
 src/              Svelte + TypeScript frontend
 src/lib/bindings/ TypeScript types generated from Rust by ts-rs (do not edit)
 docs/             This guide (mdBook) and Architecture Decision Records
@@ -73,21 +73,21 @@ Optional for development. Without it, videos with Dolby or DTS audio play withou
 show a notice. `scripts/build-ffmpeg.sh <target triple> src-tauri/binaries` builds the
 playback-only LGPL FFmpeg (on Linux, macOS, or Windows with MinGW; it cross-compiles for Windows
 on Linux with mingw-w64). `npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json`
-then bundles it as CI does. Development builds also take its path from `LUMEN_FFMPEG`.
+then bundles it as CI does. Development builds also take its path from `TORRENTPLAYER_FFMPEG`.
 
 To play a local file through the app, seed it with
-`cargo run -p lumen-bench --release -- seed <file> <file.torrent>`, which logs its address, and
-start a development build with `LUMEN_DEV_AUTOPLAY='<file.torrent>|0||<address>'`.
+`cargo run -p torrentplayer-bench --release -- seed <file> <file.torrent>`, which logs its address, and
+start a development build with `TORRENTPLAYER_DEV_AUTOPLAY='<file.torrent>|0||<address>'`.
 
 ### libmpv
 
 libmpv is required from Phase 2. Instructions will be added here.
 
 FFmpeg is optional at run time (see `advanced.ffmpegDir` in [Configuration](configuration.md)).
-The tests in `crates/lumen-media/tests/ffmpeg.rs` run `ffprobe` and `ffmpeg` against the
-loopback stream server when they are on `PATH` or in `LUMEN_FFMPEG_DIR`, and are skipped (with a
+The tests in `crates/torrentplayer-media/tests/ffmpeg.rs` run `ffprobe` and `ffmpeg` against the
+loopback stream server when they are on `PATH` or in `TORRENTPLAYER_FFMPEG_DIR`, and are skipped (with a
 note) otherwise:
 
 ```sh
-LUMEN_FFMPEG_DIR=/path/to/ffmpeg/bin cargo test -p lumen-media --test ffmpeg
+TORRENTPLAYER_FFMPEG_DIR=/path/to/ffmpeg/bin cargo test -p torrentplayer-media --test ffmpeg
 ```

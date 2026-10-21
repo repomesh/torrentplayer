@@ -1,4 +1,4 @@
-name: Set up TorrentStream build environment
+name: Set up TorrentPlayer build environment
 description: >-
   Installs the pinned Rust toolchain, Node.js, Tauri system dependencies, and frontend
   packages, then builds the frontend (Tauri embeds dist/ at compile time).

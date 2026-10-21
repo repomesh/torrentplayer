@@ -2,16 +2,16 @@
 
 //! Which audio codec a stream uses, so the player can say when the built-in player will play
 //! it without sound (Dolby and DTS audio). Each stream is probed once, when it starts, by
-//! reading its container header through the stream's own media source (see `lumen_media`).
+//! reading its container header through the stream's own media source (see `torrentplayer_media`).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use lumen_media::{AudioTrack, Container, TrackReport};
-use lumen_stream::{MediaSource, StreamId};
 use serde::Serialize;
 use tauri::State;
 use tokio::sync::watch;
+use torrentplayer_media::{AudioTrack, Container, TrackReport};
+use torrentplayer_stream::{MediaSource, StreamId};
 use ts_rs::TS;
 
 use crate::core::AppState;
@@ -139,7 +139,7 @@ async fn probe(stream: StreamId, media: &dyn MediaSource) -> Probed {
     let len = media.byte_len();
     let outcome = tokio::time::timeout(PROBE_TIMEOUT, async {
         let mut reader = media.open().await?;
-        lumen_media::probe_tracks(&mut reader, len).await
+        torrentplayer_media::probe_tracks(&mut reader, len).await
     })
     .await;
     let unknown = Probed {
@@ -220,8 +220,8 @@ mod tests {
     use std::io::{self, Cursor};
     use std::pin::Pin;
 
-    use lumen_media::{AudioCodec, Container};
-    use lumen_stream::MediaReader;
+    use torrentplayer_media::{AudioCodec, Container};
+    use torrentplayer_stream::MediaReader;
 
     use super::*;
 

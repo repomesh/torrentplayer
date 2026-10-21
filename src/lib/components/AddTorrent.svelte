@@ -492,7 +492,7 @@
 </script>
 
 <section class="add" class:has-results={hasResults} aria-label="Search">
-  <h1>TorrentStream</h1>
+  <h1>TorrentPlayer</h1>
   <p class="tagline">Stream at the speed of the swarm.</p>
 
   <form onsubmit={submit} role="search">

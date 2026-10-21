@@ -13,13 +13,13 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use lumen_library::Queue;
-use lumen_torrent::{BackendKind, TorrentSource, magnet_info_hash};
+use torrentplayer_library::Queue;
+use torrentplayer_torrent::{BackendKind, TorrentSource, magnet_info_hash};
 
-/// TorrentStream's cache folders inside the download folder.
-pub(crate) const CACHE_DIRS: [&str; 2] = ["lumen-swarm", "librqbit"];
+/// TorrentPlayer's cache folders inside the download folder.
+pub(crate) const CACHE_DIRS: [&str; 2] = ["torrentplayer-swarm", "librqbit"];
 /// A timestamp written after playback reaches the end of a file.
-const FINISHED_MARKER: &str = ".torrentstream-finished";
+const FINISHED_MARKER: &str = ".torrentplayer-finished";
 /// Cache usage stops counting after this many entries and reports a lower bound.
 const MAX_WALK_ENTRIES: usize = 200_000;
 
@@ -69,7 +69,7 @@ pub(crate) fn queue_hashes_complete(queue: &Queue) -> bool {
         .all(|item| queue_item_hash(item).is_some())
 }
 
-fn queue_item_hash(item: &lumen_library::QueueItem) -> Option<String> {
+fn queue_item_hash(item: &torrentplayer_library::QueueItem) -> Option<String> {
     let hash = item.info_hash.clone().or_else(|| {
         let TorrentSource::Magnet(link) = TorrentSource::parse_link(&item.source).ok()? else {
             return None;
@@ -304,7 +304,7 @@ fn measure_tree(path: &Path, budget: &mut usize, usage: &mut Usage) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lumen_library::QueueItem;
+    use torrentplayer_library::QueueItem;
 
     const OLD: &str = "1111111111111111111111111111111111111111";
     const NEW: &str = "2222222222222222222222222222222222222222";
@@ -319,8 +319,8 @@ mod tests {
     #[test]
     fn policy_removes_oldest_until_below_limit() {
         let root = tempfile::tempdir().unwrap();
-        entry(root.path(), "lumen-swarm", OLD, 100, 10);
-        entry(root.path(), "lumen-swarm", NEW, 100, 20);
+        entry(root.path(), "torrentplayer-swarm", OLD, 100, 10);
+        entry(root.path(), "torrentplayer-swarm", NEW, 100, 20);
         let plan = plan(
             root.path(),
             &HashSet::new(),
@@ -352,7 +352,7 @@ mod tests {
     #[test]
     fn playback_marks_and_unmarks_existing_cache_entries() {
         let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("lumen-swarm").join(OLD);
+        let dir = root.path().join("torrentplayer-swarm").join(OLD);
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("pieces"), [0_u8; 10]).unwrap();
         mark_finished(root.path(), BackendKind::Swarm, OLD).unwrap();
@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn one_marker_reclaims_the_same_hash_from_both_engines() {
         let root = tempfile::tempdir().unwrap();
-        entry(root.path(), "lumen-swarm", OLD, 100, 10);
+        entry(root.path(), "torrentplayer-swarm", OLD, 100, 10);
         let other = root.path().join("librqbit").join(OLD);
         fs::create_dir_all(&other).unwrap();
         fs::write(other.join("video"), [0_u8; 50]).unwrap();
@@ -395,15 +395,15 @@ mod tests {
         assert_eq!(plan.candidates.len(), 1);
         assert_eq!(plan.candidates[0].bytes, 152);
         remove(root.path(), OLD).unwrap();
-        assert!(!root.path().join("lumen-swarm").join(OLD).exists());
+        assert!(!root.path().join("torrentplayer-swarm").join(OLD).exists());
         assert!(!other.exists());
     }
 
     #[test]
     fn age_policy_selects_only_expired_downloads() {
         let root = tempfile::tempdir().unwrap();
-        entry(root.path(), "lumen-swarm", OLD, 10, 10);
-        entry(root.path(), "lumen-swarm", NEW, 10, 90);
+        entry(root.path(), "torrentplayer-swarm", OLD, 10, 10);
+        entry(root.path(), "torrentplayer-swarm", NEW, 10, 90);
         let plan = plan(
             root.path(),
             &HashSet::new(),
@@ -420,8 +420,12 @@ mod tests {
     #[test]
     fn unknown_and_unfinished_data_is_counted_but_not_removed() {
         let root = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("lumen-swarm/legacy")).unwrap();
-        fs::write(root.path().join("lumen-swarm/legacy/piece"), [0_u8; 9]).unwrap();
+        fs::create_dir_all(root.path().join("torrentplayer-swarm/legacy")).unwrap();
+        fs::write(
+            root.path().join("torrentplayer-swarm/legacy/piece"),
+            [0_u8; 9],
+        )
+        .unwrap();
         fs::create_dir_all(root.path().join("mine")).unwrap();
         fs::write(root.path().join("mine/keep"), [0_u8; 7]).unwrap();
         let plan = plan(
@@ -475,11 +479,11 @@ mod tests {
     #[test]
     fn removal_is_limited_to_valid_hash_directories() {
         let root = tempfile::tempdir().unwrap();
-        entry(root.path(), "lumen-swarm", OLD, 10, 1);
+        entry(root.path(), "torrentplayer-swarm", OLD, 10, 1);
         fs::create_dir_all(root.path().join("mine")).unwrap();
         fs::write(root.path().join("mine/keep"), b"keep").unwrap();
         remove(root.path(), OLD).unwrap();
-        assert!(!root.path().join("lumen-swarm").join(OLD).exists());
+        assert!(!root.path().join("torrentplayer-swarm").join(OLD).exists());
         assert!(root.path().join("mine/keep").exists());
         assert!(remove(root.path(), "../mine").is_err());
     }
@@ -489,14 +493,20 @@ mod tests {
     fn cache_root_symlinks_are_neither_measured_nor_removed() {
         let root = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
-        entry(outside.path(), "lumen-swarm", OLD, 10, 1);
+        entry(outside.path(), "torrentplayer-swarm", OLD, 10, 1);
         std::os::unix::fs::symlink(
-            outside.path().join("lumen-swarm"),
-            root.path().join("lumen-swarm"),
+            outside.path().join("torrentplayer-swarm"),
+            root.path().join("torrentplayer-swarm"),
         )
         .unwrap();
         assert_eq!(measure(root.path()).bytes, 0);
         remove(root.path(), OLD).unwrap();
-        assert!(outside.path().join("lumen-swarm").join(OLD).exists());
+        assert!(
+            outside
+                .path()
+                .join("torrentplayer-swarm")
+                .join(OLD)
+                .exists()
+        );
     }
 }

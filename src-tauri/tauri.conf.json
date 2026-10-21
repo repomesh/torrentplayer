@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "TorrentStream",
-  "identifier": "io.torrentstream.desktop",
-  "mainBinaryName": "TorrentStream",
+  "productName": "TorrentPlayer",
+  "identifier": "io.torrentplayer.desktop",
+  "mainBinaryName": "TorrentPlayer",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "TorrentStream",
+        "title": "TorrentPlayer",
         "width": 1280,
         "height": 800,
         "minWidth": 960,
@@ -64,10 +64,10 @@
     "targets": "all",
     "category": "Video",
     "shortDescription": "Stream at the speed of the swarm.",
-    "longDescription": "TorrentStream streams any torrent, video or audio, straight from the swarm: it starts in seconds and skips to any moment almost instantly, with no servers, accounts, or limits.",
-    "copyright": "Copyright (c) 2026 The Lumen Contributors",
+    "longDescription": "TorrentPlayer streams any torrent, video or audio, straight from the swarm: it starts in seconds and skips to any moment almost instantly, with no servers, accounts, or limits.",
+    "copyright": "Copyright (c) 2026 The TorrentPlayer Contributors",
     "license": "MIT OR Apache-2.0",
-    "homepage": "https://torrentstream.io",
+    "homepage": "https://torrentplayer.io",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -8,25 +8,25 @@ version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
-authors = ["The Lumen Contributors"]
-repository = "https://github.com/torrent-stream/torrentstream"
-homepage = "https://github.com/torrent-stream/torrentstream"
+authors = ["The TorrentPlayer Contributors"]
+repository = "https://github.com/torrentplayer/torrentplayer"
+homepage = "https://github.com/torrentplayer/torrentplayer"
 publish = false
 
 [workspace.dependencies]
 # Internal crates.
-lumen-bench = { path = "crates/lumen-bench" }
-lumen-course = { path = "crates/lumen-course" }
-lumen-library = { path = "crates/lumen-library" }
-lumen-media = { path = "crates/lumen-media" }
-lumen-net = { path = "crates/lumen-net" }
-lumen-player = { path = "crates/lumen-player" }
-lumen-prioritize = { path = "crates/lumen-prioritize" }
-lumen-search = { path = "crates/lumen-search" }
-lumen-settings = { path = "crates/lumen-settings" }
-lumen-stream = { path = "crates/lumen-stream" }
-lumen-swarm = { path = "crates/lumen-swarm" }
-lumen-torrent = { path = "crates/lumen-torrent" }
+torrentplayer-bench = { path = "crates/torrentplayer-bench" }
+torrentplayer-course = { path = "crates/torrentplayer-course" }
+torrentplayer-library = { path = "crates/torrentplayer-library" }
+torrentplayer-media = { path = "crates/torrentplayer-media" }
+torrentplayer-net = { path = "crates/torrentplayer-net" }
+torrentplayer-player = { path = "crates/torrentplayer-player" }
+torrentplayer-prioritize = { path = "crates/torrentplayer-prioritize" }
+torrentplayer-search = { path = "crates/torrentplayer-search" }
+torrentplayer-settings = { path = "crates/torrentplayer-settings" }
+torrentplayer-stream = { path = "crates/torrentplayer-stream" }
+torrentplayer-swarm = { path = "crates/torrentplayer-swarm" }
+torrentplayer-torrent = { path = "crates/torrentplayer-torrent" }
 
 # External crates. New dependencies need a justification in the PR that adds them.
 anyhow = "1.0.100"
@@ -46,12 +46,12 @@ if-addrs = "0.15"
 keyring = "4.2"
 # rustls: avoids linking OpenSSL (via crypto-hash) on Linux. librqbit-upnp enables reqwest's
 # default TLS (rustls + aws-lc-rs) regardless, so aws-lc is built either way. The HTTP API and
-# web UI features are not needed; TorrentStream uses the library directly.
+# web UI features are not needed; TorrentPlayer uses the library directly.
 librqbit = { version = "9.0.1", default-features = false, features = ["rust-tls"] }
-# librqbit's tracker and metadata crates, used directly by lumen-swarm (same versions as
+# librqbit's tracker and metadata crates, used directly by torrentplayer-swarm (same versions as
 # librqbit 9, so nothing is built twice).
 librqbit-core = { version = "9.0.1", default-features = false, features = ["sha1-ring"] }
-# The DHT node librqbit uses (already built for it), for lumen-swarm's own peer discovery.
+# The DHT node librqbit uses (already built for it), for torrentplayer-swarm's own peer discovery.
 librqbit-dht = "9.0.1"
 librqbit-tracker-comms = "9.0.1"
 proptest = "1.7"
@@ -61,7 +61,7 @@ rfd = { version = "0.17.2", default-features = false, features = ["gtk3"] }
 # Same version and TLS backend librqbit already uses, so no second copy is built.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 # The playback library is local SQLite. Bundling gives every desktop build the same patched
-# SQLite without depending on a system package; only lumen-library exposes it to the app.
+# SQLite without depending on a system package; only torrentplayer-library exposes it to the app.
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 # Zeroizing, Debug-redacting wrappers for secrets held in memory.
 secrecy = "0.10.3"
@@ -118,5 +118,5 @@ strip = "symbols"
 
 [patch.crates-io]
 # librqbit's DHT node, vendored for scoped transports and Windows datagram-error handling (see
-# vendor/librqbit-dht/LUMEN.md). Used by librqbit and lumen-swarm alike.
+# vendor/librqbit-dht/TORRENTPLAYER.md). Used by librqbit and torrentplayer-swarm alike.
 librqbit-dht = { path = "vendor/librqbit-dht" }

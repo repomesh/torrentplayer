@@ -8,7 +8,7 @@
 //! where other local programs can see it) and unpublished right after. The source serves only
 //! what is already downloaded (`StreamEngine::stored_media`): reading it downloads nothing and
 //! changes no priorities, so FFmpeg never competes with playback, and a part that is missing
-//! fails at once. `lumen_media::FfmpegTools` locks the programs down to that URL.
+//! fails at once. `torrentplayer_media::FfmpegTools` locks the programs down to that URL.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,12 +16,12 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use base64::Engine as _;
-use lumen_media::FfmpegTools;
-use lumen_stream::{StreamId, StreamServer};
-use lumen_torrent::TorrentId;
 use serde::Serialize;
 use tauri::State;
 use tokio::sync::watch;
+use torrentplayer_media::FfmpegTools;
+use torrentplayer_stream::{StreamId, StreamServer};
+use torrentplayer_torrent::TorrentId;
 use ts_rs::TS;
 
 use crate::audio::Probed;
@@ -122,7 +122,7 @@ impl DurationProbe {
 
     /// The duration in seconds, once known.
     pub(crate) fn duration_secs(&self) -> Option<f64> {
-        // Durations are at most `lumen_media::MAX_DURATION_MS`, exact in an f64.
+        // Durations are at most `torrentplayer_media::MAX_DURATION_MS`, exact in an f64.
         #[allow(clippy::cast_precision_loss)]
         let secs = match self.duration_ms.load(Ordering::Relaxed) {
             0 => None,
@@ -321,7 +321,7 @@ pub(crate) async fn media_tools(
     let describe = async |path: Option<&Path>| match path {
         Some(path) => Some(MediaToolDto {
             path: path.to_string_lossy().into_owned(),
-            version: lumen_media::version(path).await,
+            version: torrentplayer_media::version(path).await,
         }),
         None => None,
     };

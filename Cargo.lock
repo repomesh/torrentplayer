@@ -3261,214 +3261,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
-name = "lumen-app"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "base64 0.23.1",
- "bytes",
- "embed-resource",
- "lumen-library",
- "lumen-media",
- "lumen-net",
- "lumen-prioritize",
- "lumen-search",
- "lumen-settings",
- "lumen-stream",
- "lumen-torrent",
- "rfd",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "ts-rs",
- "url",
-]
-
-[[package]]
-name = "lumen-bench"
-version = "0.2.0"
-dependencies = [
- "anyhow",
- "bytes",
- "futures-util",
- "librqbit",
- "lumen-prioritize",
- "lumen-stream",
- "lumen-swarm",
- "lumen-torrent",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "lumen-course"
-version = "0.2.0"
-
-[[package]]
-name = "lumen-library"
-version = "0.2.0"
-dependencies = [
- "rusqlite",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tracing",
- "ts-rs",
- "url",
-]
-
-[[package]]
-name = "lumen-media"
-version = "0.2.0"
-dependencies = [
- "futures-util",
- "lumen-stream",
- "proptest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "lumen-net"
-version = "0.2.0"
-dependencies = [
- "base64 0.23.1",
- "dns-parser",
- "getrandom 0.4.3",
- "if-addrs",
- "proptest",
- "reqwest",
- "serde",
- "serde_json",
- "socket2 0.6.5",
- "subtle",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tokio-wireguard",
- "tracing",
- "ts-rs",
- "url",
- "zeroize",
-]
-
-[[package]]
-name = "lumen-player"
-version = "0.2.0"
-
-[[package]]
-name = "lumen-prioritize"
-version = "0.2.0"
-dependencies = [
- "proptest",
-]
-
-[[package]]
-name = "lumen-search"
-version = "0.2.0"
-dependencies = [
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "lumen-settings"
-version = "0.2.0"
-dependencies = [
- "keyring",
- "secrecy",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tracing",
- "ts-rs",
-]
-
-[[package]]
-name = "lumen-stream"
-version = "0.2.0"
-dependencies = [
- "bytes",
- "futures-util",
- "getrandom 0.4.3",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "proptest",
- "subtle",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
-name = "lumen-swarm"
-version = "0.2.0"
-dependencies = [
- "bytes",
- "futures-util",
- "getrandom 0.4.3",
- "librqbit",
- "librqbit-core",
- "librqbit-dht",
- "librqbit-tracker-comms",
- "lumen-net",
- "reqwest",
- "sha1",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "url",
-]
-
-[[package]]
-name = "lumen-torrent"
-version = "0.2.0"
-dependencies = [
- "bytes",
- "futures-util",
- "librqbit",
- "lumen-net",
- "lumen-prioritize",
- "lumen-stream",
- "lumen-swarm",
- "proptest",
- "reqwest",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tokio-util",
- "tracing",
- "url",
-]
-
-[[package]]
 name = "managed"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6187,6 +5979,214 @@ name = "toml_writer"
 version = "1.1.3+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
+
+[[package]]
+name = "torrentplayer-app"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "bytes",
+ "embed-resource",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "torrentplayer-library",
+ "torrentplayer-media",
+ "torrentplayer-net",
+ "torrentplayer-prioritize",
+ "torrentplayer-search",
+ "torrentplayer-settings",
+ "torrentplayer-stream",
+ "torrentplayer-torrent",
+ "tracing",
+ "tracing-subscriber",
+ "ts-rs",
+ "url",
+]
+
+[[package]]
+name = "torrentplayer-bench"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures-util",
+ "librqbit",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "torrentplayer-prioritize",
+ "torrentplayer-stream",
+ "torrentplayer-swarm",
+ "torrentplayer-torrent",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "torrentplayer-course"
+version = "0.2.0"
+
+[[package]]
+name = "torrentplayer-library"
+version = "0.2.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "ts-rs",
+ "url",
+]
+
+[[package]]
+name = "torrentplayer-media"
+version = "0.2.0"
+dependencies = [
+ "futures-util",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "torrentplayer-stream",
+]
+
+[[package]]
+name = "torrentplayer-net"
+version = "0.2.0"
+dependencies = [
+ "base64 0.23.1",
+ "dns-parser",
+ "getrandom 0.4.3",
+ "if-addrs",
+ "proptest",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "socket2 0.6.5",
+ "subtle",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tokio-wireguard",
+ "tracing",
+ "ts-rs",
+ "url",
+ "zeroize",
+]
+
+[[package]]
+name = "torrentplayer-player"
+version = "0.2.0"
+
+[[package]]
+name = "torrentplayer-prioritize"
+version = "0.2.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
+name = "torrentplayer-search"
+version = "0.2.0"
+dependencies = [
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "torrentplayer-settings"
+version = "0.2.0"
+dependencies = [
+ "keyring",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tracing",
+ "ts-rs",
+]
+
+[[package]]
+name = "torrentplayer-stream"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "getrandom 0.4.3",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "proptest",
+ "subtle",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "torrentplayer-swarm"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "getrandom 0.4.3",
+ "librqbit",
+ "librqbit-core",
+ "librqbit-dht",
+ "librqbit-tracker-comms",
+ "reqwest",
+ "sha1",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "torrentplayer-net",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+]
+
+[[package]]
+name = "torrentplayer-torrent"
+version = "0.2.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "librqbit",
+ "proptest",
+ "reqwest",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "torrentplayer-net",
+ "torrentplayer-prioritize",
+ "torrentplayer-stream",
+ "torrentplayer-swarm",
+ "tracing",
+ "url",
+]
 
 [[package]]
 name = "tower"

@@ -96,7 +96,7 @@
     id="storage-dir"
     label="Download folder"
     path="storage.downloadDir"
-    help="Where TorrentStream saves downloaded videos and its cache (in lumen-swarm and librqbit folders inside it). Data already downloaded stays in the old folder. In use now: {view.activeDownloadDir}"
+    help="Where TorrentPlayer saves downloaded videos and its cache (in torrentplayer-swarm and librqbit folders inside it). Data already downloaded stays in the old folder. In use now: {view.activeDownloadDir}"
     error={errors['storage.downloadDir'] ?? pickError ?? undefined}
   >
     <div class="folder">
@@ -192,7 +192,7 @@
   <Field
     id="storage-clear"
     label="Cache"
-    help="TorrentStream's downloaded data (the lumen-swarm and librqbit folders inside the download folder). Nothing else is touched."
+    help="TorrentPlayer's downloaded data (the torrentplayer-swarm and librqbit folders inside the download folder). Nothing else is touched."
   >
     <div class="cache">
       <span class="usage" aria-live="polite">

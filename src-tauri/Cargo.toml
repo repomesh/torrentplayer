@@ -1,6 +1,6 @@
 [package]
-name = "lumen-app"
-description = "TorrentStream desktop app shell (Tauri)."
+name = "torrentplayer-app"
+description = "TorrentPlayer desktop app shell (Tauri)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,11 +10,11 @@ repository.workspace = true
 publish.workspace = true
 
 [lib]
-name = "lumen_app"
+name = "torrentplayer_app"
 crate-type = ["rlib"]
 
 [[bin]]
-name = "lumen"
+name = "torrentplayer"
 path = "src/main.rs"
 
 [build-dependencies]
@@ -29,14 +29,14 @@ anyhow.workspace = true
 # Thumbnails reach the webview as data: URLs.
 base64.workspace = true
 bytes.workspace = true
-lumen-library.workspace = true
-lumen-net.workspace = true
-lumen-media.workspace = true
-lumen-prioritize.workspace = true
-lumen-search.workspace = true
-lumen-settings.workspace = true
-lumen-stream.workspace = true
-lumen-torrent.workspace = true
+torrentplayer-library.workspace = true
+torrentplayer-net.workspace = true
+torrentplayer-media.workspace = true
+torrentplayer-prioritize.workspace = true
+torrentplayer-search.workspace = true
+torrentplayer-settings.workspace = true
+torrentplayer-stream.workspace = true
+torrentplayer-torrent.workspace = true
 rfd.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -4,7 +4,7 @@
 
 ## libmpv (primary)
 
-`lumen-player` wraps libmpv through a maintained Rust binding (the current candidate is
+`torrentplayer-player` wraps libmpv through a maintained Rust binding (the current candidate is
 [`libmpv2`](https://crates.io/crates/libmpv2); this will be confirmed in Phase 2). libmpv uses
 FFmpeg internally and plays nearly every container and codec, including embedded and external
 subtitles.
@@ -34,7 +34,7 @@ Until libmpv lands, the webview's `<video>` element is the only player (`Player.
   or load (`AbortError`) is retried with the sound unchanged, and only while playback is still
   wanted. Nothing else mutes the video.
 - **Codecs the webview cannot decode** (`src/lib/audio.ts`, `src/lib/converted.ts`,
-  `src-tauri/src/convert.rs`, `lumen-media`): WebView2 decodes AAC, MP3, Opus, Vorbis, and FLAC, but
+  `src-tauri/src/convert.rs`, `torrentplayer-media`): WebView2 decodes AAC, MP3, Opus, Vorbis, and FLAC, but
   not Dolby (AC-3, E-AC-3/Atmos, `TrueHD`, AC-4) or DTS. The backend reads the audio codec from the
   container header (`stream_audio`). When the default track is AC-3, E-AC-3, `TrueHD`, or DTS in an
   MP4, MOV, Matroska, or WebM file, the player plays a conversion instead (`convert_audio`): the
@@ -58,7 +58,7 @@ Until libmpv lands, the webview's `<video>` element is the only player (`Player.
   matched to the video by name or a `Subs`/`Subtitles` folder (see `stream_subtitles` in the
   [IPC contract](ipc.md)), and files the user loads ("Load subtitle file…" in the CC menu).
   The backend downloads a torrent's file at background priority only when it is chosen, then
-  parses it in Rust into plain-text cues (`lumen-media`). Nothing is parsed in the webview.
+  parses it in Rust into plain-text cues (`torrentplayer-media`). Nothing is parsed in the webview.
 - **Showing them** (`src/lib/subtitles.ts`): each chosen file becomes a text track
   (`video.addTextTrack('subtitles', label, language)` with `VTTCue`s, text escaped), so they
   follow seeks, need no URL, and leave the CSP unchanged. Chromium scales the text with the
@@ -76,7 +76,7 @@ Until libmpv lands, the webview's `<video>` element is the only player (`Player.
 
 ## Safety rules for the FFI layer
 
-`lumen-player` is the only crate allowed to use `unsafe`:
+`torrentplayer-player` is the only crate allowed to use `unsafe`:
 
 - Unsafe code lives in one `ffi` module behind a safe API.
 - Every `unsafe` block has a `// SAFETY:` comment explaining why its invariants hold (enforced by
@@ -90,5 +90,5 @@ Until libmpv lands, the webview's `<video>` element is the only player (`Player.
 ## Licensing
 
 A playback-only LGPL build of FFmpeg ships with the app as a separate program
-(`torrentstream-ffmpeg`, built by `scripts/build-ffmpeg.sh`); libmpv will be bundled in Phase 2.
-See [ADR 0001](adr/0001-project-license.md) for how their licenses interact with TorrentStream's.
+(`torrentplayer-ffmpeg`, built by `scripts/build-ffmpeg.sh`); libmpv will be bundled in Phase 2.
+See [ADR 0001](adr/0001-project-license.md) for how their licenses interact with TorrentPlayer's.

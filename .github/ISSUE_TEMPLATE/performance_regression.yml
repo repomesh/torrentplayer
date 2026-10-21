@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Streaming performance is TorrentStream's top priority. Numbers from the debug overlay (press D in the player) help most.
+        Streaming performance is TorrentPlayer's top priority. Numbers from the debug overlay (press D in the player) help most.
   - type: input
     id: torrent
     attributes:
@@ -27,7 +27,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: TorrentStream version or commit (and the last version that was fast, if known)
+      label: TorrentPlayer version or commit (and the last version that was fast, if known)
     validations:
       required: true
   - type: dropdown

@@ -220,7 +220,7 @@
         {/if}
         {#if view.restartRequired.length > 0}
           <p class="restart" role="status">
-            Restart TorrentStream to use the new {view.restartRequired
+            Restart TorrentPlayer to use the new {view.restartRequired
               .map((path) => RESTART_NAMES[path] ?? path)
               .join(' and ')}.
           </p>

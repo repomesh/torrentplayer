@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-//! TorrentStream's Tauri application shell.
+//! TorrentPlayer's Tauri application shell.
 //!
 //! This crate wires the backend crates into a Tauri app: it registers IPC commands,
 //! configures logging, and owns application state. Business logic lives in the
-//! `lumen-*` crates so it can be tested without a webview.
+//! `torrentplayer-*` crates so it can be tested without a webview.
 //!
 //! Every IPC command validates its arguments on the Rust side; the frontend is never
 //! trusted. The full IPC contract is documented in `docs/ipc.md`.
@@ -38,8 +38,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use lumen_settings::LogLevel;
 use tauri::Manager as _;
+use torrentplayer_settings::LogLevel;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
@@ -49,7 +49,7 @@ pub use error::{ErrorKind, IpcError};
 /// Environment variable naming a folder that holds a separate profile (settings, queue, and
 /// downloads) instead of the usual per-user folders, for tests and portable installs. The
 /// webview's own data follows `WEBVIEW2_USER_DATA_FOLDER` on Windows.
-pub const PROFILE_ENV_VAR: &str = "LUMEN_PROFILE_DIR";
+pub const PROFILE_ENV_VAR: &str = "TORRENTPLAYER_PROFILE_DIR";
 
 /// Where the app keeps its files.
 struct Folders {
@@ -59,7 +59,7 @@ struct Folders {
     data: PathBuf,
     /// App-local data (the webview's, and downloads before they moved to `downloads`).
     local_data: PathBuf,
-    /// The default download folder: `TorrentStream` in the user's Downloads folder.
+    /// The default download folder: `TorrentPlayer` in the user's Downloads folder.
     downloads: PathBuf,
 }
 
@@ -83,7 +83,7 @@ impl Folders {
         // Systems without a Downloads folder keep downloads with the app's own data.
         let downloads = app.path().download_dir().map_or_else(
             |_| local_data.join("downloads"),
-            |dir| dir.join("TorrentStream"),
+            |dir| dir.join("TorrentPlayer"),
         );
         let folders = Self {
             config: app.path().app_config_dir()?,
@@ -91,7 +91,7 @@ impl Folders {
             local_data,
             downloads,
         };
-        // Settings, the queue, and the cache from before the rename to TorrentStream.
+        // Settings, the queue, and the cache from before the rename to TorrentPlayer.
         migrate::from_old_identifier(&[&folders.config, &folders.data, &folders.local_data]);
         Ok(folders)
     }
@@ -111,12 +111,12 @@ pub fn run() -> anyhow::Result<()> {
     let log = init_tracing();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        "starting TorrentStream"
+        "starting TorrentPlayer"
     );
 
     tauri::Builder::default()
         .setup(move |app| {
-            // Settings live in the config folder; downloads default to Downloads\TorrentStream.
+            // Settings live in the config folder; downloads default to Downloads\TorrentPlayer.
             let folders = Folders::resolve(app)?;
             let earlier_default = folders.local_data.join("downloads");
             let settings =
@@ -128,6 +128,24 @@ pub fn run() -> anyhow::Result<()> {
                 && earlier_default.is_dir()
             {
                 migrate::migrate(&earlier_default, &folders.downloads);
+            }
+            // Renamed with the app: the default download folder and the engine cache inside it.
+            if settings.current().storage.download_dir.is_none() {
+                let renamed = folders
+                    .downloads
+                    .with_file_name(migrate::OLD_DOWNLOADS_NAME);
+                if renamed != folders.downloads && renamed.is_dir() {
+                    migrate::migrate(&renamed, &folders.downloads);
+                }
+            }
+            let download_dir = settings
+                .current()
+                .storage
+                .download_dir
+                .map_or_else(|| folders.downloads.clone(), PathBuf::from);
+            let old_swarm = download_dir.join(migrate::OLD_SWARM_DIR);
+            if old_swarm.is_dir() {
+                migrate::migrate(&old_swarm, &download_dir.join(cache::CACHE_DIRS[0]));
             }
             let library = library::LibraryState::new(folders.data.clone());
             let queue = queue::QueueState::new(folders.data);
@@ -223,7 +241,7 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The longest TorrentStream waits for the engine to stop when it exits.
+/// The longest TorrentPlayer waits for the engine to stop when it exits.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Stops the stream engine, if it started, so an unplayed preload's cache is deleted now rather

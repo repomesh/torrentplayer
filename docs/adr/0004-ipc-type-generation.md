@@ -27,4 +27,4 @@ and wrapped in `src/lib/ipc.ts`.
 
 - Types always stay in sync. Command wrappers in `ipc.ts` are still written by hand, but they are
   short and covered by tests.
-- Contributors must run `cargo test -p lumen-app` after changing an IPC type and commit the result.
+- Contributors must run `cargo test -p torrentplayer-app` after changing an IPC type and commit the result.

@@ -1,4 +1,4 @@
-# 0006: A streaming-first BitTorrent engine (`lumen-swarm`)
+# 0006: A streaming-first BitTorrent engine (`torrentplayer-swarm`)
 
 - **Status:** Proposed (milestone M1 implemented; librqbit remains the default until the
   benchmarks justify switching)
@@ -15,7 +15,7 @@ targets (start-up under 3 s, seeks under 1.5 s), and the causes are inside librq
 - It does not support HTTP web seeds (BEP 17/19), which Internet Archive and Academic Torrents
   course torrents depend on.
 - Its only prioritization lever is a fixed 32 MiB lookahead per open stream.
-- It does not implement protocol encryption, which TorrentStream's network requirements need.
+- It does not implement protocol encryption, which TorrentPlayer's network requirements need.
 
 Alternatives considered were libtorrent-rasterbar (C++, has deadlines and web seeds, but adds a
 C++/Boost build, an FFI crate with `unsafe`, and immature Rust bindings) and the other Rust
@@ -23,7 +23,7 @@ engines (`irontide` is GPL-3.0; `fx-torrent` is about ten months old with little
 
 ## Decision
 
-Build TorrentStream's own engine, `lumen-swarm`, owning the parts that decide streaming performance,
+Build TorrentPlayer's own engine, `torrentplayer-swarm`, owning the parts that decide streaming performance,
 and reuse proven plumbing where it does not:
 
 - **Own:** the request scheduler (`sched.rs`, pure and unit-tested), the peer wire codec
@@ -62,17 +62,17 @@ the normal layout can be added later.
 
 ## Milestones
 
-| Milestone | Scope                                                                                  | Gate                                                            |
-| --------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
-| M1        | Download-only engine: trackers, peers, scheduler, cancel, duplicates, storage, readers | Beats librqbit on `lumen-bench` (local seeder and public swarm) |
-| M2        | Web seeds (BEP 19)                                                                     | MIT course torrents start in under 3 s                          |
-| M3        | Magnet links, DHT, peer exchange, uTP; preload and warm swarm                          | Cold and warm start-up within target                            |
-| M4        | Seeding and choking, rate limits, protocol encryption, `lumen-net` socket hooks        | Network and kill-switch tests pass                              |
-| M5        | Fuzzing, interoperability with qBittorrent and Transmission, soak tests                | Then make it the default and retire librqbit                    |
+| Milestone | Scope                                                                                   | Gate                                                                    |
+| --------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| M1        | Download-only engine: trackers, peers, scheduler, cancel, duplicates, storage, readers  | Beats librqbit on `torrentplayer-bench` (local seeder and public swarm) |
+| M2        | Web seeds (BEP 19)                                                                      | MIT course torrents start in under 3 s                                  |
+| M3        | Magnet links, DHT, peer exchange, uTP; preload and warm swarm                           | Cold and warm start-up within target                                    |
+| M4        | Seeding and choking, rate limits, protocol encryption, `torrentplayer-net` socket hooks | Network and kill-switch tests pass                                      |
+| M5        | Fuzzing, interoperability with qBittorrent and Transmission, soak tests                 | Then make it the default and retire librqbit                            |
 
 ## Consequences
 
-- TorrentStream owns a protocol implementation, so it must be fuzzed and tested against other clients
+- TorrentPlayer owns a protocol implementation, so it must be fuzzed and tested against other clients
   before it becomes the default. librqbit stays available behind the same benchmark interface
   until then.
 - M1 does not upload, accept incoming connections, resolve magnet links, or use the DHT; those
