@@ -28,9 +28,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   interface in direct mode (with optional UPnP port mapping), only the VPN adapter when bound to
   one, and only inside the tunnel with WireGuard; never through a SOCKS5 proxy, and never while
   the kill switch blocks traffic. Settings shows whether it is listening.
-- Both engines keep their DHT routing tables in the app data folder between runs (Direct mode
-  only), so magnet links find peers sooner after a restart. Protected modes still start with a
-  fresh node and save nothing.
+- torrentplayer-swarm keeps its DHT routing tables in the app data folder between runs (Direct
+  mode only), so magnet links find peers sooner after a restart. Protected modes still start
+  with a fresh node and save nothing. librqbit starts from the bootstrap servers each time: from
+  a saved table it fetched magnet metadata more slowly, not faster.
 - In Direct mode, Settings → Network and the status bar recommend a VPN when downloading or
   seeding (for example Windscribe, through its app or a WireGuard configuration), with a link
   to the blog post on VPNs; it is shown once more when seeding starts, until dismissed

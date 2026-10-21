@@ -150,8 +150,10 @@ pub struct StreamEngineConfig {
     pub upload_limit_bps: Option<NonZeroU32>,
     /// Maximum connected peers per torrent.
     pub peer_limit: usize,
-    /// Folder where each engine keeps its DHT routing tables between runs (direct mode only),
-    /// so magnet links find peers sooner after a restart. `None` keeps nothing.
+    /// Folder where torrentplayer-swarm keeps its DHT routing tables between runs (direct mode
+    /// only), so magnet links find peers sooner after a restart. `None` keeps nothing.
+    /// librqbit keeps none: restored from a saved table, it fetched magnet metadata more
+    /// slowly than from a fresh start (see docs/performance.md).
     pub dht_state_dir: Option<PathBuf>,
 }
 
@@ -459,12 +461,10 @@ impl StreamEngine {
         }
         let mut c = EngineConfig::new(self.config.download_dir.join("librqbit"));
         c.enable_dht = self.config.public_discovery;
-        // A file of its own: the two engines run separate nodes, which must not share an id.
-        c.dht_state_file = self
-            .config
-            .dht_state_dir
-            .as_ref()
-            .map(|d| d.join("librqbit.json"));
+        // No saved DHT state (`dht_state_file`): librqbit starts each lookup from the 8 closest
+        // contacts it knows and, with 8 of them, adds no others for a minute. Contacts restored
+        // from a saved table have not answered yet, so magnet metadata took two to three times
+        // as long as from an empty table, which waits for the bootstrap servers' responsive nodes.
         c.enable_trackers = self.config.public_discovery;
         c.network.clone_from(&self.network);
         c.peer_limit = Some(self.config.peer_limit);

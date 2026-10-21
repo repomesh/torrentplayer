@@ -50,7 +50,8 @@ pub struct EngineConfig {
     /// Use the BitTorrent DHT to find peers (needed for most magnet links).
     pub enable_dht: bool,
     /// Where the DHT's routing tables and port are kept between runs (direct mode only).
-    /// `None` starts from the bootstrap nodes every time.
+    /// `None` starts from the bootstrap nodes every time. The app sets none: a restored table
+    /// slowed magnet metadata (see `StreamEngineConfig::dht_state_dir`).
     pub dht_state_file: Option<PathBuf>,
     /// Announce to trackers listed in torrents.
     pub enable_trackers: bool,
