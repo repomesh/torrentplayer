@@ -17,6 +17,14 @@ files: number,
  */
 complete: boolean, 
 /**
- * Whether a clear is scheduled for the next start.
+ * Configured maximum in bytes, or `null` when unlimited.
  */
-clearPending: boolean, };
+limitBytes: number | null, 
+/**
+ * Finished, unqueued data that "Clear now" can remove.
+ */
+reclaimableBytes: number, 
+/**
+ * Number of finished, unqueued downloads that "Clear now" can remove.
+ */
+reclaimableDownloads: number, };

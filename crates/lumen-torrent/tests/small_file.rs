@@ -105,6 +105,12 @@ async fn reads_a_subtitle_file_through_either_engine() {
         .unwrap();
         let source = TorrentSource::from_file_bytes(torrent.clone()).unwrap();
         let info = engine.add_with_peers(source, vec![addr]).await.unwrap();
+        if choice == EngineChoice::Rqbit {
+            assert!(
+                dir.path().join("librqbit").join(&info.info_hash).is_dir(),
+                "librqbit data should be isolated by info hash"
+            );
+        }
         let srt = info
             .files
             .iter()
@@ -133,6 +139,11 @@ async fn reads_a_subtitle_file_through_either_engine() {
         assert!(matches!(
             engine.read_small_file(info.id, 99, 1024).await,
             Err(EngineError::UnknownFile)
+        ));
+        engine.remove(info.id).await.unwrap();
+        assert!(matches!(
+            engine.info(info.id),
+            Err(EngineError::UnknownTorrent)
         ));
         engine.shutdown().await;
     }

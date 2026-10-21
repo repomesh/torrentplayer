@@ -179,8 +179,11 @@ impl From<TorrentInfo> for TorrentSummary {
 pub(crate) async fn add_torrent_link(
     state: State<'_, AppState>,
     search: State<'_, crate::search::SearchState>,
+    downloads: State<'_, crate::downloads::DownloadsState>,
+    settings: State<'_, crate::settings::SettingsState>,
     link: String,
 ) -> Result<TorrentSummary, IpcError> {
+    let _cache_gate = downloads.cache_gate().lock().await;
     let source = TorrentSource::parse_link(&link)?;
     let core = state.core().await?;
     // The search service counts its download links like searches.
@@ -191,6 +194,7 @@ pub(crate) async fn add_torrent_link(
         Ok(core.engine.add(source).await?)
     })
     .await?;
+    crate::cache::mark_unfinished(&settings.active_download_dir(), &info.info_hash);
     Ok(TorrentSummary::of(core, info))
 }
 
@@ -198,8 +202,11 @@ pub(crate) async fn add_torrent_link(
 #[tauri::command]
 pub(crate) async fn add_torrent_file(
     state: State<'_, AppState>,
+    downloads: State<'_, crate::downloads::DownloadsState>,
+    settings: State<'_, crate::settings::SettingsState>,
     request: Request<'_>,
 ) -> Result<TorrentSummary, IpcError> {
+    let _cache_gate = downloads.cache_gate().lock().await;
     let InvokeBody::Raw(bytes) = request.body() else {
         return Err(IpcError::invalid(
             "Expected the .torrent file as raw bytes.",
@@ -208,6 +215,7 @@ pub(crate) async fn add_torrent_file(
     let source = TorrentSource::from_file_bytes(bytes.clone())?;
     let core = state.core().await?;
     let info = capped(ADD_TIMEOUT, async { Ok(core.engine.add(source).await?) }).await?;
+    crate::cache::mark_unfinished(&settings.active_download_dir(), &info.info_hash);
     Ok(TorrentSummary::of(core, info))
 }
 
@@ -231,9 +239,12 @@ pub(crate) struct StreamInfo {
 #[tauri::command]
 pub(crate) async fn start_stream(
     state: State<'_, AppState>,
+    downloads: State<'_, crate::downloads::DownloadsState>,
+    settings: State<'_, crate::settings::SettingsState>,
     torrent_id: usize,
     file_index: usize,
 ) -> Result<StreamInfo, IpcError> {
+    let _cache_gate = downloads.cache_gate().lock().await;
     let core = state.core().await?;
     let info = core.engine.info(torrent_id)?;
     let entry = info
@@ -246,6 +257,7 @@ pub(crate) async fn start_stream(
             "Only video and audio files can be streamed.",
         ));
     }
+    crate::cache::mark_unfinished(&settings.active_download_dir(), &info.info_hash);
     // The queue downloader may have paused or limited this torrent in the background; what is
     // watched always gets the whole link.
     core.engine.set_paused(torrent_id, false).await?;
@@ -302,6 +314,7 @@ pub(crate) async fn start_stream(
 #[tauri::command]
 pub(crate) async fn report_playback(
     state: State<'_, AppState>,
+    settings: State<'_, crate::settings::SettingsState>,
     stream_id: u64,
     position_secs: f64,
     duration_secs: Option<f64>,
@@ -314,9 +327,23 @@ pub(crate) async fn report_playback(
     let duration_secs =
         duration_secs.filter(|d| d.is_finite() && *d > 0.0 && *d <= MAX_DURATION_SECS);
     let core = state.core().await?;
-    core.with_stream(stream_id, |s| {
+    let torrent = core.with_stream(stream_id, |s| {
         s.session.update(position_secs, duration_secs);
-    })
+        s.torrent
+    })?;
+    if let Some(duration) = duration_secs
+        && let (Ok(info), Ok(backend)) = (core.engine.info(torrent), core.engine.backend(torrent))
+    {
+        let root = settings.active_download_dir();
+        if position_secs >= duration {
+            if let Err(error) = crate::cache::mark_finished(&root, backend, &info.info_hash) {
+                tracing::warn!(%error, "could not mark a download as finished");
+            }
+        } else {
+            crate::cache::mark_unfinished(&root, &info.info_hash);
+        }
+    }
+    Ok(())
 }
 
 /// A decoder-level timing measured by the player.

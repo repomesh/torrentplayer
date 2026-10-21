@@ -1560,6 +1560,36 @@ impl StreamEngine {
             .map(|(id, _)| *id)
     }
 
+    /// Stops and forgets an added torrent without deleting its downloaded files.
+    ///
+    /// Cache housekeeping uses this only after the app has established that the torrent is not
+    /// queued and has no open stream. Once its engine has released the files, the app can remove
+    /// the validated cache directory itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the torrent is unknown or librqbit cannot remove it.
+    pub async fn remove(&self, id: TorrentId) -> Result<(), EngineError> {
+        match self.handle(id)? {
+            Handle::Rqbit(inner) => {
+                let engine = self
+                    .rqbit
+                    .lock()
+                    .await
+                    .as_ref()
+                    .cloned()
+                    .ok_or(EngineError::UnknownTorrent)?;
+                engine.remove(inner, false).await?;
+                self.torrents().remove(&id);
+            }
+            Handle::Swarm(torrent) => {
+                self.torrents().remove(&id);
+                torrent.stop();
+            }
+        }
+        Ok(())
+    }
+
     /// How ready a file of an added torrent is to play, from `have` (its
     /// [`StreamEngine::have_pieces`]): downloaded bytes, and whether its start and end are
     /// present as a preload would leave them. `file` `None`, or a file that is not a video,

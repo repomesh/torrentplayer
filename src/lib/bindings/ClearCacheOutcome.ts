@@ -3,4 +3,12 @@
 /**
  * What [`clear_cache`] did.
  */
-export type ClearCacheOutcome = "cleared" | "scheduled";
+export type ClearCacheOutcome = { 
+/**
+ * Bytes removed, including TorrentStream's small completion markers.
+ */
+bytesFreed: number, 
+/**
+ * Finished downloads removed.
+ */
+downloadsRemoved: number, };

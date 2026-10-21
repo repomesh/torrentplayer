@@ -431,6 +431,9 @@ impl Engine {
             // The download directory belongs to TorrentStream; allow resuming over earlier data.
             overwrite: true,
             initial_peers: Some(initial_peers),
+            // Keep every torrent in an independently reclaimable directory. The metadata was
+            // validated above, and an info hash is always a safe single path component.
+            sub_folder: Some(listed.info_hash.as_string()),
             ..AddTorrentOptions::default()
         };
         let response = session

@@ -290,7 +290,7 @@ queue with background downloads, VPN, WireGuard, and proxy modes with a kill swi
 bandwidth limits. Next:
 
 - [x] Seeding controls: keep sharing after watching, ratio and time targets, peer limits
-- [ ] Cache size limit and automatic clean-up of old downloads
+- [x] Cache size limit and automatic clean-up of old downloads
 - [ ] Resume where you left off
 - [ ] More search sources: Internet Archive, Academic Torrents, and your own
 - [ ] libmpv player for codecs the system web engine cannot play
@@ -316,7 +316,8 @@ the tunnel is back; nothing falls back to a direct connection. See
 [network modes](docs/network.md).
 
 **Where are videos stored?** In `TorrentStream` inside your Downloads folder, unless you choose
-another folder in Settings → Storage, which also shows its size and clears it (see
+another folder in Settings → Storage, which shows its size and limit and safely clears finished,
+unqueued downloads (see
 [configuration](docs/configuration.md)).
 
 ## Contributing

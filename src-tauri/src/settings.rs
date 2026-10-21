@@ -7,10 +7,12 @@
 //! with a [`SETTINGS_CHANGED`] event (to the webview) and a [`watch`] channel (to Rust
 //! subsystems). Secrets can be set and cleared here but are never sent back to the webview.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use lumen_settings::{
     EngineSetting, KEYRING_SERVICE, KeyringStore, LogLevel, PatchError, SecretError, SecretKey,
@@ -20,7 +22,7 @@ use lumen_settings::{
 use lumen_torrent::{ENGINE_ENV_VAR, EngineChoice, StreamEngineConfig};
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{AppHandle, Emitter as _, State};
+use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::watch;
 use ts_rs::TS;
 
@@ -30,14 +32,8 @@ use crate::error::{ErrorKind, IpcError};
 /// Event sent to the webview, with the new [`Settings`], after settings or secrets change.
 pub(crate) const SETTINGS_CHANGED: &str = "settings-changed";
 
-/// TorrentStream's cache folders inside the download folder. Clearing the cache deletes these and
-/// nothing else.
-const CACHE_DIRS: [&str; 2] = ["lumen-swarm", "librqbit"];
-/// Marker in the config folder: clear the cache before the engine starts next time. It holds
-/// the download folder it applies to.
+/// Marker written by older versions when a cache clear had to wait for the next start.
 const CLEAR_PENDING: &str = "clear-cache-pending";
-/// Cache usage stops counting after this many entries and reports a lower bound.
-const MAX_WALK_ENTRIES: usize = 200_000;
 
 /// Applies a log level to the running subscriber; `None` when `RUST_LOG` overrides it.
 pub(crate) type LogApplier = Box<dyn Fn(LogLevel) + Send + Sync>;
@@ -49,6 +45,8 @@ pub(crate) struct SettingsState {
     changes: watch::Sender<Settings>,
     /// Serializes updates so concurrent patches cannot overwrite each other.
     updating: tokio::sync::Mutex<()>,
+    /// Serializes cache walks and removals.
+    maintenance: tokio::sync::Mutex<()>,
     /// The settings the running subsystems were started with.
     startup: Settings,
     /// Problems found while loading; cleared by the first successful save.
@@ -88,6 +86,7 @@ impl SettingsState {
             store,
             changes: watch::Sender::new(loaded.settings.clone()),
             updating: tokio::sync::Mutex::new(()),
+            maintenance: tokio::sync::Mutex::new(()),
             startup: loaded.settings,
             load_warnings: Mutex::new(loaded.warnings),
             secrets,
@@ -129,27 +128,42 @@ impl SettingsState {
         config
     }
 
-    /// Runs a cache clear scheduled by [`clear_cache`] while the engine was running. Call before
-    /// the engine starts.
-    pub(crate) fn run_startup_maintenance(&self) {
+    /// Applies the storage policy before the engine starts. A clear marker from an older version
+    /// is treated as "clear finished downloads" and then retired; queued hashes stay protected.
+    pub(crate) fn run_startup_maintenance(&self, queue: &lumen_library::Queue) {
         let marker = self.store.dir().join(CLEAR_PENDING);
-        let Ok(target) = fs::read_to_string(&marker) else {
-            return;
+        let legacy_clear = fs::read_to_string(&marker).ok().is_some_and(|value| {
+            let target = PathBuf::from(value.trim());
+            target == self.download_dir(&self.startup) || target == self.default_download_dir
+        });
+        let mode = if legacy_clear {
+            crate::cache::CleanupMode::AllFinished
+        } else {
+            cleanup_mode(&self.startup)
         };
-        let target = PathBuf::from(target.trim());
-        // Only folders TorrentStream itself would use; the marker is never trusted to name others.
-        let known = [
-            self.download_dir(&self.startup),
-            self.default_download_dir.clone(),
-        ];
-        if known.contains(&target) {
-            match clear_dirs(&target) {
-                Ok(()) => tracing::info!("cleared the download cache"),
-                Err(error) => tracing::warn!(%error, "could not clear the download cache"),
+        let root = self.download_dir(&self.startup);
+        let mut removed = 0_u32;
+        if crate::cache::queue_hashes_complete(queue) {
+            let protected = crate::cache::queue_hashes(queue);
+            let plan = crate::cache::plan(&root, &protected, mode, SystemTime::now());
+            for candidate in plan.candidates {
+                match crate::cache::remove(&root, &candidate.info_hash) {
+                    Ok(()) => removed = removed.saturating_add(1),
+                    Err(error) => {
+                        tracing::warn!(%error, "could not clean up a finished download");
+                    }
+                }
             }
+        } else {
+            tracing::debug!("cache cleanup is waiting for queued torrent metadata");
         }
-        if let Err(error) = fs::remove_file(&marker) {
-            tracing::warn!(%error, "could not remove the cache-clear marker");
+        if removed > 0 {
+            tracing::info!(removed, "cleaned up finished downloads at startup");
+        }
+        if marker.exists()
+            && let Err(error) = fs::remove_file(&marker)
+        {
+            tracing::warn!(%error, "could not remove the old cache-clear marker");
         }
     }
 
@@ -159,6 +173,11 @@ impl SettingsState {
             .download_dir
             .as_ref()
             .map_or_else(|| self.default_download_dir.clone(), PathBuf::from)
+    }
+
+    /// The download folder used by the running engine.
+    pub(crate) fn active_download_dir(&self) -> PathBuf {
+        self.download_dir(&self.startup)
     }
 
     fn view(&self) -> SettingsView {
@@ -208,6 +227,8 @@ impl SettingsState {
         let _guard = self.updating.lock().await;
         let current = self.current();
         let next = apply_patch(&current, patch).map_err(|e| patch_error(&e))?;
+        let storage_policy_changed = next.storage.cache_limit_gb != current.storage.cache_limit_gb
+            || next.storage.cleanup_after_days != current.storage.cleanup_after_days;
         if next.storage.download_dir != current.storage.download_dir
             && let Some(dir) = next.storage.download_dir.clone()
         {
@@ -236,6 +257,12 @@ impl SettingsState {
             .clear();
         self.changes.send_replace(next);
         self.announce(app);
+        if storage_policy_changed {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                enforce_cache_policy(&app).await;
+            });
+        }
         Ok(self.view())
     }
 
@@ -332,19 +359,23 @@ pub(crate) struct CacheUsage {
     pub(crate) files: u64,
     /// False if counting stopped early; `bytes` is then a lower bound.
     pub(crate) complete: bool,
-    /// Whether a clear is scheduled for the next start.
-    pub(crate) clear_pending: bool,
+    /// Configured maximum in bytes, or `null` when unlimited.
+    pub(crate) limit_bytes: Option<u64>,
+    /// Finished, unqueued data that "Clear now" can remove.
+    pub(crate) reclaimable_bytes: u64,
+    /// Number of finished, unqueued downloads that "Clear now" can remove.
+    pub(crate) reclaimable_downloads: u32,
 }
 
 /// What [`clear_cache`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
-pub(crate) enum ClearCacheOutcome {
-    /// The cache was deleted.
-    Cleared,
-    /// The engine is using the cache, so it will be deleted the next time TorrentStream starts.
-    Scheduled,
+pub(crate) struct ClearCacheOutcome {
+    /// Bytes removed, including TorrentStream's small completion markers.
+    pub(crate) bytes_freed: u64,
+    /// Finished downloads removed.
+    pub(crate) downloads_removed: u32,
 }
 
 /// Returns the settings and what the Settings page needs to explain them.
@@ -417,47 +448,181 @@ pub(crate) async fn secret_status(
     blocking(move || SecretStatus::of(store.as_ref())).await
 }
 
-/// How much space the download cache uses.
+/// How much space the download cache uses and how much finished data can be reclaimed safely.
 #[tauri::command]
-pub(crate) async fn cache_usage(state: State<'_, SettingsState>) -> Result<CacheUsage, IpcError> {
-    let dir = state.download_dir(&state.startup);
-    let marker = state.store.dir().join(CLEAR_PENDING);
+pub(crate) async fn cache_usage(
+    app: AppHandle,
+    state: State<'_, SettingsState>,
+) -> Result<CacheUsage, IpcError> {
+    let dir = state.active_download_dir();
+    let protected = protected_hashes(&app);
+    let limit_bytes = cache_limit_bytes(state.current().storage.cache_limit_gb);
     blocking(move || {
-        let (bytes, files, complete) = measure(&dir);
+        let Some(protected) = protected else {
+            let usage = crate::cache::measure(&dir);
+            return CacheUsage {
+                bytes: usage.bytes,
+                files: usage.files,
+                complete: usage.complete,
+                limit_bytes,
+                reclaimable_bytes: 0,
+                reclaimable_downloads: 0,
+            };
+        };
+        let plan = crate::cache::plan(
+            &dir,
+            &protected,
+            crate::cache::CleanupMode::AllFinished,
+            SystemTime::now(),
+        );
         CacheUsage {
-            bytes,
-            files,
-            complete,
-            clear_pending: marker.exists(),
+            bytes: plan.usage.bytes,
+            files: plan.usage.files,
+            complete: plan.usage.complete,
+            limit_bytes,
+            reclaimable_bytes: plan.reclaimable_bytes,
+            reclaimable_downloads: u32::try_from(plan.candidates.len()).unwrap_or(u32::MAX),
         }
     })
     .await
 }
 
-/// Deletes TorrentStream's download cache (only its own cache folders), now if the engine has not
-/// started, otherwise at the next start.
+/// Deletes every finished download that is neither queued nor open in the player.
 #[tauri::command]
-pub(crate) async fn clear_cache(
-    state: State<'_, SettingsState>,
-    app_state: State<'_, AppState>,
-) -> Result<ClearCacheOutcome, IpcError> {
-    let dir = state.download_dir(&state.startup);
-    let cleared = app_state
-        .unless_started(|| {
-            let dir = dir.clone();
-            blocking(move || clear_dirs(&dir))
-        })
-        .await;
-    if let Some(result) = cleared {
-        result?.map_err(|e| IpcError::internal(&e))?;
-        return Ok(ClearCacheOutcome::Cleared);
+pub(crate) async fn clear_cache(app: AppHandle) -> Result<ClearCacheOutcome, IpcError> {
+    run_cache_cleanup(&app, crate::cache::CleanupMode::AllFinished).await
+}
+
+/// Applies the configured size and age policies. Failures are logged because this runs in the
+/// background; the explicit clear command returns infrastructure failures to the caller.
+pub(crate) async fn enforce_cache_policy(app: &AppHandle) {
+    let settings = app.state::<SettingsState>().current();
+    if settings.storage.cache_limit_gb.is_none() && settings.storage.cleanup_after_days.is_none() {
+        return;
     }
-    let marker = state.store.dir().join(CLEAR_PENDING);
-    let text = dir.to_string_lossy().into_owned();
-    blocking(move || fs::write(marker, text))
-        .await?
-        .map_err(|e| IpcError::internal(&e))?;
-    Ok(ClearCacheOutcome::Scheduled)
+    if let Err(error) = run_cache_cleanup(app, cleanup_mode(&settings)).await {
+        tracing::warn!(message = %error.message, "could not enforce the cache policy");
+    }
+}
+
+async fn run_cache_cleanup(
+    app: &AppHandle,
+    mode: crate::cache::CleanupMode,
+) -> Result<ClearCacheOutcome, IpcError> {
+    let settings = app.state::<SettingsState>();
+    let _maintenance = settings.maintenance.lock().await;
+    let downloads = app.state::<crate::downloads::DownloadsState>();
+    // Queue saves and stream starts use the same gate, so the protection snapshot and removals
+    // are one transaction from the user's point of view.
+    let _cache_gate = downloads.cache_gate().lock().await;
+    let root = settings.active_download_dir();
+    let Some(protected) = protected_hashes(app) else {
+        return Ok(ClearCacheOutcome {
+            bytes_freed: 0,
+            downloads_removed: 0,
+        });
+    };
+    let plan_root = root.clone();
+    let plan =
+        blocking(move || crate::cache::plan(&plan_root, &protected, mode, SystemTime::now()))
+            .await?;
+
+    let mut outcome = ClearCacheOutcome {
+        bytes_freed: 0,
+        downloads_removed: 0,
+    };
+    let mut first_error = None;
+    for candidate in plan.candidates {
+        // A stream can close without the gate. Re-checking also makes this robust if another
+        // backend command acquired the torrent between the scan and this iteration.
+        if protected_hashes(app).is_none_or(|hashes| hashes.contains(&candidate.info_hash)) {
+            continue;
+        }
+        if let Some(core) = app.state::<AppState>().started()
+            && let Some(id) = core.engine.torrent_with_hash(&candidate.info_hash)
+            && let Err(error) = core.engine.remove(id).await
+        {
+            tracing::warn!(%error, hash = %candidate.info_hash, "could not release a finished download");
+            first_error.get_or_insert_with(|| IpcError::from(error));
+            continue;
+        }
+        match remove_cache_entry(root.clone(), candidate.info_hash.clone()).await {
+            Ok(()) => {
+                outcome.bytes_freed = outcome.bytes_freed.saturating_add(candidate.bytes);
+                outcome.downloads_removed = outcome.downloads_removed.saturating_add(1);
+            }
+            Err(error) => {
+                tracing::warn!(%error, hash = %candidate.info_hash, "could not remove a finished download");
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if outcome.downloads_removed > 0 {
+        tracing::info!(
+            removed = outcome.downloads_removed,
+            bytes = outcome.bytes_freed,
+            "cleaned up finished downloads"
+        );
+    } else if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(outcome)
+}
+
+async fn remove_cache_entry(root: PathBuf, info_hash: String) -> Result<(), IpcError> {
+    const ATTEMPTS: usize = 20;
+    for attempt in 0..ATTEMPTS {
+        let remove_root = root.clone();
+        let hash = info_hash.clone();
+        let result = blocking(move || crate::cache::remove(&remove_root, &hash)).await?;
+        match result {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt + 1 < ATTEMPTS => {
+                tracing::debug!(%error, %info_hash, "cache files are still closing");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(error) => return Err(IpcError::internal(&error)),
+        }
+    }
+    Ok(())
+}
+
+fn protected_hashes(app: &AppHandle) -> Option<HashSet<String>> {
+    let downloads = app.state::<crate::downloads::DownloadsState>();
+    let queue = downloads.queue();
+    if !crate::cache::queue_hashes_complete(&queue) {
+        return None;
+    }
+    let mut hashes = crate::cache::queue_hashes(&queue);
+    let app_state = app.state::<AppState>();
+    let Some(core) = app_state.started() else {
+        return Some(hashes);
+    };
+    let streams = core.streams.lock().unwrap_or_else(PoisonError::into_inner);
+    for stream in streams.values() {
+        if let Ok(info) = core.engine.info(stream.torrent) {
+            hashes.insert(info.info_hash.to_ascii_lowercase());
+        }
+    }
+    drop(streams);
+    if let Some(preload) = core.engine.preload_status() {
+        hashes.insert(preload.info_hash.to_ascii_lowercase());
+    }
+    Some(hashes)
+}
+
+fn cleanup_mode(settings: &Settings) -> crate::cache::CleanupMode {
+    crate::cache::CleanupMode::Policy {
+        limit_bytes: cache_limit_bytes(settings.storage.cache_limit_gb),
+        max_age: settings
+            .storage
+            .cleanup_after_days
+            .map(|days| Duration::from_secs(u64::from(days) * 24 * 60 * 60)),
+    }
+}
+
+fn cache_limit_bytes(gigabytes: Option<u32>) -> Option<u64> {
+    gigabytes.map(|gb| u64::from(gb) * 1_000_000_000)
 }
 
 /// Opens the system folder picker over `window`, starting at the saved download folder, and
@@ -513,48 +678,6 @@ fn check_writable(dir: &Path) -> io::Result<()> {
     fs::remove_file(&probe)
 }
 
-/// Size and count of the files in the cache folders under `dir`. Symbolic links are skipped.
-fn measure(dir: &Path) -> (u64, u64, bool) {
-    let mut stack: Vec<PathBuf> = CACHE_DIRS.iter().map(|d| dir.join(d)).collect();
-    let (mut bytes, mut files, mut seen) = (0_u64, 0_u64, 0_usize);
-    while let Some(path) = stack.pop() {
-        let Ok(entries) = fs::read_dir(&path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            seen += 1;
-            if seen > MAX_WALK_ENTRIES {
-                return (bytes, files, false);
-            }
-            // `DirEntry::metadata` does not follow symbolic links.
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if meta.is_dir() {
-                stack.push(entry.path());
-            } else if meta.is_file() {
-                bytes = bytes.saturating_add(meta.len());
-                files += 1;
-            }
-        }
-    }
-    (bytes, files, true)
-}
-
-/// Deletes the cache folders under `dir`. A cache folder that is a symbolic link is left alone.
-fn clear_dirs(dir: &Path) -> io::Result<()> {
-    for name in CACHE_DIRS {
-        let path = dir.join(name);
-        match fs::symlink_metadata(&path) {
-            Ok(meta) if meta.is_dir() => fs::remove_dir_all(&path)?,
-            Ok(_) => tracing::warn!(folder = name, "cache folder is not a folder; left alone"),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -569,6 +692,12 @@ mod tests {
         let (down, up) = rate_limits(&b);
         assert_eq!(down.map(std::num::NonZeroU32::get), Some(2 * 1024 * 1024));
         assert_eq!(up.map(std::num::NonZeroU32::get), Some(100 * 1024));
+    }
+
+    #[test]
+    fn cache_limits_use_the_decimal_gigabytes_shown_in_settings() {
+        assert_eq!(cache_limit_bytes(None), None);
+        assert_eq!(cache_limit_bytes(Some(1)), Some(1_000_000_000));
     }
 
     fn state(root: &Path) -> SettingsState {
@@ -610,22 +739,6 @@ mod tests {
     }
 
     #[test]
-    fn clearing_touches_only_cache_folders() {
-        let dir = tempfile::tempdir().unwrap();
-        for name in ["lumen-swarm/a/b", "librqbit/c", "mine"] {
-            fs::create_dir_all(dir.path().join(name)).unwrap();
-        }
-        fs::write(dir.path().join("lumen-swarm/a/b/piece"), [0_u8; 100]).unwrap();
-        fs::write(dir.path().join("librqbit/c/file"), [0_u8; 50]).unwrap();
-        fs::write(dir.path().join("mine/keep"), [0_u8; 7]).unwrap();
-        assert_eq!(measure(dir.path()), (150, 2, true));
-        clear_dirs(dir.path()).unwrap();
-        assert_eq!(measure(dir.path()), (0, 0, true));
-        assert!(dir.path().join("mine/keep").exists());
-        clear_dirs(dir.path()).unwrap();
-    }
-
-    #[test]
     fn pending_clear_runs_only_for_known_folders() {
         let dir = tempfile::tempdir().unwrap();
         let state = state(dir.path());
@@ -637,13 +750,14 @@ mod tests {
         let marker = dir.path().join("config").join(CLEAR_PENDING);
 
         fs::write(&marker, dir.path().join("other").display().to_string()).unwrap();
-        state.run_startup_maintenance();
+        state.run_startup_maintenance(&lumen_library::Queue::default());
         assert!(other.exists(), "an unknown folder is never cleared");
         assert!(!marker.exists());
 
         fs::write(&marker, dir.path().join("downloads").display().to_string()).unwrap();
-        state.run_startup_maintenance();
-        assert!(!cache.exists());
+        state.run_startup_maintenance(&lumen_library::Queue::default());
+        // Old unmarked layouts are not identifiable as finished and remain untouched.
+        assert!(cache.exists());
         assert!(!marker.exists());
     }
 

@@ -234,9 +234,6 @@ const LATER = new Set([
   // autoplay and ordering apply now).
   'playback.resumePosition',
   'playback.hardwareDecoding',
-  // Storage housekeeping.
-  'storage.cacheLimitGb',
-  'storage.cleanupAfterDays',
   // Search sources and filters not built yet (the adult filter and preloading apply now).
   'search.sources.emberglow',
   'search.sources.internetArchive',

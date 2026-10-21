@@ -30,6 +30,7 @@
       ? CLEANUP_DAYS
       : [...CLEANUP_DAYS, s.cleanupAfterDays].sort((a, b) => a - b),
   );
+  const shownLimit = $derived(s.cacheLimitGb === null ? null : s.cacheLimitGb * 1_000_000_000);
 
   let usage = $state<CacheUsage | null>(null);
   let usageError = $state<string | null>(null);
@@ -72,9 +73,9 @@
     try {
       const outcome = await clearCache();
       clearMessage =
-        outcome === 'cleared'
-          ? 'Cache cleared.'
-          : 'Something is playing from the cache, so it will be cleared the next time TorrentStream starts.';
+        outcome.downloadsRemoved === 0
+          ? 'No finished, unqueued downloads could be cleared.'
+          : `Cleared ${String(outcome.downloadsRemoved)} ${outcome.downloadsRemoved === 1 ? 'download' : 'downloads'} (${formatBytes(outcome.bytesFreed)}).`;
       confirming = false;
       await refresh();
     } catch (reason: unknown) {
@@ -198,9 +199,12 @@
         {#if usageError}
           {usageError}
         {:else if usage}
-          {usage.complete ? '' : 'At least '}{formatBytes(usage.bytes)} in {usage.files}
-          {usage.files === 1 ? 'file' : 'files'}{usage.clearPending
-            ? ' · clears at next start'
+          {usage.complete ? '' : 'At least '}{formatBytes(usage.bytes)}{shownLimit === null
+            ? ' · Unlimited'
+            : ` of ${formatBytes(shownLimit)}`}
+          · {usage.files}
+          {usage.files === 1 ? 'file' : 'files'}{usage.reclaimableBytes > 0
+            ? ` · ${formatBytes(usage.reclaimableBytes)} finished`
             : ''}
         {:else}
           Measuring…
@@ -210,11 +214,11 @@
         <button
           id="storage-clear"
           type="button"
-          disabled={clearing || usage?.bytes === 0}
+          disabled={clearing || usage?.reclaimableDownloads === 0}
           onclick={() => {
             confirming = true;
             clearMessage = null;
-          }}>Clear cache…</button
+          }}>Clear now…</button
         >
       {/if}
     </div>
@@ -222,12 +226,12 @@
   {#if confirming}
     <div class="confirm" role="group" aria-labelledby="storage-confirm-text">
       <p id="storage-confirm-text">
-        Delete {usage ? formatBytes(usage.bytes) : 'all'} of downloaded data? Videos and tracks download
-        again when you play them.
+        Delete {usage ? formatBytes(usage.reclaimableBytes) : 'finished'} of finished downloads that are
+        no longer in the queue? Playing and queued downloads are kept.
       </p>
       <div class="actions">
         <button type="button" class="danger" disabled={clearing} onclick={() => void clear()}>
-          {clearing ? 'Clearing…' : 'Delete cache'}
+          {clearing ? 'Clearing…' : 'Clear finished downloads'}
         </button>
         <button
           type="button"

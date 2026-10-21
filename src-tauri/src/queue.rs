@@ -75,7 +75,7 @@ pub(crate) async fn save_queue(
         .validate()
         .map_err(|e| IpcError::invalid(format!("queue.{e}")))?;
     // The downloader follows the new order and pauses at once, even if saving fails.
-    downloads.set_queue(queue.clone());
+    downloads.set_queue(queue.clone()).await;
     let state = state.inner().clone();
     tokio::task::spawn_blocking(move || state.save(&queue))
         .await
