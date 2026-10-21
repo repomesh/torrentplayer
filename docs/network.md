@@ -38,19 +38,19 @@ shown, until the settings are fixed.
 
 ## What each kind of traffic does
 
-| Traffic                                 | Direct                                                          | Bind to interface              | SOCKS5 proxy                                                           | Kill switch engaged   |
-| --------------------------------------- | --------------------------------------------------------------- | ------------------------------ | ---------------------------------------------------------------------- | --------------------- |
-| Peers over TCP, torrentplayer-swarm     | direct                                                          | bound to the interface         | through the proxy                                                      | refused, closed       |
-| Peers over TCP, librqbit (rqbit engine) | direct                                                          | via the loopback bridge, bound | via the loopback bridge, through the proxy                             | refused, closed       |
-| Peers over uTP (librqbit)               | when listening                                                  | **off**                        | **off**                                                                | off                   |
-| Incoming peer connections               | librqbit only if a listen address is set (it is not by default) | **off**                        | **off**                                                                | off                   |
-| HTTP(S) trackers                        | direct                                                          | bound (system DNS)             | through the proxy (proxy DNS for torrentplayer-swarm, see [DNS](#dns)) | refused               |
-| UDP trackers                            | direct                                                          | TorrentPlayer's client, bound  | UDP ASSOCIATE relay                                                    | refused               |
-| DHT discovery                           | on                                                              | bound sockets                  | UDP ASSOCIATE relay (when enabled)                                     | off                   |
-| Local peer discovery (multicast)        | off                                                             | off                            | off                                                                    | off                   |
-| `.torrent` file downloads               | direct                                                          | bound                          | through the proxy                                                      | refused               |
-| Search (search.emberglow.tech)          | direct                                                          | bound                          | through the proxy                                                      | refused               |
-| Public-IP check (icanhazip.com)         | direct                                                          | bound                          | through the proxy                                                      | refused, nothing sent |
+| Traffic                                 | Direct                                                                    | Bind to interface                  | SOCKS5 proxy                                                           | Kill switch engaged   |
+| --------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------- | ---------------------------------------------------------------------- | --------------------- |
+| Peers over TCP, torrentplayer-swarm     | direct                                                                    | bound to the interface             | through the proxy                                                      | refused, closed       |
+| Peers over TCP, librqbit (rqbit engine) | direct                                                                    | via the loopback bridge, bound     | via the loopback bridge, through the proxy                             | refused, closed       |
+| Peers over uTP (librqbit)               | when listening                                                            | **off**                            | **off**                                                                | off                   |
+| Incoming peer connections               | when turned on: every interface (see [below](#incoming-peer-connections)) | when turned on: the interface only | **never**                                                              | closed                |
+| HTTP(S) trackers                        | direct                                                                    | bound (system DNS)                 | through the proxy (proxy DNS for torrentplayer-swarm, see [DNS](#dns)) | refused               |
+| UDP trackers                            | direct                                                                    | TorrentPlayer's client, bound      | UDP ASSOCIATE relay                                                    | refused               |
+| DHT discovery                           | on                                                                        | bound sockets                      | UDP ASSOCIATE relay (when enabled)                                     | off                   |
+| Local peer discovery (multicast)        | off                                                                       | off                                | off                                                                    | off                   |
+| `.torrent` file downloads               | direct                                                                    | bound                              | through the proxy                                                      | refused               |
+| Search (search.emberglow.tech)          | direct                                                                    | bound                              | through the proxy                                                      | refused               |
+| Public-IP check (icanhazip.com)         | direct                                                                    | bound                              | through the proxy                                                      | refused, nothing sent |
 
 "Off" means the traffic is not sent at all, never sent around the mode. WireGuard also carries
 DHT and UDP trackers inside its tunnel. In protected modes, peers found by scoped DHT and UDP
@@ -70,6 +70,48 @@ bytes, fragmented envelopes, domain-addressed replies, and truncated envelopes a
 For remote DNS, domain requests go to the proxy; DHT bootstrap pings learn the resolved public
 address from a matching reply without a local target-name lookup. Learned DHT nodes and peers,
 and UDP tracker reply sources, are checked against the public-address policy.
+
+## Incoming peer connections
+
+By default TorrentPlayer only connects out: it opens no listening port, so no firewall prompt
+appears, at the cost of fewer peers and less upload. **Settings → VPN and network → Accept
+incoming peer connections** (`network.incomingPeers`) opens one TCP port, but only on the path
+the selected mode allows. The listener belongs to `torrentplayer_net::Network`
+(`Network::set_incoming`, `Network::incoming_peers`), so it follows the same kill switch and
+epochs as outgoing connections.
+
+| Mode                        | Where TorrentPlayer listens                                                                                                                                      |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Direct**                  | Every interface (`0.0.0.0` and `[::]`). Optionally a UPnP port mapping on the router.                                                                            |
+| **VPN (bind to interface)** | Only the adapter's own addresses, with the socket pinned to it as outgoing connections are (`SO_BINDTODEVICE`, `IP_BOUND_IF`, or the Windows strong host model). |
+| **WireGuard**               | Only the tunnel's own addresses, inside TorrentPlayer's userspace tunnel. Nothing listens on the machine's interfaces.                                           |
+| **SOCKS5 proxy**            | **Nowhere.** A proxy cannot accept arbitrary incoming connections for a client, and listening anywhere else would bypass it. The status says so.                 |
+
+- **The kill switch closes it.** While traffic is blocked (connecting, reconnecting, kill switch,
+  error) nothing listens. Each new epoch (a mode change, the bound address changing, the kill
+  switch lifting) reopens it on the new path. Every accepted connection carries a `Lease` for
+  its epoch and is closed with the outgoing ones. IPv6 is accepted in protected modes only with
+  **IPv6 → Route through the tunnel**.
+- **Port.** 1024–65535, or 0 (the default) for a random port from 10000–49151, chosen once and
+  kept while TorrentPlayer runs (another one is tried if it is taken). A port in use is
+  reported and retried every 30 seconds. Changing the port reopens the listener without
+  closing any connection. Peers behind a VPN reach the port only if the provider forwards it to
+  you; choose that forwarded port here.
+- **Engines.** torrentplayer-swarm reads the handshake of each accepted connection (at most 32
+  at once, within the handshake timeout), hands it to the torrent it names, and serves it like
+  an outgoing peer. Unknown torrents, paused torrents, our own peer id, and torrents at their
+  peer limit (connected plus connecting) are refused. Trackers are told the listening port.
+  librqbit listens itself only when it is the engine for every torrent (`advanced.engine` =
+  `rqbit`) and only in direct mode, TCP only, on `[::]` (dual stack); its listener cannot be
+  pinned to an interface or tunnel, so it never listens in a protected mode. With the automatic
+  engine librqbit only fetches magnet metadata and never listens.
+- **UPnP** (`network.incomingPeers.upnp`, off by default) asks the router to forward the port
+  with UPnP IGD (`librqbit-upnp`), only in direct mode and only while listening. The mapping's
+  lease is 60 seconds, renewed every 30, so it lapses within a minute after listening stops or
+  the mode changes. NAT-PMP and PCP are not supported.
+- **Status.** `NetworkStatus.incoming` is `off`, `idle` (no engine accepts them right now),
+  `paused` (traffic blocked), `unsupported` (SOCKS5), `listening` (port, addresses, UPnP), or
+  `failed` (the port could not be opened). Settings shows it under the connection state.
 
 ## Kill switch and connection state
 
@@ -143,7 +185,7 @@ flowchart LR
   changes.
 - **librqbit** cannot be pointed at a connector, so in protected modes it gets the bridge as its
   SOCKS5 proxy (`ConnectionOptions::proxy_url`), no native DHT, no listening socket (so no uTP or
-  incoming connections), and no local discovery. Its magnet links lose their UDP trackers before
+  incoming connections; torrentplayer-swarm accepts those instead), and no local discovery. Its magnet links lose their UDP trackers before
   they are added (scoped DHT and trackers supply initial peers separately), and `.torrent` files are refused when librqbit is forced as the engine (their
   tracker lists cannot be filtered); with the automatic engine, `.torrent` files go to
   torrentplayer-swarm anyway. These session options are fixed at start, so when protection turns on or
@@ -222,8 +264,9 @@ still resolves its HTTP tracker names through the system resolver, as it does in
 this affects magnet metadata lookup. TorrentPlayer-swarm and search use tunneled DNS. IPv6 application destinations
 still require **IPv6 → Route through the tunnel** and an IPv6 tunnel address.
 UDP tracker announces, DHT, and their bootstrap DNS run inside WireGuard. Their peers bootstrap magnet
-metadata fetching and remain available to the streaming engine. Incoming peers and uTP
-remain disabled in built-in WireGuard mode. Successful tracker replies are retained when other
+metadata fetching and remain available to the streaming engine. uTP remains disabled in
+built-in WireGuard mode; incoming peers, when turned on, are accepted only inside the tunnel
+(see [Incoming peer connections](#incoming-peer-connections)). Successful tracker replies are retained when other
 trackers time out.
 
 ### Using a VPN app
@@ -275,11 +318,15 @@ The Settings page (`torrentplayer-settings`) stores what the user chooses; the a
 | `network.socks5.proxyDht`      | Enables DHT through UDP ASSOCIATE; off means no DHT in SOCKS5 mode.                                       |
 | `network.wireguard`            | Shown in the status (endpoint). The private key is not read until the tunnel exists.                      |
 | `network.ipv6`                 | `tunnel` allows IPv6 destinations in protected modes; `disable` refuses them.                             |
+| `network.incomingPeers`        | `enabled`, `port` (0: random), `upnp` (direct mode only); see [Incoming](#incoming-peer-connections).     |
 | `network.encryption`           | Not implemented by either engine yet.                                                                     |
 
 ## Limits
 
-- No uTP or incoming peers in protected modes.
+- No uTP in protected modes. No incoming peers through a SOCKS5 proxy, and none for librqbit
+  (when it is forced as the engine) in any protected mode.
+- Incoming peers behind a VPN need the provider to forward the port; TorrentPlayer cannot request
+  that (no NAT-PMP), and UPnP is for direct mode only.
 - SOCKS5 UDP requires a proxy supporting UDP ASSOCIATE and reachable relay datagrams. The relay
   reply must contain an IP address (or the proxy's own configured name); other relay hostnames
   are refused without local DNS. Fragmentation and domain-addressed response envelopes are
@@ -309,6 +356,14 @@ All on loopback, no internet:
 - Scripted UDP relays exercise proxy-side tracker and DHT bootstrap DNS, DHT peer discovery,
   relay-only sends, IPv6 refusal, control-connection closure, and lease revocation. They never
   forward packets to the public addresses used in test replies.
+- Incoming connections (`crates/torrentplayer-net/src/tests.rs`, `tunnel.rs`, and
+  `crates/torrentplayer-swarm/tests/incoming.rs`): off until turned on; a port change keeps
+  connections; random ports are kept; a port in use is reported; SOCKS5 and blocked modes open
+  no port, and leaving direct mode revokes accepted connections; WireGuard listens only inside
+  the tunnel; a seeder that connects to torrentplayer-swarm is served completely and trackers
+  learn the port; unknown torrents, the peer limit, and paused torrents are refused.
+  `crates/torrentplayer-torrent/tests/network.rs` checks that forced librqbit listens in direct
+  mode only.
 - `crates/torrentplayer-swarm/tests/network.rs`: a torrentplayer-swarm download from a librqbit seeder behind a
   recording relay, through the proxy only (every connection the seeder saw came from the proxy);
   stopping the proxy stops the transfer with no direct connection; restarting it finishes the

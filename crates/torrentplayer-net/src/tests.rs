@@ -14,8 +14,8 @@ use tokio::net::TcpListener;
 use crate::test_util::TestProxy;
 use crate::wireguard::WireGuardConfig;
 use crate::{
-    ConnectionState, NetError, Network, NetworkConfig, NetworkMode, NetworkOptions, Secret,
-    Socks5Config, socks5,
+    ConnectionState, ExternalListener, IncomingConfig, IncomingStatus, NetError, Network,
+    NetworkConfig, NetworkMode, NetworkOptions, RANDOM_PORTS, Secret, Socks5Config, socks5,
 };
 
 fn fast_options() -> NetworkOptions {
@@ -750,4 +750,251 @@ fn reads_plain_text_and_json_connection_check_answers() {
     assert_eq!(parse_ip_answer(br#"{"ip":"203.0.113.7"}"#), Some(v4));
     assert_eq!(parse_ip_answer(b"<html>blocked</html>"), None);
     assert_eq!(parse_ip_answer(b""), None);
+}
+
+/// A port nothing listens on right now.
+fn free_port() -> u16 {
+    let probe = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    probe.local_addr().unwrap().port()
+}
+
+async fn wait_for_incoming(
+    net: &Network,
+    want: impl Fn(&IncomingStatus) -> bool,
+) -> IncomingStatus {
+    let mut rx = net.status_changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let status = net.status().incoming;
+            if want(&status) {
+                return status;
+            }
+            let _ = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("incoming status never matched; last: {:?}", net.status()))
+}
+
+/// Whether anything accepts a TCP connection on `127.0.0.1:port`.
+async fn accepts_on_loopback(port: u16) -> bool {
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok())
+}
+
+fn incoming(port: u16) -> IncomingConfig {
+    IncomingConfig {
+        enabled: true,
+        port,
+        upnp: false,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incoming_connections_are_off_until_turned_on_and_follow_the_setting() {
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    let mut peers = net.incoming_peers();
+    assert_eq!(net.status().incoming, IncomingStatus::Off);
+    assert_eq!(net.incoming_port(), None);
+
+    let port = free_port();
+    net.set_incoming(incoming(port));
+    let status = wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    assert!(
+        matches!(&status, IncomingStatus::Listening { port: p, upnp: false, addresses }
+            if *p == port && addresses.contains(&format!("0.0.0.0:{port}"))),
+        "{status:?}"
+    );
+    assert_eq!(net.incoming_port(), Some(port));
+
+    let mut client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    let mut peer = tokio::time::timeout(Duration::from_secs(5), peers.next())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(peer.lease.is_valid());
+    assert_eq!(peer.addr, client.local_addr().unwrap());
+    client.write_all(b"hi").await.unwrap();
+    let mut hello = [0u8; 2];
+    peer.stream.read_exact(&mut hello).await.unwrap();
+    assert_eq!(&hello, b"hi");
+
+    // Moving the port reopens the listener but keeps existing connections.
+    let moved = free_port();
+    net.set_incoming(incoming(moved));
+    wait_for_incoming(
+        &net,
+        |s| matches!(s, IncomingStatus::Listening { port, .. } if *port == moved),
+    )
+    .await;
+    assert!(peer.lease.is_valid(), "a port change closes no connection");
+    assert!(!accepts_on_loopback(port).await, "the old port is closed");
+    assert!(accepts_on_loopback(moved).await);
+
+    // Turning it off closes the listener.
+    net.set_incoming(IncomingConfig::default());
+    wait_for_incoming(&net, |s| *s == IncomingStatus::Off).await;
+    assert!(!accepts_on_loopback(moved).await);
+    assert_eq!(net.incoming_port(), None);
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_random_port_is_chosen_once_and_kept() {
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    let _peers = net.incoming_peers();
+    net.set_incoming(incoming(0));
+    let status = wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    let IncomingStatus::Listening { port, .. } = status else {
+        unreachable!()
+    };
+    assert!((RANDOM_PORTS.0..=RANDOM_PORTS.1).contains(&port), "{port}");
+    assert_eq!(net.incoming_port(), Some(port));
+    assert!(accepts_on_loopback(port).await);
+    // Turning it off and on again keeps the port, so trackers and port forwards stay valid.
+    net.set_incoming(IncomingConfig::default());
+    wait_for_incoming(&net, |s| *s == IncomingStatus::Off).await;
+    net.set_incoming(incoming(0));
+    wait_for_incoming(
+        &net,
+        |s| matches!(s, IncomingStatus::Listening { port: p, .. } if *p == port),
+    )
+    .await;
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_port_in_use_is_reported() {
+    let taken = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let port = taken.local_addr().unwrap().port();
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    let _peers = net.incoming_peers();
+    net.set_incoming(incoming(port));
+    let status = wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Failed { .. })).await;
+    assert!(
+        matches!(status, IncomingStatus::Failed { .. }),
+        "{status:?}"
+    );
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_a_consumer_nothing_listens() {
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    let port = free_port();
+    net.set_incoming(incoming(port));
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Idle { .. })).await;
+    assert!(!accepts_on_loopback(port).await);
+    // An engine's own listener is reported instead.
+    let addr = SocketAddr::from((Ipv4Addr::UNSPECIFIED, port));
+    net.set_external_listener(Some(ExternalListener::Listening(addr)));
+    wait_for_incoming(
+        &net,
+        |s| matches!(s, IncomingStatus::Listening { port: p, .. } if *p == port),
+    )
+    .await;
+    // A consumer that goes away closes the listener again.
+    net.set_external_listener(None);
+    let peers = net.incoming_peers();
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    assert!(accepts_on_loopback(port).await);
+    drop(peers);
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Idle { .. })).await;
+    assert!(!accepts_on_loopback(port).await);
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn socks5_mode_never_listens() {
+    let proxy = TestProxy::start(None).await.unwrap();
+    let net = Network::start(socks_mode(&proxy, None), fast_options())
+        .await
+        .unwrap();
+    assert_eq!(
+        net.settled(Duration::from_secs(5)).await.state,
+        ConnectionState::Connected
+    );
+    let _peers = net.incoming_peers();
+    let port = free_port();
+    net.set_incoming(incoming(port));
+    let status = wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Unsupported { .. })).await;
+    assert!(
+        matches!(&status, IncomingStatus::Unsupported { reason } if reason.contains("SOCKS5")),
+        "{status:?}"
+    );
+    assert!(!accepts_on_loopback(port).await);
+    assert_eq!(net.incoming_port(), None, "no port is announced");
+
+    // Switching to direct opens it; back to the proxy closes it and its connections.
+    let mut peers = net.incoming_peers();
+    net.apply(NetworkConfig::default()).unwrap();
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    let _client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    let mut peer = tokio::time::timeout(Duration::from_secs(5), peers.next())
+        .await
+        .unwrap()
+        .unwrap();
+    net.apply(socks_mode(&proxy, None)).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), peer.lease.revoked())
+        .await
+        .unwrap();
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Unsupported { .. })).await;
+    assert!(!accepts_on_loopback(port).await);
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_blocked_protected_mode_does_not_listen() {
+    const PRIVATE: &str = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+    const PUBLIC: &str = "xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=";
+    let text = format!(
+        "[Interface]\nPrivateKey = {PRIVATE}\nAddress = 10.0.0.2/32\n[Peer]\nPublicKey = {PUBLIC}\n\
+         AllowedIPs = 0.0.0.0/0\nEndpoint = 198.51.100.1:51820\n"
+    );
+    let (config, _) = WireGuardConfig::parse(&text).unwrap();
+    let net = Network::start(
+        NetworkConfig {
+            mode: NetworkMode::WireGuard(config),
+            allow_ipv6: false,
+        },
+        fast_options(),
+    )
+    .await
+    .unwrap();
+    let _peers = net.incoming_peers();
+    let port = free_port();
+    net.set_incoming(incoming(port));
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Paused { .. })).await;
+    assert!(!accepts_on_loopback(port).await);
+    // The same holds for a missing VPN interface.
+    net.apply(NetworkConfig {
+        mode: NetworkMode::BindInterface {
+            interface: "torrentplayer-test-no-such-interface".into(),
+        },
+        allow_ipv6: false,
+    })
+    .unwrap();
+    wait_for_state(&net, |s| {
+        matches!(s, ConnectionState::KillSwitchActive { .. })
+    })
+    .await;
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Paused { .. })).await;
+    assert!(!accepts_on_loopback(port).await);
+    net.shutdown();
 }

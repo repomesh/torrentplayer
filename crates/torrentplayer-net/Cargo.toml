@@ -14,6 +14,7 @@ base64.workspace = true
 getrandom.workspace = true
 dns-parser.workspace = true
 if-addrs.workspace = true
+librqbit-upnp.workspace = true
 reqwest = { workspace = true, features = ["socks"] }
 serde.workspace = true
 serde_json.workspace = true

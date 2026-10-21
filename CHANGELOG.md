@@ -17,6 +17,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- Incoming peer connections can be turned on in Settings → VPN and network, on a chosen or
+  random port, for more peers and better uploads (off by default, so there is still no firewall
+  prompt unless chosen). TorrentPlayer listens only where the network mode allows: every
+  interface in direct mode (with optional UPnP port mapping), only the VPN adapter when bound to
+  one, and only inside the tunnel with WireGuard; never through a SOCKS5 proxy, and never while
+  the kill switch blocks traffic. Settings shows whether it is listening.
 - DHT peer discovery now uses bound VPN sockets and the built-in WireGuard tunnel. SOCKS5
   proxies with UDP ASSOCIATE support carry DHT and UDP trackers, including magnet metadata
   discovery, without falling back to direct UDP or target DNS.

@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
@@ -16,9 +16,10 @@ use librqbit_core::hash_id::Id20;
 use librqbit_tracker_comms::{
     TorrentStatsProvider, TrackerComms, TrackerCommsStats, TrackerCommsStatsState, UdpTrackerClient,
 };
+use tokio::io::AsyncReadExt as _;
 use tokio::sync::{Notify, Semaphore, mpsc, watch};
 use tokio_util::sync::CancellationToken;
-use torrentplayer_net::{Network, Policy};
+use torrentplayer_net::{IncomingPeer, IncomingPeers, Network, Policy};
 use tracing::{debug, info, trace};
 
 use crate::dht::DhtNode;
@@ -29,7 +30,7 @@ use crate::sched::{
     Interest, InterestId, InterestKind, PeerKey, Request, Scheduler, SchedulerConfig,
 };
 use crate::store::PieceStore;
-use crate::wire::Outgoing;
+use crate::wire::{self, HANDSHAKE_LEN, Outgoing};
 
 /// How often the driver re-plans, refills queues, and checks timeouts.
 const TICK: Duration = Duration::from_millis(100);
@@ -61,6 +62,11 @@ const RETRY_TICKS: u32 = 5;
 const PLAYHEAD: InterestId = 0;
 /// Disk reads queued for upload across the engine. Each holds at most one 16 KiB block.
 const MAX_UPLOAD_READS: usize = 256;
+/// Incoming connections sending their handshake at once, across the engine; more are closed.
+const MAX_INBOUND_HANDSHAKES: usize = 32;
+
+/// The engine's torrents by info hash, for routing incoming connections.
+type Registry = Arc<Mutex<HashMap<[u8; 20], Weak<Shared>>>>;
 
 /// Engine settings.
 // Independent switches, each read by a different part of the engine.
@@ -90,9 +96,13 @@ pub struct SwarmConfig {
     /// policy allows UDP (direct mode). Off by default; turn it on along with trackers for
     /// public swarms.
     pub enable_dht: bool,
-    /// Port announced to trackers. TorrentPlayer does not accept incoming connections yet, but
-    /// trackers reject port 0.
+    /// Port announced to trackers while incoming connections are not accepted (trackers reject
+    /// port 0). While they are, the listening port is announced instead.
     pub announce_port: u16,
+    /// Serve peers that connect to us, from the network manager's listener
+    /// (`torrentplayer_net::Network::incoming_peers`), when incoming connections are turned on
+    /// there. Needs `network`. Only one engine per network should accept them.
+    pub accept_incoming: bool,
     /// Request scheduling policy.
     pub scheduler: SchedulerConfig,
     /// Maximum download rate for the whole engine, bytes per second.
@@ -124,6 +134,7 @@ impl SwarmConfig {
             enable_trackers: true,
             enable_dht: false,
             announce_port: 6881,
+            accept_incoming: false,
             scheduler: SchedulerConfig::default(),
             download_limit_bps: None,
             upload_limit_bps: None,
@@ -267,6 +278,7 @@ pub struct Swarm {
     web: reqwest::Client,
     udp: Option<UdpTrackerClient>,
     dht: Option<Arc<DhtNode>>,
+    torrents: Registry,
     cancel: CancellationToken,
 }
 
@@ -310,6 +322,17 @@ impl Swarm {
                 network.subscribe(),
             ));
         }
+        let torrents = Registry::default();
+        if cfg.accept_incoming
+            && let Some(network) = &cfg.network
+        {
+            tokio::spawn(accept_incoming(
+                network.incoming_peers(),
+                Arc::clone(&torrents),
+                cfg.handshake_timeout,
+                cancel.clone(),
+            ));
+        }
         let udp = if cfg.enable_trackers {
             Some(
                 UdpTrackerClient::new(cancel.clone(), None)
@@ -336,6 +359,7 @@ impl Swarm {
             web,
             udp,
             dht,
+            torrents,
             cancel,
         })
     }
@@ -385,6 +409,11 @@ impl Swarm {
             cancel: self.cancel.child_token(),
         });
         shared.add_candidates(peers);
+        {
+            let mut torrents = self.torrents.lock().unwrap_or_else(PoisonError::into_inner);
+            torrents.retain(|_, t| t.strong_count() > 0);
+            torrents.insert(meta.info_hash, Arc::downgrade(&shared));
+        }
         if let Some(node) = &self.dht {
             tokio::spawn(crate::dht::discover(
                 Arc::clone(node),
@@ -1263,7 +1292,7 @@ struct Trackers {
     info_hash: Id20,
     peer_id: Id20,
     urls: HashSet<url::Url>,
-    shared: std::sync::Weak<Shared>,
+    shared: Weak<Shared>,
     port: u16,
     http: reqwest::Client,
     udp: UdpTrackerClient,
@@ -1278,6 +1307,11 @@ impl Trackers {
             return None;
         }
         let udp_allowed = policy.is_none_or(|p| p.udp_allowed);
+        let port = self
+            .shared
+            .upgrade()
+            .and_then(|s| s.incoming_port())
+            .unwrap_or(self.port);
         let urls = self
             .urls
             .iter()
@@ -1290,7 +1324,7 @@ impl Trackers {
             urls,
             Box::new(TrackerStats(self.shared.clone())),
             None,
-            self.port,
+            port,
             self.http.clone(),
             self.udp.clone(),
         );
@@ -1312,7 +1346,7 @@ impl Trackers {
             info_hash: self.info_hash.0,
             peer_id: self.peer_id.0,
             left: shared.meta.total_len,
-            port: self.port,
+            port,
             started: true,
         };
         let (tx, rx) = mpsc::channel(256);
@@ -1495,6 +1529,60 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
     debug!("torrent driver stopped");
 }
 
+/// Reads the handshake of each peer that connects to us and hands the connection to the torrent
+/// it names; connections for other torrents, and beyond [`MAX_INBOUND_HANDSHAKES`] waiting
+/// ones, are closed.
+async fn accept_incoming(
+    mut incoming: IncomingPeers,
+    torrents: Registry,
+    timeout: Duration,
+    cancel: CancellationToken,
+) {
+    let pending = Arc::new(Semaphore::new(MAX_INBOUND_HANDSHAKES));
+    loop {
+        let peer = tokio::select! {
+            () = cancel.cancelled() => return,
+            peer = incoming.next() => peer,
+        };
+        let Some(IncomingPeer {
+            mut stream,
+            addr,
+            mut lease,
+        }) = peer
+        else {
+            return;
+        };
+        let Ok(permit) = Arc::clone(&pending).try_acquire_owned() else {
+            trace!(%addr, "too many incoming handshakes; closing");
+            continue;
+        };
+        let torrents = Arc::clone(&torrents);
+        tokio::spawn(async move {
+            let mut theirs = [0u8; HANDSHAKE_LEN];
+            let read = tokio::select! {
+                () = lease.revoked() => return,
+                read = tokio::time::timeout(timeout, stream.read_exact(&mut theirs)) => read,
+            };
+            drop(permit);
+            if !matches!(read, Ok(Ok(_))) {
+                return;
+            }
+            let shared = wire::handshake_info_hash(&theirs).and_then(|hash| {
+                torrents
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .get(&hash)
+                    .and_then(Weak::upgrade)
+            });
+            if let Some(shared) = shared {
+                crate::peer::accept(shared, stream, addr, lease, theirs).await;
+            } else {
+                trace!(%addr, "incoming peer for an unknown torrent; closing");
+            }
+        });
+    }
+}
+
 fn connect_more(shared: &Arc<Shared>, live: usize) {
     let cfg = &shared.cfg;
     let mut candidates = shared.candidates();
@@ -1555,6 +1643,35 @@ impl Shared {
         self.wake.notify_one();
     }
 
+    /// Makes room for a peer that connected to us: it counts as handshaking until
+    /// [`Shared::handshake_finished`]. Refused at the peer limit (counting connections being
+    /// made), while paused, and once the torrent stopped.
+    pub(crate) fn reserve_inbound(&self) -> bool {
+        if self.paused.load(Ordering::Relaxed) || self.cancel.is_cancelled() {
+            return false;
+        }
+        let live = self.live_peers();
+        let mut c = self.candidates();
+        if live + c.connecting + c.handshaking >= self.cfg.peer_limit {
+            return false;
+        }
+        c.handshaking += 1;
+        true
+    }
+
+    /// A key for a new peer connection.
+    pub(crate) fn next_peer_key(&self) -> PeerKey {
+        self.next_peer.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// The listening port to announce, while this engine accepts incoming peers.
+    fn incoming_port(&self) -> Option<u16> {
+        if !self.cfg.accept_incoming {
+            return None;
+        }
+        self.cfg.network.as_ref()?.incoming_port()
+    }
+
     /// Called by a peer task when the handshake after [`Shared::tcp_finished`] ends.
     pub(crate) fn handshake_finished(&self) {
         let mut c = self.candidates();
@@ -1568,7 +1685,7 @@ impl Shared {
     }
 }
 
-struct TrackerStats(std::sync::Weak<Shared>);
+struct TrackerStats(Weak<Shared>);
 
 impl TorrentStatsProvider for TrackerStats {
     fn get(&self) -> TrackerCommsStats {

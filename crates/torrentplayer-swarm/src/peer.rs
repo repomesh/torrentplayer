@@ -174,7 +174,7 @@ pub(crate) async fn run(shared: Arc<Shared>, addr: SocketAddr, key: PeerKey, tim
         }
         Err(error) => Err(error),
     };
-    let (tcp, peer_id, mut lease, extensions) = match connected {
+    let (tcp, peer_id, lease, extensions) = match connected {
         Ok(ok) => ok,
         Err(error) => {
             trace!(%addr, %error, "could not connect");
@@ -189,8 +189,64 @@ pub(crate) async fn run(shared: Arc<Shared>, addr: SocketAddr, key: PeerKey, tim
             return;
         }
     };
+    serve(&shared, tcp, addr, key, peer_id, lease, extensions, false).await;
+}
+
+/// Serves a connection a peer opened to us (see `torrentplayer_net::Network::incoming_peers`), after
+/// its handshake named this torrent (`theirs`). Answers with our handshake unless the torrent
+/// is at its peer limit or paused, or the peer is ourselves; the connection then works like an
+/// outgoing one, and closes when `lease` is revoked.
+pub(crate) async fn accept(
+    shared: Arc<Shared>,
+    mut tcp: TcpStream,
+    addr: SocketAddr,
+    lease: Lease,
+    theirs: [u8; HANDSHAKE_LEN],
+) {
+    let Ok(peer_id) = wire::check_handshake(&theirs, &shared.meta.info_hash) else {
+        return;
+    };
+    if peer_id == shared.peer_id || !shared.reserve_inbound() {
+        return;
+    }
+    let ours = wire::handshake(&shared.meta.info_hash, &shared.peer_id);
+    let sent = tokio::time::timeout(shared.cfg.handshake_timeout, tcp.write_all(&ours)).await;
+    shared.handshake_finished();
+    if !matches!(sent, Ok(Ok(()))) || !lease.is_valid() {
+        return;
+    }
+    let key = shared.next_peer_key();
+    serve(
+        &shared,
+        tcp,
+        addr,
+        key,
+        peer_id,
+        Some(lease),
+        wire::supports_extensions(&theirs),
+        true,
+    )
+    .await;
+}
+
+/// Serves an established connection until it ends or the torrent stops. An `inbound` peer's
+/// address is not one to dial, so its end is not recorded among the candidates.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the facts of one connection, passed once from two call sites"
+)]
+async fn serve(
+    shared: &Arc<Shared>,
+    tcp: TcpStream,
+    addr: SocketAddr,
+    key: PeerKey,
+    peer_id: [u8; 20],
+    mut lease: Option<Lease>,
+    extensions: bool,
+    inbound: bool,
+) {
     let started = Instant::now();
-    debug!(%addr, peer = key, client = %String::from_utf8_lossy(&peer_id[..8]), "peer connected");
+    debug!(%addr, peer = key, inbound, client = %String::from_utf8_lossy(&peer_id[..8]), "peer connected");
 
     let (tx, rx) = mpsc::channel(SEND_QUEUE);
     shared.sched().add_peer(key);
@@ -221,7 +277,9 @@ pub(crate) async fn run(shared: Arc<Shared>, addr: SocketAddr, key: PeerKey, tim
     };
     if !published {
         shared.sched().remove_peer(key);
-        shared.peer_finished(addr, PeerEnd::Closed { worked: false });
+        if !inbound {
+            shared.peer_finished(addr, PeerEnd::Closed { worked: false });
+        }
         return;
     }
 
@@ -242,8 +300,8 @@ pub(crate) async fn run(shared: Arc<Shared>, addr: SocketAddr, key: PeerKey, tim
                 None => std::future::pending().await,
             }
         } => Ok(()),
-        r = read_loop(&shared, key, read, &mut conn) => r,
-        r = write_loop(&shared, write, rx) => r,
+        r = read_loop(shared, key, read, &mut conn) => r,
+        r = write_loop(shared, write, rx) => r,
     };
     if let Err(error) = result {
         debug!(%addr, peer = key, %error, "peer disconnected");
@@ -259,7 +317,9 @@ pub(crate) async fn run(shared: Arc<Shared>, addr: SocketAddr, key: PeerKey, tim
         Some(Verdict::Unresponsive) => PeerEnd::Closed { worked: false },
         None => PeerEnd::closed(started.elapsed(), conn.delivered),
     };
-    shared.peer_finished(addr, end);
+    if !inbound {
+        shared.peer_finished(addr, end);
+    }
     // Its released requests should go to other peers promptly.
     shared.request_replan(false);
 }

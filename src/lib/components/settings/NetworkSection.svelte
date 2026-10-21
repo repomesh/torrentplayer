@@ -24,7 +24,14 @@
     type SettingsView,
     type WireGuardSummary,
   } from '../../ipc';
-  import { MODE_NAMES, describeNetwork, followNetwork, interfaceAdvice } from '../../network';
+  import {
+    INCOMING_HELP,
+    MODE_NAMES,
+    describeIncoming,
+    describeNetwork,
+    followNetwork,
+    interfaceAdvice,
+  } from '../../network';
   import Field from './Field.svelte';
   import SecretField from './SecretField.svelte';
   import Toggle from './Toggle.svelte';
@@ -286,6 +293,8 @@
                 ? ' · UDP relay when supported by the proxy'
                 : ''}
         </dd>
+        <dt>Incoming peers</dt>
+        <dd>{describeIncoming(status.incoming)}</dd>
         {#if status.lastCheckMs !== null}
           <dt>Last checked</dt>
           <dd>{time(status.lastCheckMs)}</dd>
@@ -555,6 +564,65 @@
       <option value="tunnel">Route through the tunnel</option>
     </select>
   </Field>
+  <Field
+    id="network-incoming"
+    label="Accept incoming peer connections"
+    path="network.incomingPeers.enabled"
+    help={`More peers and better uploads. Off: TorrentPlayer only connects out, so no firewall prompt appears. ${INCOMING_HELP[n.mode]}`}
+  >
+    <Toggle
+      id="network-incoming"
+      checked={n.incomingPeers.enabled}
+      describedby="network-incoming-help"
+      onchange={(v) => {
+        update('network.incomingPeers.enabled', v);
+      }}
+    />
+  </Field>
+  {#if n.incomingPeers.enabled}
+    <Field
+      id="network-incoming-port"
+      label="Listening port"
+      path="network.incomingPeers.port"
+      help="TCP port, 1024–65535. 0 picks a random port each time TorrentPlayer starts; choose a fixed one to forward it on your router or VPN."
+      error={errors['network.incomingPeers.port']}
+    >
+      <input
+        id="network-incoming-port"
+        class="number"
+        type="number"
+        min="0"
+        max="65535"
+        step="1"
+        value={n.incomingPeers.port}
+        aria-describedby="network-incoming-port-help"
+        aria-invalid={errors['network.incomingPeers.port'] !== undefined}
+        onchange={(e: Event) => {
+          update('network.incomingPeers.port', (e.currentTarget as HTMLInputElement).valueAsNumber);
+        }}
+      />
+    </Field>
+    {#if n.mode === 'direct'}
+      <Field
+        id="network-incoming-upnp"
+        label="Forward the port with UPnP"
+        path="network.incomingPeers.upnp"
+        help="Asks your router to forward the port while TorrentPlayer listens (UPnP; NAT-PMP is not supported). Direct mode only: never used with a VPN or proxy."
+      >
+        <Toggle
+          id="network-incoming-upnp"
+          checked={n.incomingPeers.upnp}
+          describedby="network-incoming-upnp-help"
+          onchange={(v) => {
+            update('network.incomingPeers.upnp', v);
+          }}
+        />
+      </Field>
+    {/if}
+    {#if status}
+      <p class="note" role="status">{describeIncoming(status.incoming)}</p>
+    {/if}
+  {/if}
   <Field
     id="network-show-ip"
     label="Show public IP in the status bar"

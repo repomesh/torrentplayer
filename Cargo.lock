@@ -6070,6 +6070,7 @@ dependencies = [
  "dns-parser",
  "getrandom 0.4.3",
  "if-addrs",
+ "librqbit-upnp",
  "proptest",
  "reqwest",
  "serde",

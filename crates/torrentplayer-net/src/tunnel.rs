@@ -206,10 +206,43 @@ impl Tunnel {
         ))?
     }
 
-    /// Preserve the connector's OS `TcpStream` API using a private loopback pair. The accepting
-    /// side checks the exact source port we reserved, so another local process cannot take it.
+    /// Connects to `target` inside the tunnel (see [`Tunnel::relay`]).
     pub(crate) async fn connect(&self, target: SocketAddr) -> Result<TcpStream, NetError> {
-        let mut upstream = tokio_wireguard::TcpStream::connect(target, &self.0.interface).await?;
+        let upstream = tokio_wireguard::TcpStream::connect(target, &self.0.interface).await?;
+        self.relay(upstream).await
+    }
+
+    /// Listens for incoming connections on the tunnel's own addresses (IPv4, and IPv6 unless
+    /// `ipv4_only`), inside the tunnel only. Peers reach them only if the VPN server forwards
+    /// the port to this tunnel address.
+    pub(crate) async fn listen(
+        &self,
+        port: u16,
+        ipv4_only: bool,
+    ) -> Result<Vec<tokio_wireguard::TcpListener>, NetError> {
+        let mut listeners = Vec::new();
+        for ip in self.0.interface.address().addresses() {
+            if ipv4_only && ip.is_ipv6() {
+                continue;
+            }
+            listeners.push(
+                tokio_wireguard::TcpListener::bind(SocketAddr::new(ip, port), &self.0.interface)
+                    .await?,
+            );
+        }
+        if listeners.is_empty() {
+            return Err(invalid("the WireGuard tunnel has no address to listen on"));
+        }
+        Ok(listeners)
+    }
+
+    /// Preserves the connector's OS `TcpStream` API for a tunnel connection using a private
+    /// loopback pair, so peer, lease, and HTTP handling stay unchanged. The accepting side
+    /// checks the exact source port we reserved, so another local process cannot take it.
+    pub(crate) async fn relay(
+        &self,
+        mut upstream: tokio_wireguard::TcpStream,
+    ) -> Result<TcpStream, NetError> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let client = TcpSocket::new_v4()?;
         client.bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))?;
@@ -463,6 +496,84 @@ mod tests {
             lease.revoked().await;
             assert_eq!(stream.read(&mut reply).await.unwrap_or(0), 0);
             task.await.unwrap();
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn incoming_connections_arrive_only_inside_the_tunnel() {
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (server, config) = pair();
+            let net = Network::start(
+                NetworkConfig {
+                    mode: crate::NetworkMode::WireGuard(config),
+                    allow_ipv6: false,
+                },
+                NetworkOptions::default(),
+            )
+            .await
+            .unwrap();
+            let mut peers = net.incoming_peers();
+            let port = {
+                let probe = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+                probe.local_addr().unwrap().port()
+            };
+            net.set_incoming(crate::IncomingConfig {
+                enabled: true,
+                port,
+                upnp: true,
+            });
+            assert_eq!(
+                net.settled(Duration::from_secs(3)).await.state,
+                ConnectionState::Connected
+            );
+            let mut changes = net.status_changes();
+            let status = loop {
+                let status = net.status().incoming;
+                if matches!(status, crate::IncomingStatus::Listening { .. }) {
+                    break status;
+                }
+                changes.changed().await.unwrap();
+            };
+            assert_eq!(
+                status,
+                crate::IncomingStatus::Listening {
+                    port,
+                    addresses: vec![format!("10.44.0.2:{port}")],
+                    // UPnP is for direct mode only.
+                    upnp: false,
+                }
+            );
+            // Nothing listens on the machine's own interfaces.
+            assert!(
+                TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+                    .await
+                    .is_err()
+            );
+            // The VPN server side connects to the tunnel address.
+            let target = SocketAddr::from(([10, 44, 0, 2], port));
+            let mut remote = tokio_wireguard::TcpStream::connect(target, &server)
+                .await
+                .unwrap();
+            remote.write_all(b"ping").await.unwrap();
+            let mut peer = peers.next().await.unwrap();
+            assert_eq!(
+                peer.addr,
+                SocketAddr::from(([10, 44, 0, 1], peer.addr.port()))
+            );
+            let mut request = [0; 4];
+            peer.stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(&request, b"ping");
+            peer.stream.write_all(b"pong").await.unwrap();
+            let mut reply = [0; 4];
+            remote.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"pong");
+            // Leaving the mode ends the connection's lease.
+            net.apply(NetworkConfig::default()).unwrap();
+            peer.lease.revoked().await;
             net.shutdown();
             server.close();
         })

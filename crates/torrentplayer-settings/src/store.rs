@@ -409,6 +409,34 @@ mod tests {
     }
 
     #[test]
+    fn version_3_files_load_without_incoming_peers() {
+        let (_dir, store) = store();
+        fs::create_dir_all(store.dir()).unwrap();
+        fs::write(
+            store.path(),
+            r#"{"version":3,"network":{"mode":"bindInterface","interface":"wg0"}}"#,
+        )
+        .unwrap();
+        let loaded = store.load();
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(loaded.settings.network.interface.as_deref(), Some("wg0"));
+        assert!(
+            !loaded.settings.network.incoming_peers.enabled,
+            "listening stays off until chosen"
+        );
+        // A hand-edited, out-of-range port falls back to a random one, keeping the rest.
+        fs::write(
+            store.path(),
+            r#"{"version":3,"network":{"incomingPeers":{"enabled":true,"port":80}}}"#,
+        )
+        .unwrap();
+        let loaded = store.load();
+        assert!(loaded.settings.network.incoming_peers.enabled);
+        assert_eq!(loaded.settings.network.incoming_peers.port, 0);
+        assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+    }
+
+    #[test]
     fn oversized_file_is_not_read() {
         let (_dir, store) = store();
         fs::create_dir_all(store.dir()).unwrap();

@@ -17,6 +17,9 @@
 //! trackers use sockets scoped to the selected interface, WireGuard tunnel, or SOCKS5 UDP relay.
 //! Unbound native UDP (including uTP) stays disabled in protected modes.
 //!
+//! Incoming peer connections are off by default. When turned on, the listener opens only on the
+//! path the mode allows and never in SOCKS5 mode (see [`Network::set_incoming`]).
+//!
 //! HTTP clients and librqbit reach the network through a loopback SOCKS5 bridge that applies the
 //! same rules ([`Network::configure_http`], [`Network::bridge_proxy_url`]). See
 //! `docs/network.md` for the design and its limits.
@@ -28,6 +31,7 @@ pub mod bind;
 mod bridge;
 mod datagram;
 mod error;
+mod incoming;
 mod mode;
 mod network;
 mod secret;
@@ -44,6 +48,9 @@ pub use addr::is_public_ip;
 pub use bind::{InterfaceInfo, list_interfaces};
 pub use datagram::DatagramSocket;
 pub use error::NetError;
+pub use incoming::{
+    ExternalListener, IncomingConfig, IncomingPeer, IncomingPeers, IncomingStatus, RANDOM_PORTS,
+};
 pub use mode::{ModeKind, NetworkMode, Socks5Config};
 pub use network::{
     ConnectionState, EventLevel, IP_CHECK_V4_URL, IP_CHECK_V6_URL, Lease, NetEvent, Network,

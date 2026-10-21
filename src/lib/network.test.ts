@@ -18,6 +18,8 @@ const {
   pausedMessage,
   trafficPaused,
   interfaceAdvice,
+  describeIncoming,
+  INCOMING_HELP,
 } = await import('./network');
 
 function status(overrides: Partial<NetworkStatus> = {}): NetworkStatus {
@@ -33,6 +35,7 @@ function status(overrides: Partial<NetworkStatus> = {}): NetworkStatus {
     lastCheckMs: null,
     connectedSinceMs: null,
     events: [],
+    incoming: { kind: 'off' },
     ...overrides,
   };
 }
@@ -46,6 +49,45 @@ const socks = {
 beforeEach(() => {
   invoke.mockReset();
   listen.mockReset();
+});
+
+describe('describeIncoming', () => {
+  it('describes each listener state', () => {
+    expect(describeIncoming({ kind: 'off' })).toBe('Off');
+    expect(
+      describeIncoming({
+        kind: 'listening',
+        port: 51413,
+        addresses: ['0.0.0.0:51413', '[::]:51413'],
+        upnp: true,
+      }),
+    ).toBe('Listening on port 51413 (all interfaces) · UPnP requested');
+    expect(
+      describeIncoming({
+        kind: 'listening',
+        port: 51413,
+        addresses: ['10.64.0.2:51413'],
+        upnp: false,
+      }),
+    ).toBe('Listening on port 51413 (10.64.0.2:51413)');
+    expect(describeIncoming({ kind: 'paused', reason: 'proxy down' })).toBe(
+      'Closed while traffic is paused',
+    );
+    expect(describeIncoming({ kind: 'unsupported', reason: 'no SOCKS5 listening' })).toBe(
+      'Not available: no SOCKS5 listening',
+    );
+    expect(describeIncoming({ kind: 'failed', reason: 'port in use' })).toBe(
+      'Could not open the port: port in use',
+    );
+    expect(describeIncoming({ kind: 'idle', reason: 'waiting' })).toBe('Not listening: waiting');
+  });
+
+  it('explains every mode, and that SOCKS5 never listens', () => {
+    expect(INCOMING_HELP.socks5).toMatch(/does not listen/);
+    expect(INCOMING_HELP.direct).toMatch(/firewall/);
+    expect(INCOMING_HELP.bindInterface).toMatch(/only on the VPN adapter/);
+    expect(INCOMING_HELP.wireGuard).toMatch(/only inside the WireGuard tunnel/);
+  });
 });
 
 describe('describeNetwork', () => {

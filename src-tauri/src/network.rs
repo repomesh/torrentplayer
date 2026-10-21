@@ -18,8 +18,8 @@ use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::watch;
 use torrentplayer_net::wireguard::{WgInterface, WgPeer};
 use torrentplayer_net::{
-    InterfaceInfo, NetError, Network, NetworkConfig, NetworkMode, NetworkOptions, NetworkStatus,
-    PublicIp, Secret, Socks5Config, WireGuardConfig, WireGuardSummary,
+    IncomingConfig, InterfaceInfo, NetError, Network, NetworkConfig, NetworkMode, NetworkOptions,
+    NetworkStatus, PublicIp, Secret, Socks5Config, WireGuardConfig, WireGuardSummary,
 };
 use torrentplayer_settings::{
     ExposeSecret as _, Ipv6Policy, NetworkSettings, SecretError, SecretKey, SecretStatus,
@@ -152,8 +152,10 @@ pub(crate) fn public_ip(state: State<'_, NetworkState>) -> Option<PublicIp> {
 /// store, so call it once during setup, before anything connects.
 pub(crate) fn start(settings: &Settings, secrets: &dyn SecretStore) -> anyhow::Result<Network> {
     let config = config_from_settings(&settings.network, secrets);
-    tauri::async_runtime::block_on(Network::start(config, NetworkOptions::default()))
-        .context("could not start the network manager")
+    let network = tauri::async_runtime::block_on(Network::start(config, NetworkOptions::default()))
+        .context("could not start the network manager")?;
+    network.set_incoming(incoming_from_settings(&settings.network));
+    Ok(network)
 }
 
 /// Applies network settings changes and sends status changes to the webview, for as long as
@@ -170,20 +172,21 @@ pub(crate) fn follow(
         // configuration; applying an unchanged one does nothing.
         while settings.changed().await.is_ok() {
             let network_settings = settings.borrow_and_update().network.clone();
+            let incoming = incoming_from_settings(&network_settings);
             let store = Arc::clone(&secrets);
             let built = tauri::async_runtime::spawn_blocking(move || {
                 config_from_settings(&network_settings, store.as_ref())
             })
             .await;
             match built {
-                Ok(config) => apply(&handle, &net, config).await,
+                Ok(config) => apply(&handle, &net, config, incoming).await,
                 Err(error) => tracing::error!(%error, "could not read the network settings"),
             }
         }
     });
     let (handle, net) = (app.clone(), network.clone());
     tauri::async_runtime::spawn(async move {
-        let mut changes = net.subscribe();
+        let mut changes = net.status_changes();
         loop {
             if let Err(error) = handle.emit(NETWORK_STATUS, net.status()) {
                 tracing::warn!(%error, "could not send the network-status event");
@@ -195,18 +198,40 @@ pub(crate) fn follow(
     });
 }
 
-/// Switches modes through the stream engine when it is running, so librqbit is replaced before
-/// it could send anything under the wrong mode (see `StreamEngine::apply_network`).
-async fn apply(app: &AppHandle, network: &Network, config: NetworkConfig) {
+/// Switches modes, and then the incoming-connection listener, through the stream engine when
+/// it is running, so librqbit is replaced before it could send anything under the wrong mode or
+/// listen where it should not (see `StreamEngine::apply_network` and
+/// `StreamEngine::set_incoming`).
+async fn apply(
+    app: &AppHandle,
+    network: &Network,
+    config: NetworkConfig,
+    incoming: IncomingConfig,
+) {
     let core = app
         .try_state::<AppState>()
         .and_then(|state| state.started().cloned());
-    let result = match core {
+    let result = match &core {
         Some(core) => core.engine.apply_network(config).await,
         None => network.apply(config),
     };
     if let Err(error) = result {
         tracing::warn!(%error, "could not apply the network settings");
+    }
+    match &core {
+        Some(core) => core.engine.set_incoming(incoming).await,
+        None => network.set_incoming(incoming),
+    }
+}
+
+/// Whether and where to accept incoming peer connections. The network manager decides which
+/// modes can listen (never SOCKS5) and where (see `docs/network.md`).
+pub(crate) fn incoming_from_settings(settings: &NetworkSettings) -> IncomingConfig {
+    let s = &settings.incoming_peers;
+    IncomingConfig {
+        enabled: s.enabled,
+        port: s.port,
+        upnp: s.upnp,
     }
 }
 
@@ -493,6 +518,27 @@ mod tests {
         s.socks5.port = 9050;
         s.socks5.username = username.map(Into::into);
         s
+    }
+
+    #[test]
+    fn incoming_peers_map_to_the_listener_settings() {
+        assert_eq!(
+            incoming_from_settings(&NetworkSettings::default()),
+            IncomingConfig::default(),
+            "off unless chosen"
+        );
+        let mut s = NetworkSettings::default();
+        s.incoming_peers.enabled = true;
+        s.incoming_peers.port = 51413;
+        s.incoming_peers.upnp = true;
+        assert_eq!(
+            incoming_from_settings(&s),
+            IncomingConfig {
+                enabled: true,
+                port: 51413,
+                upnp: true,
+            }
+        );
     }
 
     #[test]
