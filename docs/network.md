@@ -25,12 +25,12 @@ environment.
 
 ## Modes
 
-| Mode                        | What happens                                                                                                                                                                                 | Verified by (every 5 s)                                                                                     |
-| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| **Direct** (default)        | No VPN or proxy. No kill switch.                                                                                                                                                             | Nothing.                                                                                                    |
-| **VPN (bind to interface)** | Every TCP connection is pinned to one interface, usually the adapter of the user's own VPN app (WireGuard, OpenVPN, a provider app). See [platform support](#interface-binding-by-platform). | The interface exists, is up, and has a usable (non-loopback, non-link-local) address.                       |
-| **SOCKS5 proxy**            | Every TCP connection goes through the proxy (RFC 1928), with optional username and password (RFC 1929). Host names are resolved by the proxy unless "Resolve DNS through the proxy" is off.  | A TCP connection to the proxy plus the method negotiation and login. No connection is requested through it. |
-| **WireGuard**               | TCP and DNS run inside an application-local WireGuard tunnel using the imported configuration. No OS routes or adapters are changed.                                                         | A successful authenticated handshake less than 180 seconds old.                                             |
+| Mode                        | What happens                                                                                                                                                                                   | Verified by (every 5 s)                                                                                     |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| **Direct** (default)        | No VPN or proxy. No kill switch.                                                                                                                                                               | Nothing.                                                                                                    |
+| **VPN (bind to interface)** | Every TCP connection is pinned to one interface, usually the adapter of the user's own VPN provider app (OpenVPN-based ones included). See [platform support](#interface-binding-by-platform). | The interface exists, is up, and has a usable (non-loopback, non-link-local) address.                       |
+| **SOCKS5 proxy**            | Every TCP connection goes through the proxy (RFC 1928), with optional username and password (RFC 1929). Host names are resolved by the proxy unless "Resolve DNS through the proxy" is off.    | A TCP connection to the proxy plus the method negotiation and login. No connection is requested through it. |
+| **WireGuard**               | TCP and DNS run inside an application-local WireGuard tunnel using the imported configuration. No OS routes or adapters are changed.                                                           | A successful authenticated handshake less than 180 seconds old.                                             |
 
 A protected mode with incomplete settings (a proxy without a host, a username whose password is
 missing from the credential store, no interface chosen) is also `Error`: blocked, with the reason
@@ -274,9 +274,9 @@ trackers time out.
 
 ### Using a VPN app
 
-Choose **VPN**, connect your VPN app, then select its tunnel adapter and press **Refresh** if
-necessary. This works with existing OpenVPN, WireGuard, and provider-app connections; it does
-not import `.ovpn` files or start those apps. VPN adapters appear first in the picker.
+Connect with your VPN provider's app first (OpenVPN-based apps included), then choose **VPN**,
+select its tunnel adapter, and press **Refresh** if necessary. TorrentPlayer does not run OpenVPN
+itself: it does not import `.ovpn` files or start VPN apps. VPN adapters appear first in the picker.
 The `bindInterface` setting remains compatible with existing saved profiles.
 
 Hyper-V's **Default Switch** and **WSL** adapters are local virtual networks, not VPN tunnels;

@@ -185,6 +185,7 @@ The network layer (`torrentplayer-net`) applies these as soon as they are saved;
 | `network.incomingPeers.enabled` | `false`   | on: accept incoming peer connections                  | now (never in SOCKS5 mode) |
 | `network.incomingPeers.port`    | `0`       | 0 (random 10000–49151, kept per run), 1024–65535      | now                        |
 | `network.incomingPeers.upnp`    | `false`   | on: ask the router to forward the port (UPnP)         | now (direct mode only)     |
+| `network.vpnHintDismissed`      | `false`   | on: the VPN recommendation is no longer shown         | now                        |
 
 **Kill switch:** always on when a VPN or proxy mode is selected, so there is no setting for it.
 If the interface or proxy stops working, torrent traffic pauses and searches are refused; traffic
@@ -195,8 +196,9 @@ had a `network.killSwitch` toggle that had no effect; it is dropped on upgrade.
 `proxyDht` enables discovery through UDP ASSOCIATE; proxies without UDP support cannot
 provide DHT, and TorrentPlayer never sends it around them.
 
-**VPN:** use an existing VPN app connection (including OpenVPN or a provider's app), then choose
-its tunnel adapter. This is saved as `bindInterface` for compatibility. Hyper-V local switches
+**VPN:** connect with your VPN provider's app first (OpenVPN-based apps included), then choose
+its tunnel adapter. TorrentPlayer does not run OpenVPN itself or import `.ovpn` files (see
+[ADR 0008](adr/0008-application-wireguard-tunnel.md)). This is saved as `bindInterface` for compatibility. Hyper-V local switches
 cannot establish a VPN. Tailscale requires an exit node for internet destinations.
 
 **WireGuard:** choose **WireGuard** and import a provider's `.conf` file to connect inside TorrentPlayer.
@@ -213,6 +215,12 @@ inside the tunnel in WireGuard mode; behind a VPN, peers reach the port only if 
 forwards it. A SOCKS5 proxy cannot accept incoming connections, so TorrentPlayer does not
 listen at all in that mode. Settings shows whether it is listening. See
 [Incoming peer connections](network.md#incoming-peer-connections).
+
+**VPN recommendation:** in Direct mode, Settings → Network, a **VPN recommended** button beside
+the status bar's network indicator, and a note the first time a torrent starts seeding in a run
+say that every peer and tracker sees your IP address, so a VPN is recommended when downloading
+or seeding, and link to the [blog post on VPNs](https://torrentplayer.io/blog/vpn-for-torrenting/).
+**Don't show again** in any of them sets `network.vpnHintDismissed` and hides all three.
 
 The SOCKS5 password and the WireGuard private and preshared keys are [secrets](#secrets).
 

@@ -20,9 +20,11 @@
   import Player from './lib/components/Player.svelte';
   import PlaylistPanel from './lib/components/PlaylistPanel.svelte';
   import UpNext from './lib/components/UpNext.svelte';
+  import VpnHint from './lib/components/VpnHint.svelte';
   import SettingsPage from './lib/components/settings/SettingsPage.svelte';
   import type { FileSummary } from './lib/bindings/FileSummary';
   import { fileName, isPlayable, playTarget, readTorrentFile } from './lib/files';
+  import { dismissVpnHint, followSeedingStarted, followVpnHint, showVpnHint } from './lib/vpnHint';
   import { explorerTorrents, torrentKeys, type ExplorerTorrent } from './lib/explorer';
   import {
     addTorrentFile,
@@ -161,6 +163,13 @@
   let toast = $state<{ message: string; error: boolean; undo: (() => void) | null } | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let announcement = $state('');
+  // The VPN note, once per run, when the first torrent starts seeding in Direct mode.
+  // It disappears as soon as it no longer applies (dismissed anywhere, or another mode chosen).
+  let vpnHintApplies = $state(false);
+  let seedingHintOpen = $state(false);
+  let seedingHintShown = false;
+  let seedingHintError = $state<string | null>(null);
+  const seedingHint = $derived(seedingHintOpen && vpnHintApplies);
 
   let upNext = $state<{ item: QueueItem; secondsLeft: number } | null>(null);
   const countdown = new Countdown(
@@ -1323,6 +1332,16 @@
     const stopLibrary = followLibrary((items) => {
       library = items;
     });
+    const stopVpnHint = followVpnHint((network) => {
+      vpnHintApplies = showVpnHint(network.mode, network.vpnHintDismissed);
+    });
+    const stopSeeding = followSeedingStarted(() => {
+      // Used up only once it is actually shown.
+      if (!seedingHintShown && vpnHintApplies) {
+        seedingHintShown = true;
+        seedingHintOpen = true;
+      }
+    });
     loadQueue()
       .then((saved) => {
         const loaded = sanitizeQueue(saved);
@@ -1356,6 +1375,8 @@
       clearTimeout(toastTimer);
       clearTimeout(nextPreloadTimer);
       stopLibrary();
+      stopVpnHint();
+      stopSeeding();
       void saver.flush();
     };
   });
@@ -1614,6 +1635,28 @@
       />
     {/if}
 
+    {#if seedingHint}
+      <div class="seeding-hint" role="status">
+        <strong>Seeding started</strong>
+        <VpnHint
+          onDismiss={() => {
+            seedingHintError = null;
+            dismissVpnHint()
+              .then(() => {
+                seedingHintOpen = false;
+              })
+              .catch((reason: unknown) => {
+                seedingHintError = `The setting could not be saved: ${errorMessage(reason)}`;
+              });
+          }}
+          onClose={() => {
+            seedingHintOpen = false;
+          }}
+          error={seedingHintError}
+        />
+      </div>
+    {/if}
+
     {#if toast}
       <div class="toast" class:error={toast.error} role={toast.error ? 'alert' : 'status'}>
         <span>{toast.message}</span>
@@ -1702,6 +1745,26 @@
     color: var(--text);
     font-size: 0.875rem;
     transform: translateX(-50%);
+  }
+
+  .seeding-hint {
+    position: absolute;
+    z-index: 10;
+    right: 1rem;
+    bottom: 2.75rem;
+    width: min(24rem, calc(100% - 2rem));
+    padding: 0.75rem 0.75rem 0.25rem;
+    border: 1px solid rgb(255 255 255 / 8%);
+    border-radius: 0.6rem;
+    background: rgb(22 22 28 / 96%);
+    box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 40%);
+    font-size: 0.875rem;
+  }
+
+  .seeding-hint strong {
+    display: block;
+    margin: 0 0.25rem 0.4rem;
+    font-weight: 500;
   }
 
   .toast span {

@@ -6,11 +6,14 @@
    * kill switch pauses traffic or the settings cannot work. Beside it, the public address the
    * internet sees (unless turned off in Settings → Network), hidden until the eye button reveals
    * it (remembered); the tooltip has the mode, endpoint, public IPv4 and IPv6, uptime, and latest
-   * events; clicking opens Settings → Network.
+   * events; clicking opens Settings → Network. In Direct mode, a "VPN recommended" button opens
+   * the VPN note (see `src/lib/vpnHint.ts`) until it is dismissed.
    */
   import { onMount } from 'svelte';
-  import type { NetworkStatus, PublicIp } from '../ipc';
+  import { errorMessage, type NetworkStatus, type PublicIp } from '../ipc';
   import { describeNetwork, describePublicIp, followNetwork, followPublicIp } from '../network';
+  import { dismissVpnHint, followVpnHint, showVpnHint } from '../vpnHint';
+  import VpnHint from './VpnHint.svelte';
 
   interface Props {
     /** Opens Settings → Network. Without it the indicator is not clickable. */
@@ -44,6 +47,38 @@
       // Not remembered; the choice still applies now.
     }
   }
+  // The VPN note's popover. Hidden until the settings are known.
+  const hintId = $props.id();
+  let hintDismissed = $state(true);
+  let hintOpen = $state(false);
+  let hintError = $state<string | null>(null);
+  let hintBox: HTMLElement | undefined = $state();
+  const hint = $derived(status !== null && showVpnHint(status.mode, hintDismissed));
+
+  // Closed whenever the note stops applying, so it never reopens by itself.
+  $effect(() => {
+    if (!hint) {
+      closeHint();
+    }
+  });
+
+  function closeHint(): void {
+    hintOpen = false;
+    hintError = null;
+  }
+
+  function dismissHint(): void {
+    hintError = null;
+    dismissVpnHint()
+      .then(() => {
+        hintDismissed = true;
+        closeHint();
+      })
+      .catch((reason: unknown) => {
+        hintError = `The setting could not be saved: ${errorMessage(reason)}`;
+      });
+  }
+
   // Refreshed when the tooltip is about to show, so the uptime is current.
   let now = $state(Date.now());
 
@@ -70,9 +105,13 @@
     const stopIp = followPublicIp((next) => {
       ip = next;
     });
+    const stopHint = followVpnHint((network) => {
+      hintDismissed = network.vpnHintDismissed;
+    });
     return () => {
       stopStatus();
       stopIp();
+      stopHint();
     };
   });
 </script>
@@ -104,6 +143,49 @@
   {/if}
 {/snippet}
 
+<svelte:window
+  onpointerdown={(e: PointerEvent) => {
+    if (hintOpen && hintBox && !hintBox.contains(e.target as Node)) {
+      closeHint();
+    }
+  }}
+/>
+
+{#snippet vpn()}
+  {#if hint}
+    <span class="vpn" bind:this={hintBox}>
+      <button
+        type="button"
+        class="vpn-button"
+        aria-expanded={hintOpen}
+        aria-controls={hintId}
+        onclick={() => {
+          if (hintOpen) {
+            closeHint();
+          } else {
+            hintOpen = true;
+          }
+        }}>VPN recommended</button
+      >
+      {#if hintOpen}
+        <div
+          id={hintId}
+          class="popover"
+          role="presentation"
+          onkeydown={(e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+              e.stopPropagation();
+              closeHint();
+            }
+          }}
+        >
+          <VpnHint onDismiss={dismissHint} onClose={closeHint} error={hintError} />
+        </div>
+      {/if}
+    </span>
+  {/if}
+{/snippet}
+
 {#if summary}
   {#if onOpen}
     <button
@@ -121,6 +203,8 @@
     </button>
     <!-- eslint-disable-next-line @typescript-eslint/no-confusing-void-expression -- a local snippet is typed as returning void -->
     {@render eye()}
+    <!-- eslint-disable-next-line @typescript-eslint/no-confusing-void-expression -- a local snippet is typed as returning void -->
+    {@render vpn()}
   {:else}
     <span class="network {summary.tone}" title={tooltip} role="status" onpointerenter={refresh}>
       <span class="dot" aria-hidden="true"></span>
@@ -129,6 +213,8 @@
     </span>
     <!-- eslint-disable-next-line @typescript-eslint/no-confusing-void-expression -- a local snippet is typed as returning void -->
     {@render eye()}
+    <!-- eslint-disable-next-line @typescript-eslint/no-confusing-void-expression -- a local snippet is typed as returning void -->
+    {@render vpn()}
   {/if}
 {/if}
 
@@ -207,6 +293,45 @@
     stroke-width: 1.7;
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+
+  .vpn {
+    position: relative;
+    flex: none;
+  }
+
+  .vpn-button {
+    padding: 0.05rem 0.45rem;
+    border: 1px solid rgb(242 180 90 / 35%);
+    border-radius: 0.8rem;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+
+  .vpn-button:hover,
+  .vpn-button[aria-expanded='true'] {
+    background: rgb(242 180 90 / 10%);
+  }
+
+  .vpn-button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .popover {
+    position: absolute;
+    z-index: 20;
+    right: 0;
+    bottom: calc(100% + 0.5rem);
+    width: min(22rem, 80vw);
+    border: 1px solid rgb(255 255 255 / 8%);
+    border-radius: 0.6rem;
+    background: rgb(22 22 28 / 98%);
+    box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 40%);
+    white-space: normal;
   }
 
   .dot {
