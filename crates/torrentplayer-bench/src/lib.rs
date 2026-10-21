@@ -75,9 +75,9 @@ pub struct BenchConfig {
     /// Use the torrent's trackers when on a public swarm; off finds peers through the DHT only,
     /// as for a trackerless magnet link.
     pub trackers: bool,
-    /// Keep each engine's DHT routing tables in this folder between sessions, as the app does
-    /// in its data folder (`swarm.json` and `librqbit.json`). `None` starts every session from
-    /// the bootstrap nodes.
+    /// Keep the swarm engine's DHT routing tables in this folder between sessions, as the app
+    /// does in its data folder (`swarm.json`). librqbit keeps none, as in the app. `None` starts
+    /// every session from the bootstrap nodes.
     pub dht_state_dir: Option<PathBuf>,
     /// Accept incoming peer connections: the swarm engine through the network manager's
     /// listener (direct mode, a random port), librqbit on its own listener, as in the app.
@@ -295,7 +295,8 @@ async fn run_in(
     let dht_state_loaded = config
         .dht_state_dir
         .as_ref()
-        .map(|d| d.join(kind.dht_state_file()).is_file());
+        .zip(kind.dht_state_file())
+        .map(|(d, f)| d.join(f).is_file());
     let mut engine = BenchEngine::start(kind, dir, config).await?;
 
     let started = Instant::now();

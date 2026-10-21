@@ -149,17 +149,16 @@ limit). The reported rate is already smoothed by the engine, so its settling tim
 sample.
 The fixture uses 16 KiB pieces so that one piece is under 2% of a one-second window at 1 MiB/s.
 
-**Saved DHT state.** `--dht-state DIR` keeps each engine's DHT routing tables in `DIR`
-(`swarm.json`, `librqbit.json`), set through the same engine options the app uses for its data
-folder. A session without a saved file starts cold and saves one: the swarm engine when it
-stops, librqbit only every 60 seconds (its node does not save on shutdown), so prime librqbit's
-file with a session that lasts longer, such as `--warm 65`. `--no-trackers` leaves the DHT as
-the only peer source. Prime the folder with one run, then compare against runs without the
+**Saved DHT state.** `--dht-state DIR` keeps the swarm engine's DHT routing tables in `DIR`
+(`swarm.json`), set through the same engine option the app uses for its data folder. librqbit
+keeps none, as in the app since 24ebcca (see the measurements below), so for it the option
+changes nothing. A session without a saved file starts cold and saves one when it stops.
+`--no-trackers` leaves the DHT as the only peer source. Prime the folder with one run, then compare against runs without the
 option, one start-up and one seek each:
 
 ```sh
 torrentplayer-bench torrent "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel" \
-  --engine rqbit --runs 1 --seeks 0.5 --download-mibps 10 [--dht-state DIR]
+  --engine rqbit --runs 1 --seeks 0.5 --download-mibps 10
 torrentplayer-bench torrent sintel.torrent --engine swarm --no-trackers --no-web-seeds \
   --runs 1 --seeks 0.5 --download-mibps 10 [--dht-state DIR]
 ```
@@ -267,14 +266,32 @@ every 8 s.
 | 40, churn      | before the fix | 1.719 / 2.054                       | 0.709 / 0.845               | 1.813 / 0.562              | 599 KiB       |
 | 40, churn      | 0.3.0          | 1.721 / 1.714                       | 0.623 / 0.664               | 0.937 / 0.000              | −466 KiB      |
 
-The fix makes the reported rate match the delivered one before the change (it overstated it by
-19% with 40 churning peers) and removes the excess: with eight peers the change is now clean.
-With 40 peers lowering the limit still releases about 1.5 MB within 200 ms, as waiting readers
-return at once; the kept debt is then repaid by delivering nothing for more than a second
-(1.4 s in the run inspected), so a playing video can stall there. After the change, 40 peers
-deliver only 0.62–0.76 MiB/s of verified data under the 1 MiB/s limit while the engine reports
-0.66–1.0. At most one run in three per row settled within 5% of the new limit for every later
-two-second window, and only near the end, because the steady rates sit 6–38% below it.
+3e571b3 made the reported rate match the delivered one before the change (it overstated it by
+19% with 40 churning peers) and removed the excess with eight peers. With 40 peers lowering the
+limit still released about 1.5 MB within 200 ms, as waiting readers returned at once, and the
+kept debt was then repaid by delivering nothing for more than a second (1.4 s in the run
+inspected), long enough to stall playback. Verified data also fell to 0.62–0.76 MiB/s under the
+1 MiB/s limit: the queue sizing let 40 peers hold more requests than the limit delivers before
+the 8 s request timeout, and blocks fetched again after a timeout arrived twice.
+
+4161ece fixes both: waiters rescale their wait to a changed limit instead of returning, a
+reader takes at most one block per read under a limit, and request queues fit each peer's share
+of the limit. The same runs against the release candidate before it (b6b58cf) and with it:
+
+| Seeders, churn | Build   | Before change: delivered / reported | After: delivered / reported | Highest / lowest 1 s after | Excess in 2 s | Settled within 5% |
+| -------------- | ------- | ----------------------------------- | --------------------------- | -------------------------- | ------------- | ----------------- |
+| 8, churn       | b6b58cf | 1.945 / 1.945                       | 0.934 / 0.937               | 1.002 / 0.871              | −75 KiB       | 0 of 3 runs       |
+| 8, churn       | 4161ece | 1.968 / 1.971                       | 0.974 / 0.973               | 0.999 / 0.949              | −43 KiB       | 3 of 3, at 7 ms   |
+| 40, none       | b6b58cf | 2.011 / 1.997                       | 0.747 / 1.000               | 1.609 / 0.000              | −163 KiB      | 0 of 3            |
+| 40, none       | 4161ece | 1.999 / 1.998                       | 0.998 / 0.999               | 1.018 / 0.972              | 19 KiB        | 3 of 3, at 1 ms   |
+| 40, churn      | b6b58cf | 1.695 / 1.701                       | 0.664 / 0.693               | 0.844 / 0.234              | −485 KiB      | 0 of 3            |
+| 40, churn      | 4161ece | 1.869 / 1.869                       | 0.814 / 0.858               | 0.973 / 0.328              | −218 KiB      | 0 of 3            |
+
+With 40 churning seeders the rate stays below the limit because peers drop out: the engine
+backs off reconnecting to a peer that keeps disconnecting (2 s, doubling), so by the end of a
+30 s run every seeder is in backoff and the rate falls to zero in the last second, before and
+after the fix alike. That lowest second is the 0.234 and 0.328 above; around the change itself
+the fixed build delivers about 0.88 MiB/s with no wasted data.
 
 **Saved DHT state**, Sintel on the public DHT (`--download-mibps 10`, one start-up and one seek
 to 50% per run, six cold and six warm runs interleaved, each warm run loading a state saved by
@@ -288,7 +305,15 @@ an earlier session):
 | swarm, `.torrent`, DHT only, no web seeds | warm  | –           | 3423 / 5358  | 6059 / 7913  | 1130 / 8385 |
 
 librqbit fetched magnet metadata more slowly from its saved state in every one of the six warm
-runs (2.5–3.2 s) than in any cold run (0.9–2.0 s). The swarm engine found its first peer about
-1.5 s sooner from a saved state, and no warm run had the 42 s cold outlier, but six runs on a
-public DHT do not establish that. librqbit writes `librqbit.json` only every 60 seconds and not
-on shutdown, so an app session shorter than a minute keeps no librqbit DHT state.
+runs (2.5–3.2 s) than in any cold run (0.9–2.0 s); a second set of six pairs on b6b58cf gave
+3691 / 4421 warm against 1035 / 11181 cold. librqbit-dht starts a lookup from the 8 closest
+contacts it knows and, once it has 8, adds no other roots for 60 s. Restored contacts have not
+answered in the new session, so the lookup depended on them alone, while an empty table retries
+its roots every second until bootstrap fills it with nodes that just answered. Retrying roots
+in the vendored crate narrowed the gap (warm 2513, cold 2148) but slowed cold lookups and the
+swarm engine's warm ones, so since 24ebcca librqbit keeps no DHT state and always takes the
+cold path; `--dht-state` now applies to the swarm engine only, as in the app. Six further pairs
+of the same cold path measured 3123 / 15805 and 1348 / 16445 for metadata: the public DHT was
+much noisier than earlier in the day, and the difference between identical configurations
+shows the spread. The swarm engine kept its saved state and still found its first peer sooner
+with it: 2344 / 3921 against 12095 / 12991 cold (three runs each).

@@ -43,12 +43,12 @@ impl std::str::FromStr for EngineKind {
 
 impl EngineKind {
     /// The engine's DHT state file in [`BenchConfig::dht_state_dir`], named as in the app's
-    /// data folder.
+    /// data folder; `None` for librqbit, which the app gives no saved state.
     #[must_use]
-    pub fn dht_state_file(self) -> &'static str {
+    pub fn dht_state_file(self) -> Option<&'static str> {
         match self {
-            Self::Rqbit => "librqbit.json",
-            Self::Swarm => "swarm.json",
+            Self::Rqbit => None,
+            Self::Swarm => Some("swarm.json"),
         }
     }
 }
@@ -114,10 +114,6 @@ impl BenchEngine {
             EngineKind::Rqbit => {
                 let mut c = EngineConfig::new(dir);
                 c.enable_dht = config.public_swarm && config.dht;
-                c.dht_state_file = config
-                    .dht_state_dir
-                    .as_ref()
-                    .map(|d| d.join(kind.dht_state_file()));
                 c.enable_trackers =
                     (config.public_swarm && config.trackers) || config.local_tracker;
                 c.download_limit_bps = config.download_limit_bps;
@@ -141,7 +137,8 @@ impl BenchEngine {
                 c.dht_state_file = config
                     .dht_state_dir
                     .as_ref()
-                    .map(|d| d.join(kind.dht_state_file()));
+                    .zip(kind.dht_state_file())
+                    .map(|(d, f)| d.join(f));
                 // As in the app: the network manager listens (direct mode: every interface, a
                 // random port) and hands accepted connections to the engine, which announces
                 // the port to trackers.

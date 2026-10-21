@@ -23,9 +23,9 @@
 //!   --anchors N          anchor budget for prioritization; 0 = librqbit's built-in only
 //!   --no-dht             public swarms: use trackers only
 //!   --no-trackers        public swarms: use the DHT only (as for a trackerless magnet link)
-//!   --dht-state DIR      keep each engine's DHT routing tables in DIR between sessions, as the
-//!                        app does in its data folder (`swarm.json`, `librqbit.json`); the
-//!                        first session without a saved state starts cold
+//!   --dht-state DIR      keep the swarm engine's DHT routing tables in DIR between sessions,
+//!                        as the app does in its data folder (`swarm.json`); the first session
+//!                        without a saved state starts cold. librqbit keeps none, as in the app
 //!   --no-web-seeds       swarm engine: ignore the torrent's web seeds
 //!   --download-mibps N   cap the download rate (MiB/s)
 //!   --peer-limit N       maximum connected peers
@@ -762,7 +762,7 @@ fn print_limit_report(report: &LimitReport, plan: LimitPlan) -> std::io::Result<
     for (i, run) in report.runs.iter().enumerate() {
         writeln!(
             out,
-            "run {}: before {:.3}/{:.3}, after {:.3}/{:.3} MiB/s delivered/reported, max {:.3} min {:.3} MiB/s, excess {:.0} KiB, settle {} / steady {} / reported {}, peers {}-{} live, {} seen",
+            "run {}: before {:.3}/{:.3}, after {:.3}/{:.3} MiB/s delivered/reported, max {:.3} min {:.3} MiB/s, excess {:.0} KiB, settle {} / steady {} / reported {}, peers {}-{} live, {} seen, {} wasted",
             i + 1,
             mib_f(run.before.delivered_bps),
             mib_f(run.before.reported_bps),
@@ -776,7 +776,9 @@ fn print_limit_report(report: &LimitReport, plan: LimitPlan) -> std::io::Result<
             ms(run.reported_settle_ms),
             run.peers_live_range.0,
             run.peers_live_range.1,
-            run.peers_seen
+            run.peers_seen,
+            run.wasted_bytes
+                .map_or("-".into(), |b| format!("{:.0} KiB", mib(b) * 1024.0))
         )?;
     }
     Ok(())

@@ -66,6 +66,10 @@ pub struct LimitSample {
     pub reported_bps: u64,
     /// Connected peers.
     pub peers_live: u32,
+    /// Bytes received but not needed so far (swarm engine only).
+    pub wasted_bytes: Option<u64>,
+    /// Duplicate requests so far (swarm engine only).
+    pub duplicate_requests: Option<u64>,
 }
 
 /// Rates over one steady phase.
@@ -106,6 +110,9 @@ pub struct LimitRun {
     pub peers_live_range: (u32, u32),
     /// Peers learned about during the run.
     pub peers_seen: u32,
+    /// Bytes received but not needed during the run, such as blocks fetched twice after a
+    /// request timed out (swarm engine only).
+    pub wasted_bytes: Option<u64>,
     /// Every sample, for plotting.
     pub samples: Vec<LimitSample>,
 }
@@ -153,6 +160,8 @@ pub async fn run_limit(
             verified_bytes: stats.downloaded_bytes,
             reported_bps: stats.download_bps,
             peers_live: stats.peers_live,
+            wasted_bytes: stats.wasted_bytes,
+            duplicate_requests: stats.duplicate_requests,
         });
         next += SAMPLE_EVERY;
     }
@@ -167,6 +176,7 @@ pub async fn run_limit(
     let mut run = analyze(&samples, plan);
     run.engine = kind.to_string();
     run.peers_seen = stats.peers_seen;
+    run.wasted_bytes = stats.wasted_bytes;
     run.samples = samples;
     Ok(run)
 }
@@ -224,6 +234,7 @@ pub fn analyze(samples: &[LimitSample], plan: LimitPlan) -> LimitRun {
         after,
         peers_live_range: (live.clone().min().unwrap_or(0), live.max().unwrap_or(0)),
         peers_seen: 0,
+        wasted_bytes: None,
         samples: Vec::new(),
     }
 }
@@ -369,6 +380,8 @@ mod tests {
                 verified_bytes: bytes,
                 reported_bps: rate,
                 peers_live: 4,
+                wasted_bytes: None,
+                duplicate_requests: None,
             });
         }
         out
