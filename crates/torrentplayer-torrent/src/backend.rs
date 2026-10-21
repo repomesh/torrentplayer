@@ -150,8 +150,10 @@ pub struct StreamEngineConfig {
     pub upload_limit_bps: Option<NonZeroU32>,
     /// Maximum connected peers per torrent.
     pub peer_limit: usize,
-    /// Folder where each engine keeps its DHT routing tables between runs (direct mode only),
-    /// so magnet links find peers sooner after a restart. `None` keeps nothing.
+    /// Folder where torrentplayer-swarm keeps its DHT routing tables between runs (direct mode
+    /// only), so magnet links find peers sooner after a restart. `None` keeps nothing.
+    /// librqbit keeps none: restored from a saved table, it fetched magnet metadata more
+    /// slowly than from a fresh start (see docs/performance.md).
     pub dht_state_dir: Option<PathBuf>,
 }
 
@@ -459,12 +461,10 @@ impl StreamEngine {
         }
         let mut c = EngineConfig::new(self.config.download_dir.join("librqbit"));
         c.enable_dht = self.config.public_discovery;
-        // A file of its own: the two engines run separate nodes, which must not share an id.
-        c.dht_state_file = self
-            .config
-            .dht_state_dir
-            .as_ref()
-            .map(|d| d.join("librqbit.json"));
+        // No saved DHT state (`dht_state_file`): librqbit starts each lookup from the 8 closest
+        // contacts it knows and, with 8 of them, adds no others for a minute. Contacts restored
+        // from a saved table have not answered yet, so magnet metadata took two to three times
+        // as long as from an empty table, which waits for the bootstrap servers' responsive nodes.
         c.enable_trackers = self.config.public_discovery;
         c.network.clone_from(&self.network);
         c.peer_limit = Some(self.config.peer_limit);
@@ -490,8 +490,8 @@ impl StreamEngine {
 
     /// Where librqbit should listen for incoming peers, and whether with UPnP. Only when
     /// librqbit is the engine for every torrent (otherwise torrentplayer-swarm takes incoming
-    /// peers from the network manager), in direct mode (librqbit's listener cannot be pinned to
-    /// an interface or tunnel), and with incoming connections turned on.
+    /// peers from the network manager), in direct mode (librqbit's listener cannot be moved into
+    /// a tunnel), and with incoming connections turned on.
     fn rqbit_listen(&self, protected: bool) -> Option<(SocketAddr, bool)> {
         if self.swarm.is_some() || protected {
             return None;
@@ -512,7 +512,7 @@ impl StreamEngine {
         };
         let report = if network.policy().protected {
             ExternalListener::Idle(
-                "librqbit accepts incoming peers only in direct mode; choose the automatic \n                 engine to accept them through a VPN interface or WireGuard"
+                "librqbit accepts incoming peers only in direct mode; choose the automatic \n                 engine to accept them through WireGuard"
                     .into(),
             )
         } else {
@@ -586,7 +586,7 @@ impl StreamEngine {
         let mut slot = self.rqbit.lock().await;
         if slot
             .as_ref()
-            .is_some_and(|e| e.protected() != config.mode.is_protected())
+            .is_some_and(|e| e.protected() != config.is_protected())
         {
             self.stop_rqbit(&mut slot).await;
         }

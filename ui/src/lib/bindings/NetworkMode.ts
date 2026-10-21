@@ -3,4 +3,4 @@
 /**
  * Connection mode.
  */
-export type NetworkMode = "direct" | "bindInterface" | "socks5" | "wireGuard";
+export type NetworkMode = "direct" | "socks5" | "wireGuard";

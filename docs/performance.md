@@ -107,6 +107,68 @@ For a public-swarm smoke check, queue an openly licensed fixture such as Big Buc
 profile, remove its downloads afterwards, and keep stream URLs (which contain session tokens)
 out of logs and reports. A single successful smoke check is not a public-swarm percentile.
 
+## Incoming peers, download limits, and the saved DHT
+
+Three measurements cover the network changes in 0.3.0. Run them with a release build; the
+first two are local and deterministic, the third needs the public DHT.
+
+**Incoming peers.** `--inbound` makes the viewer reachable only from outside: it accepts
+incoming connections (the swarm engine through the network manager's listener, as with
+`network.incomingPeers`; librqbit on its own listener) and announces its port to a local
+tracker that lists no seeders. Each seeder connects to the viewer as soon as the tracker has
+its address, through the same link shaping as outgoing connections (shared downlink, half the
+round trip on every chunk, the viewer's handshake included). Compare it with outgoing peers
+found through the same tracker:
+
+```sh
+torrentplayer-bench local --engine swarm --seeders 4 --upload-mibps 2 --rtt-ms 60 --tracker-interval 30
+torrentplayer-bench local --engine swarm --seeders 4 --upload-mibps 2 --rtt-ms 60 --inbound
+```
+
+Seeders dial the viewer the moment it announces, so this is the best case for incoming peers:
+in a real swarm they find the viewer at their next announce or DHT lookup. Both engines listen
+on every interface, so Windows may show a firewall prompt; the loopback traffic does not need
+it. `peers_seen` counts addresses the engine learned, so incoming-only runs may report 0.
+
+**Download-limit accuracy.** `limit` adds a local torrent with a download limit, selects the
+file (both engines then download it in the background), lowers the limit after
+`--change-after` seconds, and samples the engine every 100 ms:
+
+```sh
+torrentplayer-bench limit --engine swarm --limit-mibps 2 --then-mibps 1 --churn 8 --runs 3
+```
+
+By default eight seeders share a 16 MiB/s downlink, so only the limit holds the rate back, and
+`--churn 8` takes each seeder offline for 2 s of every 8 s, staggered. The report gives the
+delivered rate (verified bytes per second) and the engine's reported `download_bps` over the
+second half of each phase, the highest and lowest one-second delivered rate after the change
+(a burst, and a dip while the limiter's debt is repaid), the bytes delivered in the two seconds
+after it beyond the new limit, and the time until every later two-second window stays within
+5% of the new limit and of the rate it settled at (with churn the rate can settle below the
+limit). The reported rate is already smoothed by the engine, so its settling time uses each
+sample.
+The fixture uses 16 KiB pieces so that one piece is under 2% of a one-second window at 1 MiB/s.
+
+**Saved DHT state.** `--dht-state DIR` keeps the swarm engine's DHT routing tables in `DIR`
+(`swarm.json`), set through the same engine option the app uses for its data folder. librqbit
+keeps none, as in the app since 49626d2 (see the measurements below), so for it the option
+changes nothing. A session without a saved file starts cold and saves one when it stops.
+`--no-trackers` leaves the DHT as the only peer source. Prime the folder with one run, then compare against runs without the
+option, one start-up and one seek each:
+
+```sh
+torrentplayer-bench torrent "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel" \
+  --engine rqbit --runs 1 --seeks 0.5 --download-mibps 10
+torrentplayer-bench torrent sintel.torrent --engine swarm --no-trackers --no-web-seeds \
+  --runs 1 --seeks 0.5 --download-mibps 10 [--dht-state DIR]
+```
+
+The swarm engine does not open magnet links itself (the app fetches their metadata with
+librqbit), so it plays the same torrent from its `.torrent` file with trackers and web seeds
+off. `first peer` is the time from adding the torrent to the first connected peer. librqbit adds
+a magnet link only once it has the metadata, which already needs a peer, so for magnet links
+sampling starts after the metadata arrived and the metadata time is the measure to compare.
+
 ## Tuning and regression checks
 
 `--queue-ms` overrides the swarm engine request window for an explicit comparison. Keep the
@@ -148,3 +210,110 @@ connection and search checks succeeded. No public-swarm percentile is inferred.
 Raw JSON, commands, binary hashes, and the combined HTML report are saved locally under
 `target/streaming-benchmarks/`, with the overview at `target/streaming-benchmarks/report.html`.
 Production request-window defaults were retained; no A/B tuning claim is made.
+
+## Measurements from 21 October 2026 (0.3.0)
+
+Release builds on the same Windows 11 desktop, run natively; other work shared the machine.
+Latencies are milliseconds, median / p95.
+
+**0.2.0 against the 0.3.0 release candidate**, the same `local` commands back to back (256 MiB,
+one seeder, 40 ms RTT, five runs, four cold seeks each):
+
+| Link    | Engine | 0.2.0 start-up | 0.3.0 start-up | 0.2.0 seek  | 0.3.0 seek  |
+| ------- | ------ | -------------- | -------------- | ----------- | ----------- |
+| 2 MiB/s | rqbit  | 1102 / 1112    | 1103 / 1129    | 1605 / 1721 | 1601 / 1745 |
+| 2 MiB/s | swarm  | 1083 / 1086    | 1079 / 1090    | 694 / 802   | 675 / 804   |
+| 8 MiB/s | rqbit  | 343 / 349      | 345 / 357      | 395 / 426   | 405 / 422   |
+| 8 MiB/s | swarm  | 346 / 351      | 343 / 345      | 266 / 301   | 268 / 300   |
+
+On the public Big Buck Bunny swarm (`torrent --download-mibps 10`, versions interleaved, 29–59
+peers live of 781–1049 seen), rqbit started up in 1047 / 3520 (0.2.0) and 1114 / 9422 (0.3.0)
+over ten runs each, with seeks of 3115 / 9044 and 2261 / 9056; the swarm engine started up in
+1211 / 1836 and 1178 / 1448 over six runs each, with seeks of 819 / 8610 and 762 / 1979. Public
+start-ups are bimodal in both versions (0.2.0: 3 of 10 rqbit runs over 2.9 s; 0.3.0: 4 of 10
+over 4 s), and a rank test does not separate the versions.
+
+**Incoming against outgoing peers** (`local`, 256 MiB, five runs, four cold seeks each).
+Outgoing peers are found through the local tracker (`--tracker-interval 30`); incoming ones
+dial the viewer (`--inbound`). Throughput was the same either way (7.84–7.86 MiB/s on the
+8 MiB/s link, 1.94 MiB/s on the 2 MiB/s one).
+
+| Swarm                     | Engine | Peers    | First peer | Start-up    | Seek        |
+| ------------------------- | ------ | -------- | ---------- | ----------- | ----------- |
+| 1 seeder, 8 MiB/s, 40 ms  | swarm  | outgoing | 91 / 92    | 339 / 345   | 267 / 299   |
+| 1 seeder, 8 MiB/s, 40 ms  | swarm  | incoming | 43 / 44    | 346 / 347   | 268 / 312   |
+| 4 seeders, 2 MiB/s, 60 ms | swarm  | outgoing | 107 / 123  | 1252 / 1316 | 765 / 873   |
+| 4 seeders, 2 MiB/s, 60 ms | swarm  | incoming | 44 / 46    | 1252 / 1264 | 800 / 877   |
+| 1 seeder, 8 MiB/s, 40 ms  | rqbit  | outgoing | 93 / 93    | 357 / 360   | 404 / 423   |
+| 1 seeder, 8 MiB/s, 40 ms  | rqbit  | incoming | 38 / 44    | 358 / 359   | 395 / 424   |
+| 4 seeders, 2 MiB/s, 60 ms | rqbit  | outgoing | 94 / 123   | 2465 / 2659 | 4963 / 5206 |
+| 4 seeders, 2 MiB/s, 60 ms | rqbit  | incoming | 34 / 46    | 1906 / 2158 | 4924 / 5206 |
+
+Incoming peers connect sooner here only because the seeders dial the moment the viewer
+announces; once connected, both engines serve them like outgoing peers.
+
+**Download limit lowered from 2 to 1 MiB/s** after 10 s (`limit`, swarm engine, three runs
+per row, MiB/s). "Before the fix" is the release candidate's parent commit, cc27cc4, built with
+the same benchmark code; 0.3.0 includes 8073ce9. Churn takes each seeder offline for 2 s of
+every 8 s.
+
+| Seeders, churn | Build          | Before change: delivered / reported | After: delivered / reported | Highest / lowest 1 s after | Excess in 2 s |
+| -------------- | -------------- | ----------------------------------- | --------------------------- | -------------------------- | ------------- |
+| 8, churn       | before the fix | 1.950 / 1.867                       | 0.935 / 0.880               | 1.258 / 0.885              | 206 KiB       |
+| 8, churn       | 0.3.0          | 1.946 / 1.946                       | 0.936 / 0.933               | 1.030 / 0.858              | 1 KiB         |
+| 40, none       | before the fix | 2.004 / 2.000                       | 0.756 / 0.996               | 2.500 / 0.234              | 1232 KiB      |
+| 40, none       | 0.3.0          | 2.002 / 1.998                       | 0.661 / 0.974               | 1.750 / 0.000              | −117 KiB      |
+| 40, churn      | before the fix | 1.719 / 2.054                       | 0.709 / 0.845               | 1.813 / 0.562              | 599 KiB       |
+| 40, churn      | 0.3.0          | 1.721 / 1.714                       | 0.623 / 0.664               | 0.937 / 0.000              | −466 KiB      |
+
+8073ce9 made the reported rate match the delivered one before the change (it overstated it by
+19% with 40 churning peers) and removed the excess with eight peers. With 40 peers lowering the
+limit still released about 1.5 MB within 200 ms, as waiting readers returned at once, and the
+kept debt was then repaid by delivering nothing for more than a second (1.4 s in the run
+inspected), long enough to stall playback. Verified data also fell to 0.62–0.76 MiB/s under the
+1 MiB/s limit: the queue sizing let 40 peers hold more requests than the limit delivers before
+the 8 s request timeout, and blocks fetched again after a timeout arrived twice.
+
+b3f9736 fixes both: waiters rescale their wait to a changed limit instead of returning, a
+reader takes at most one block per read under a limit, and request queues fit each peer's share
+of the limit. The same runs against the release candidate before it (2a29f9c) and with it:
+
+| Seeders, churn | Build   | Before change: delivered / reported | After: delivered / reported | Highest / lowest 1 s after | Excess in 2 s | Settled within 5% |
+| -------------- | ------- | ----------------------------------- | --------------------------- | -------------------------- | ------------- | ----------------- |
+| 8, churn       | 2a29f9c | 1.945 / 1.945                       | 0.934 / 0.937               | 1.002 / 0.871              | −75 KiB       | 0 of 3 runs       |
+| 8, churn       | b3f9736 | 1.968 / 1.971                       | 0.974 / 0.973               | 0.999 / 0.949              | −43 KiB       | 3 of 3, at 7 ms   |
+| 40, none       | 2a29f9c | 2.011 / 1.997                       | 0.747 / 1.000               | 1.609 / 0.000              | −163 KiB      | 0 of 3            |
+| 40, none       | b3f9736 | 1.999 / 1.998                       | 0.998 / 0.999               | 1.018 / 0.972              | 19 KiB        | 3 of 3, at 1 ms   |
+| 40, churn      | 2a29f9c | 1.695 / 1.701                       | 0.664 / 0.693               | 0.844 / 0.234              | −485 KiB      | 0 of 3            |
+| 40, churn      | b3f9736 | 1.869 / 1.869                       | 0.814 / 0.858               | 0.973 / 0.328              | −218 KiB      | 0 of 3            |
+
+With 40 churning seeders the rate stays below the limit because peers drop out: the engine
+backs off reconnecting to a peer that keeps disconnecting (2 s, doubling), so by the end of a
+30 s run every seeder is in backoff and the rate falls to zero in the last second, before and
+after the fix alike. That lowest second is the 0.234 and 0.328 above; around the change itself
+the fixed build delivers about 0.88 MiB/s with no wasted data.
+
+**Saved DHT state**, Sintel on the public DHT (`--download-mibps 10`, one start-up and one seek
+to 50% per run, six cold and six warm runs interleaved, each warm run loading a state saved by
+an earlier session):
+
+| Engine, source                            | State | Metadata    | First peer   | Start-up     | Seek        |
+| ----------------------------------------- | ----- | ----------- | ------------ | ------------ | ----------- |
+| rqbit, trackerless magnet                 | cold  | 1426 / 1957 | 1568 / 2059  | 642 / 3963   | 1165 / 3515 |
+| rqbit, trackerless magnet                 | warm  | 2726 / 3172 | 2878 / 3322  | 2208 / 2855  | 2416 / 3231 |
+| swarm, `.torrent`, DHT only, no web seeds | cold  | –           | 4948 / 42542 | 7087 / 45341 | 1199 / 2687 |
+| swarm, `.torrent`, DHT only, no web seeds | warm  | –           | 3423 / 5358  | 6059 / 7913  | 1130 / 8385 |
+
+librqbit fetched magnet metadata more slowly from its saved state in every one of the six warm
+runs (2.5–3.2 s) than in any cold run (0.9–2.0 s); a second set of six pairs on 2a29f9c gave
+3691 / 4421 warm against 1035 / 11181 cold. librqbit-dht starts a lookup from the 8 closest
+contacts it knows and, once it has 8, adds no other roots for 60 s. Restored contacts have not
+answered in the new session, so the lookup depended on them alone, while an empty table retries
+its roots every second until bootstrap fills it with nodes that just answered. Retrying roots
+in the vendored crate narrowed the gap (warm 2513, cold 2148) but slowed cold lookups and the
+swarm engine's warm ones, so since 49626d2 librqbit keeps no DHT state and always takes the
+cold path; `--dht-state` now applies to the swarm engine only, as in the app. Six further pairs
+of the same cold path measured 3123 / 15805 and 1348 / 16445 for metadata: the public DHT was
+much noisier than earlier in the day, and the difference between identical configurations
+shows the spread. The swarm engine kept its saved state and still found its first peer sooner
+with it: 2344 / 3921 against 12095 / 12991 cold (three runs each).

@@ -253,13 +253,12 @@ export function chooseDownloadDir(): Promise<string | null> {
 
 // --- Network ------------------------------------------------------------------------------
 
-import type { NetworkInterface } from './bindings/NetworkInterface';
 import type { NetworkStatus } from './bindings/NetworkStatus';
 import type { PublicIp } from './bindings/PublicIp';
 import type { WireGuardImport } from './bindings/WireGuardImport';
 import type { WireGuardSummary } from './bindings/WireGuardSummary';
 
-export type { NetworkInterface, NetworkStatus, PublicIp, WireGuardImport, WireGuardSummary };
+export type { NetworkStatus, PublicIp, WireGuardImport, WireGuardSummary };
 
 /** The backend event carrying a new {@link NetworkStatus} whenever the network state changes. */
 export const NETWORK_STATUS_EVENT = 'network-status';
@@ -271,14 +270,9 @@ export function networkStatus(): Promise<NetworkStatus> {
   return invoke<NetworkStatus>('network_status');
 }
 
-/** Checks the VPN interface or proxy again now ("Try again"); resolves with the new status. */
+/** Checks the proxy or WireGuard tunnel again now ("Try again"); resolves with the new status. */
 export function recheckNetwork(): Promise<NetworkStatus> {
   return invoke<NetworkStatus>('recheck_network');
-}
-
-/** The machine's network interfaces, for the "Bind to interface" picker. */
-export function listInterfaces(): Promise<NetworkInterface[]> {
-  return invoke<NetworkInterface[]>('list_interfaces');
 }
 
 /**

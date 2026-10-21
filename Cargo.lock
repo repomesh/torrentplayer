@@ -2501,16 +2501,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "if-addrs"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
-dependencies = [
- "libc",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5982,7 +5972,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "torrentplayer-app"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6012,7 +6002,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-bench"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6022,6 +6012,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "torrentplayer-net",
  "torrentplayer-prioritize",
  "torrentplayer-stream",
  "torrentplayer-swarm",
@@ -6032,11 +6023,11 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-course"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "torrentplayer-library"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "rusqlite",
  "serde",
@@ -6050,7 +6041,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-media"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "proptest",
@@ -6064,12 +6055,11 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-net"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64 0.23.1",
  "dns-parser",
  "getrandom 0.4.3",
- "if-addrs",
  "librqbit-upnp",
  "proptest",
  "reqwest",
@@ -6089,18 +6079,18 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-player"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "torrentplayer-prioritize"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "torrentplayer-search"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -6114,7 +6104,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-settings"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "keyring",
  "secrecy",
@@ -6128,7 +6118,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-stream"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -6147,7 +6137,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-swarm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -6172,7 +6162,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-torrent"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "futures-util",

@@ -28,8 +28,8 @@ files) and `librqbit` holds downloads made with the librqbit engine (the `rqbit`
 choice) as their own files.
 
 The app data folder is the same as the config folder on Windows and macOS, and
-`~/.local/share/io.torrentplayer.desktop` on Linux. Its `dht` folder keeps the DHT nodes each
-engine knew (`swarm.json`, `librqbit.json`), so after a restart magnet links find peers without
+`~/.local/share/io.torrentplayer.desktop` on Linux. Its `dht` folder keeps the DHT nodes
+TorrentPlayer's engine knew (`swarm.json`), so after a restart magnet links find peers without
 starting the search from the bootstrap servers. They are saved every minute and when the node
 stops, and only in Direct mode: a protected mode starts with a fresh node id and saves nothing,
 so the id seen over a VPN or proxy is never the one seen from your own address. Deleting the
@@ -61,7 +61,10 @@ Every problem is logged and shown at the top of the Settings page. Older files a
 a version 1 file loads normally and the field is dropped the next time settings are saved.
 Version 3 added the optional seeding time target; older files keep ratio-only seeding.
 `network.incomingPeers` was added later without a version change: files without it load with
-incoming connections off, and an out-of-range port is reset to 0 (random).
+incoming connections off, and an out-of-range port is reset to 0 (random). Version 4 (0.3.0)
+removed the VPN adapter mode: `network.mode = "bindInterface"` becomes `direct` with
+`network.vpnAdapterModeRemoved` set, and `network.interface` is dropped. This rewrite applies to
+a file of any version (a hand-edited one too) and is saved at once; see [Network](#network).
 
 ## Settings
 
@@ -171,8 +174,7 @@ The network layer (`torrentplayer-net`) applies these as soon as they are saved;
 
 | Setting                         | Default   | Valid values                                          | Applies                    |
 | ------------------------------- | --------- | ----------------------------------------------------- | -------------------------- |
-| `network.mode`                  | `direct`  | `direct`, `bindInterface`, `socks5`, `wireGuard`      | now                        |
-| `network.interface`             | `null`    | an interface name (for `bindInterface`)               | now                        |
+| `network.mode`                  | `direct`  | `direct`, `socks5`, `wireGuard`                       | now                        |
 | `network.socks5.host`           | `""`      | a host name or IP address, without scheme or port     | now                        |
 | `network.socks5.port`           | `1080`    | 1–65535                                               | now                        |
 | `network.socks5.username`       | `null`    | 1–255 bytes                                           | now                        |
@@ -186,20 +188,28 @@ The network layer (`torrentplayer-net`) applies these as soon as they are saved;
 | `network.incomingPeers.port`    | `0`       | 0 (random 10000–49151, kept per run), 1024–65535      | now                        |
 | `network.incomingPeers.upnp`    | `false`   | on: ask the router to forward the port (UPnP)         | now (direct mode only)     |
 | `network.vpnHintDismissed`      | `false`   | on: the VPN recommendation is no longer shown         | now                        |
+| `network.vpnAdapterModeRemoved` | `false`   | set by the upgrade from the VPN adapter mode          | now                        |
 
-**Kill switch:** always on when a VPN or proxy mode is selected, so there is no setting for it.
-If the interface or proxy stops working, torrent traffic pauses and searches are refused; traffic
+**Kill switch:** always on in the SOCKS5 and WireGuard modes, so there is no setting for it.
+If the proxy or tunnel stops working, torrent traffic pauses and searches are refused; traffic
 resumes by itself when it works again. TorrentPlayer never falls back to a direct connection. Earlier versions
 had a `network.killSwitch` toggle that had no effect; it is dropped on upgrade.
 
-**DHT:** uses sockets bound to the VPN adapter or inside WireGuard. In SOCKS5 mode,
+**DHT:** uses sockets inside the WireGuard tunnel in WireGuard mode. In SOCKS5 mode,
 `proxyDht` enables discovery through UDP ASSOCIATE; proxies without UDP support cannot
 provide DHT, and TorrentPlayer never sends it around them.
 
-**VPN:** connect with your VPN provider's app first (OpenVPN-based apps included), then choose
-its tunnel adapter. TorrentPlayer does not run OpenVPN itself or import `.ovpn` files (see
-[ADR 0008](adr/0008-application-wireguard-tunnel.md)). This is saved as `bindInterface` for compatibility. Hyper-V local switches
-cannot establish a VPN. Tailscale requires an exit node for internet destinations.
+**VPN app:** connect your VPN provider's app first (OpenVPN-based apps included) and keep
+**Direct** selected; the VPN app's own kill switch applies. For a kill switch inside TorrentPlayer,
+use the WireGuard mode with your provider's WireGuard configuration. TorrentPlayer does not run
+OpenVPN itself or import `.ovpn` files (see [ADR 0008](adr/0008-application-wireguard-tunnel.md)).
+
+**Removed VPN adapter mode:** 0.3.0 removed the mode that bound traffic to a VPN app's adapter
+([ADR 0009](adr/0009-remove-vpn-adapter-mode.md)). Settings that used it load as Direct with
+`network.vpnAdapterModeRemoved` set. Until the notice in Settings → Network or beside the status
+bar's network indicator is dismissed (which clears the setting), all torrent traffic and searches
+stay paused, so nothing is sent outside the VPN without your confirmation. Choosing SOCKS5 or
+WireGuard instead lifts the pause too.
 
 **WireGuard:** choose **WireGuard** and import a provider's `.conf` file to connect inside TorrentPlayer.
 **Check configuration** previews it without keys; **Save configuration** stores the keys in the
@@ -210,8 +220,7 @@ the tunnel. UDP trackers and DHT use the tunnel too. See [Network modes](network
 
 **Incoming peers:** off by default, so TorrentPlayer only connects out and no firewall prompt
 appears. Turned on, it listens on every interface in direct mode (expect a firewall prompt;
-forward the port on your router or turn on UPnP), only on the VPN adapter in VPN mode, and only
-inside the tunnel in WireGuard mode; behind a VPN, peers reach the port only if the provider
+forward the port on your router or turn on UPnP), and only inside the tunnel in WireGuard mode; behind a VPN, peers reach the port only if the provider
 forwards it. A SOCKS5 proxy cannot accept incoming connections, so TorrentPlayer does not
 listen at all in that mode. Settings shows whether it is listening. See
 [Incoming peer connections](network.md#incoming-peer-connections).

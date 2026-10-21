@@ -2,17 +2,21 @@
 <script lang="ts">
   /*
    * The network indicator, from the backend's real state: gray when direct, green when traffic
-   * goes through the VPN interface or proxy, yellow while that is being checked, red when the
+   * goes through the proxy or WireGuard tunnel, yellow while that is being checked, red when the
    * kill switch pauses traffic or the settings cannot work. Beside it, the public address the
    * internet sees (unless turned off in Settings → Network), hidden until the eye button reveals
    * it (remembered); the tooltip has the mode, endpoint, public IPv4 and IPv6, uptime, and latest
    * events; clicking opens Settings → Network. In Direct mode, a "VPN recommended" button opens
-   * the VPN note (see `src/lib/vpnHint.ts`) until it is dismissed.
+   * the VPN note (see `src/lib/vpnHint.ts`) until it is dismissed. After an update from the
+   * removed VPN adapter mode, a "VPN adapter mode removed" button opens that notice instead (see
+   * `src/lib/removedMode.ts`), open from the start, until it is dismissed.
    */
   import { onMount } from 'svelte';
   import { errorMessage, type NetworkStatus, type PublicIp } from '../ipc';
   import { describeNetwork, describePublicIp, followNetwork, followPublicIp } from '../network';
+  import { dismissRemovedModeNotice, removedModeHolds } from '../removedMode';
   import { dismissVpnHint, followVpnHint, showVpnHint } from '../vpnHint';
+  import RemovedModeNotice from './RemovedModeNotice.svelte';
   import VpnHint from './VpnHint.svelte';
 
   interface Props {
@@ -49,11 +53,19 @@
   }
   // The VPN note's popover. Hidden until the settings are known.
   const hintId = $props.id();
+  const removedId = `${hintId}-removed`;
   let hintDismissed = $state(true);
   let hintOpen = $state(false);
   let hintError = $state<string | null>(null);
   let hintBox: HTMLElement | undefined = $state();
-  const hint = $derived(status !== null && showVpnHint(status.mode, hintDismissed));
+  // The removed-mode notice: pending until dismissed, open until closed. Unknown (false) until
+  // the settings are known.
+  let removed = $state(false);
+  let removedHeld = $state(false);
+  let removedOpen = $state(true);
+  let removedError = $state<string | null>(null);
+  let removedBox: HTMLElement | undefined = $state();
+  const hint = $derived(status !== null && showVpnHint(status.mode, hintDismissed, removed));
 
   // Closed whenever the note stops applying, so it never reopens by itself.
   $effect(() => {
@@ -76,6 +88,17 @@
       })
       .catch((reason: unknown) => {
         hintError = `The setting could not be saved: ${errorMessage(reason)}`;
+      });
+  }
+
+  function dismissRemoved(): void {
+    removedError = null;
+    dismissRemovedModeNotice()
+      .then(() => {
+        removed = false;
+      })
+      .catch((reason: unknown) => {
+        removedError = `The setting could not be saved: ${errorMessage(reason)}`;
       });
   }
 
@@ -107,6 +130,8 @@
     });
     const stopHint = followVpnHint((network) => {
       hintDismissed = network.vpnHintDismissed;
+      removed = network.vpnAdapterModeRemoved;
+      removedHeld = removedModeHolds(network);
     });
     return () => {
       stopStatus();
@@ -148,10 +173,54 @@
     if (hintOpen && hintBox && !hintBox.contains(e.target as Node)) {
       closeHint();
     }
+    if (removedOpen && removedBox && !removedBox.contains(e.target as Node)) {
+      removedOpen = false;
+    }
   }}
 />
 
 {#snippet vpn()}
+  {#if removed}
+    <span class="vpn" bind:this={removedBox}>
+      <button
+        type="button"
+        class="vpn-button removed"
+        aria-expanded={removedOpen}
+        aria-controls={removedId}
+        onclick={() => {
+          removedOpen = !removedOpen;
+        }}>VPN adapter mode removed</button
+      >
+      {#if removedOpen}
+        <div
+          id={removedId}
+          class="popover"
+          role="presentation"
+          onkeydown={(e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+              e.stopPropagation();
+              removedOpen = false;
+            }
+          }}
+        >
+          <RemovedModeNotice
+            held={removedHeld}
+            onDismiss={dismissRemoved}
+            onOpen={onOpen
+              ? () => {
+                  removedOpen = false;
+                  onOpen();
+                }
+              : undefined}
+            onClose={() => {
+              removedOpen = false;
+            }}
+            error={removedError}
+          />
+        </div>
+      {/if}
+    </span>
+  {/if}
   {#if hint}
     <span class="vpn" bind:this={hintBox}>
       <button
@@ -314,6 +383,16 @@
   .vpn-button:hover,
   .vpn-button[aria-expanded='true'] {
     background: rgb(242 180 90 / 10%);
+  }
+
+  .vpn-button.removed {
+    border-color: rgb(217 96 79 / 50%);
+    color: #e8907a;
+  }
+
+  .vpn-button.removed:hover,
+  .vpn-button.removed[aria-expanded='true'] {
+    background: rgb(217 96 79 / 12%);
   }
 
   .vpn-button:focus-visible {

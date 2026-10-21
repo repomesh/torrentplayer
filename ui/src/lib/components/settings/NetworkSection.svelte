@@ -1,9 +1,10 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 <script lang="ts">
   /*
-   * Connection mode (direct, VPN adapter, SOCKS5, built-in WireGuard), the live
-   * connection state from the network layer, the connection check, and WireGuard import.
-   * Saving a setting applies it: the backend follows every change, so there is no Apply button.
+   * Connection mode (direct, SOCKS5, built-in WireGuard), the live connection state from the
+   * network layer, the connection check, and WireGuard import. Saving a setting applies it: the
+   * backend follows every change, so there is no Apply button. Settings that used the removed VPN
+   * adapter mode show a notice until it is dismissed (see `src/lib/removedMode.ts`).
    */
   import { onMount } from 'svelte';
   import type { NetworkMode } from '../../bindings/NetworkMode';
@@ -13,10 +14,8 @@
     clearSecret,
     errorMessage,
     importWireGuardConfig,
-    listInterfaces,
     recheckNetwork,
     validateWireGuardConfig,
-    type NetworkInterface,
     type NetworkStatus,
     type PublicIp,
     type SecretStatus,
@@ -30,9 +29,10 @@
     describeIncoming,
     describeNetwork,
     followNetwork,
-    interfaceAdvice,
   } from '../../network';
+  import { removedModeHolds, showRemovedModeNotice } from '../../removedMode';
   import { followVpnHint, showVpnHint } from '../../vpnHint';
+  import RemovedModeNotice from '../RemovedModeNotice.svelte';
   import VpnHint from '../VpnHint.svelte';
   import Field from './Field.svelte';
   import SecretField from './SecretField.svelte';
@@ -53,12 +53,7 @@
     {
       value: 'direct',
       label: 'Direct',
-      help: 'Connect straight to peers. They can see your IP address.',
-    },
-    {
-      value: 'bindInterface',
-      label: 'VPN',
-      help: "Connect with your VPN provider's app first (OpenVPN-based apps included), then choose its tunnel adapter below. Traffic pauses if it disconnects.",
+      help: 'Connect straight to peers. They can see your IP address, unless a VPN app is connected on this computer.',
     },
     {
       value: 'socks5',
@@ -93,13 +88,13 @@
 
   let status = $state<NetworkStatus | null>(null);
   let rechecking = $state(false);
-  let interfaces = $state<NetworkInterface[] | null>(null);
-  let interfacesError = $state<string | null>(null);
   let checking = $state(false);
   let check = $state<PublicIp | null>(null);
   let checkMessage = $state<string | null>(null);
   // Dismissed elsewhere (the status bar) since this page loaded its settings.
   let hintDismissedElsewhere = $state(false);
+  let removedDismissedElsewhere = $state(false);
+  const removedNotice = $derived(showRemovedModeNotice(n) && !removedDismissedElsewhere);
 
   // WireGuard import: check first (a summary without keys), then save.
   let importText = $state('');
@@ -116,44 +111,10 @@
     status !== null && status.mode !== 'direct' && status.state.kind !== 'connected',
   );
 
-  const choices = $derived.by(() => {
-    if (interfaces === null) {
-      return [];
-    }
-    const usable = interfaces.filter((i) => !i.isLoopback);
-    const current = n.interface;
-    if (current !== null && !usable.some((i) => i.name === current)) {
-      usable.push({
-        name: current,
-        addresses: [],
-        isUp: false,
-        isLoopback: false,
-        likelyVpn: false,
-      });
-    }
-    return usable.sort(
-      (a, b) =>
-        Number(b.likelyVpn) - Number(a.likelyVpn) ||
-        Number(b.isUp) - Number(a.isUp) ||
-        a.name.localeCompare(b.name),
-    );
-  });
-
-  function loadInterfaces(): void {
-    listInterfaces()
-      .then((list) => {
-        interfaces = list;
-        interfacesError = null;
-      })
-      .catch((reason: unknown) => {
-        interfacesError = errorMessage(reason);
-      });
-  }
-
   onMount(() => {
-    loadInterfaces();
     const stopHint = followVpnHint((network) => {
       hintDismissedElsewhere = network.vpnHintDismissed;
+      removedDismissedElsewhere = !network.vpnAdapterModeRemoved;
     });
     const stopNetwork = followNetwork((next) => {
       status = next;
@@ -267,6 +228,17 @@
 <section class="card" aria-labelledby="network-title">
   <h3 id="network-title">VPN and network</h3>
 
+  {#if removedNotice}
+    <div class="vpn-hint">
+      <RemovedModeNotice
+        held={removedModeHolds(n)}
+        onDismiss={() => {
+          update('network.vpnAdapterModeRemoved', false);
+        }}
+      />
+    </div>
+  {/if}
+
   {#if status && summary}
     <div class="status {summary.tone}" role="status" aria-live="polite">
       <div class="status-line">
@@ -282,27 +254,24 @@
         <dt>Mode</dt>
         <dd>{MODE_NAMES[status.mode]}</dd>
         {#if status.endpoint}
-          <dt>{status.mode === 'bindInterface' ? 'Interface' : 'Endpoint'}</dt>
+          <dt>Endpoint</dt>
           <dd>{status.endpoint}</dd>
-        {/if}
-        {#if status.bound}
-          <dt>In use</dt>
-          <dd>{status.bound}</dd>
         {/if}
         <dt>Torrent traffic</dt>
         <dd>
-          {status.trafficAllowed ? 'Allowed' : 'Paused by the kill switch'}{status.trafficAllowed &&
-          !status.trackersAllowed
+          {status.trafficAllowed
+            ? 'Allowed'
+            : status.mode === 'direct'
+              ? 'Paused until the notice above is dismissed'
+              : 'Paused by the kill switch'}{status.trafficAllowed && !status.trackersAllowed
             ? ' · trackers off'
             : ''}{status.trafficAllowed && !status.udpAllowed
             ? ' · DHT and UDP off in this mode'
-            : ''}{status.trafficAllowed && status.udpAllowed && status.mode === 'bindInterface'
-            ? ' · DHT and UDP trackers through the interface'
-            : status.trafficAllowed && status.udpAllowed && status.mode === 'wireGuard'
-              ? ' · DHT and UDP trackers through WireGuard'
-              : status.trafficAllowed && status.mode === 'socks5'
-                ? ' · UDP relay when supported by the proxy'
-                : ''}
+            : ''}{status.trafficAllowed && status.udpAllowed && status.mode === 'wireGuard'
+            ? ' · DHT and UDP trackers through WireGuard'
+            : status.trafficAllowed && status.mode === 'socks5'
+              ? ' · UDP relay when supported by the proxy'
+              : ''}
         </dd>
         <dt>Incoming peers</dt>
         <dd>{describeIncoming(status.incoming)}</dd>
@@ -350,7 +319,7 @@
     {/each}
   </fieldset>
 
-  {#if showVpnHint(n.mode, n.vpnHintDismissed || hintDismissedElsewhere)}
+  {#if showVpnHint(n.mode, n.vpnHintDismissed || hintDismissedElsewhere, removedNotice)}
     <div class="vpn-hint">
       <VpnHint
         onDismiss={() => {
@@ -358,66 +327,6 @@
         }}
       />
     </div>
-  {/if}
-
-  {#if n.mode === 'bindInterface'}
-    <p class="banner">
-      This option uses a VPN app already connected on your computer. For a WireGuard
-      <code>.conf</code> file, choose <strong>WireGuard</strong> instead.
-    </p>
-    {#if interfaces !== null && !interfaces.some((iface) => iface.likelyVpn)}
-      <p class="note">No VPN adapter detected. Connect your VPN app, then press Refresh.</p>
-    {/if}
-    <Field
-      id="network-interface"
-      label="VPN adapter"
-      help="Connect with your VPN provider's app first (OpenVPN-based apps included), then pick its adapter here. Refresh after connecting."
-      error={errors['network.interface'] ?? interfacesError ?? undefined}
-    >
-      <div class="inline-controls">
-        {#if choices.length > 0}
-          <select
-            id="network-interface"
-            value={n.interface ?? ''}
-            aria-describedby="network-interface-help"
-            onchange={(e: Event) => {
-              const value = (e.currentTarget as HTMLSelectElement).value;
-              update('network.interface', value === '' ? null : value);
-            }}
-          >
-            <option value="">Choose…</option>
-            {#each choices as iface (iface.name)}
-              <option value={iface.name}>
-                {iface.name}{iface.likelyVpn ? ' (VPN)' : ''}{iface.isUp ? '' : ' — down'}{iface
-                  .addresses.length > 0
-                  ? ` · ${iface.addresses.join(', ')}`
-                  : ''}
-              </option>
-            {/each}
-          </select>
-        {:else}
-          <input
-            id="network-interface"
-            class="wide"
-            type="text"
-            spellcheck="false"
-            autocomplete="off"
-            placeholder="wg0"
-            value={n.interface ?? ''}
-            aria-describedby="network-interface-help"
-            aria-invalid={errors['network.interface'] !== undefined}
-            onchange={(e: Event) => {
-              const value = (e.currentTarget as HTMLInputElement).value.trim();
-              update('network.interface', value === '' ? null : value);
-            }}
-          />
-        {/if}
-        <button type="button" onclick={loadInterfaces}>Refresh</button>
-      </div>
-    </Field>
-    {#if n.interface && interfaceAdvice(n.interface)}
-      <p class="banner" role="status">{interfaceAdvice(n.interface)}</p>
-    {/if}
   {/if}
 
   {#if n.mode === 'socks5'}
@@ -542,7 +451,7 @@
   <Field
     id="network-kill"
     label="Kill switch"
-    help="Always on when a VPN or proxy mode is selected: if the interface or proxy stops working, torrent traffic pauses and searches are refused, never falling back to a direct connection. Traffic resumes by itself."
+    help="Always on in the SOCKS5 and WireGuard modes: if the proxy or tunnel stops working, torrent traffic pauses and searches are refused, never falling back to a direct connection. Traffic resumes by itself. In Direct mode, keep your VPN app's own kill switch on."
   >
     <output id="network-kill" class="fixed" aria-describedby="network-kill-help">
       {n.mode === 'direct' ? 'Not needed in Direct mode' : 'Always on'}
@@ -571,7 +480,7 @@
     id="network-ipv6"
     label="IPv6"
     path="network.ipv6"
-    help="In VPN and proxy modes: Disable refuses IPv6 destinations, so IPv6 cannot leave outside the tunnel."
+    help="In the SOCKS5 and WireGuard modes: Disable refuses IPv6 destinations, so IPv6 cannot leave outside the tunnel."
   >
     <select
       id="network-ipv6"
@@ -817,16 +726,6 @@
     margin: 0 0 1rem;
   }
 
-  .banner {
-    margin: 0 0 1rem;
-    padding: 0.75rem 1rem;
-    border-radius: 0.6rem;
-    background: rgb(242 180 90 / 8%);
-    color: var(--text);
-    font-size: 0.85rem;
-    line-height: 1.45;
-  }
-
   .status {
     margin: 0 0 1.25rem;
     padding: 0.85rem 1rem;
@@ -967,12 +866,6 @@
     color: var(--text-muted);
     font-size: 0.8rem;
     line-height: 1.4;
-  }
-
-  .inline-controls {
-    display: flex;
-    gap: 0.5rem;
-    align-items: center;
   }
 
   .fixed {

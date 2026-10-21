@@ -351,6 +351,7 @@ async fn protected_modes_that_cannot_listen_safely_open_no_port() {
                 proxy_dht: true,
             }),
             allow_ipv6: false,
+            hold: None,
         },
         fast_options(),
     )
@@ -374,6 +375,7 @@ async fn protected_modes_that_cannot_listen_safely_open_no_port() {
     net.apply(NetworkConfig {
         mode: NetworkMode::WireGuard(wg),
         allow_ipv6: false,
+        hold: None,
     })
     .unwrap();
     wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Paused { .. })).await;

@@ -8,7 +8,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use bytes::{Buf as _, Bytes, BytesMut};
+use bytes::{Buf as _, BufMut as _, Bytes, BytesMut};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -429,7 +429,8 @@ async fn read_loop(
             }
             buf.advance(used);
         }
-        let n = tokio::time::timeout(shared.cfg.idle_timeout, read.read_buf(&mut buf))
+        let mut limited = (&mut buf).limit(shared.read_cap());
+        let n = tokio::time::timeout(shared.cfg.idle_timeout, read.read_buf(&mut limited))
             .await
             .map_err(|_| PeerError::Timeout)??;
         if n == 0 {

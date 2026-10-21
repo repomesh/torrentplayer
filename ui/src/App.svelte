@@ -1333,7 +1333,11 @@
       library = items;
     });
     const stopVpnHint = followVpnHint((network) => {
-      vpnHintApplies = showVpnHint(network.mode, network.vpnHintDismissed);
+      vpnHintApplies = showVpnHint(
+        network.mode,
+        network.vpnHintDismissed,
+        network.vpnAdapterModeRemoved,
+      );
     });
     const stopSeeding = followSeedingStarted(() => {
       // Used up only once it is actually shown.

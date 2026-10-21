@@ -1308,8 +1308,8 @@ struct Trackers {
 
 impl Trackers {
     /// Starts announcing under `policy`: not at all while traffic is blocked or trackers are
-    /// off. Protected modes use TorrentPlayer's own scoped UDP client through the interface,
-    /// tunnel, or proxy relay; native unbound UDP is never used (see [`crate::udp_tracker`]).
+    /// off. Protected modes use TorrentPlayer's own scoped UDP client through the WireGuard
+    /// tunnel or the proxy relay; native unbound UDP is never used (see [`crate::udp_tracker`]).
     fn start(&self, policy: Option<Policy>) -> Option<BoxStream<'static, SocketAddr>> {
         if policy.is_some_and(|p| !p.traffic_allowed || !p.trackers_allowed) {
             return None;
@@ -1500,6 +1500,7 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             if seek {
                 debug!(cancels = cancels.len(), "seek: re-prioritized");
             }
+            sched.set_rate_limit(shared.rate_limit());
             cancels.extend(sched.tick(now, refresh));
             let unresponsive = sched.unresponsive_peers(MAX_TIMEOUTS);
             let fills = sched.fill_all(&keys, now);
@@ -1620,6 +1621,28 @@ impl Shared {
         self.sched().want_range(start, end);
         self.refresh_background.store(true, Ordering::Relaxed);
         self.wake.notify_one();
+    }
+
+    /// Most bytes a peer reader may take from its connection at once: unbounded while no
+    /// download limit applies, one block under a limit. Readers wait their turn after each
+    /// read, so with whole socket buffers (64 KiB and more) each of many peers would deliver in
+    /// bursts seconds apart, look snubbed, and have its blocks requested again elsewhere.
+    pub(crate) fn read_cap(&self) -> usize {
+        if self.rate_limit().is_some() {
+            crate::metainfo::BLOCK_LEN as usize
+        } else {
+            usize::MAX
+        }
+    }
+
+    /// The download limit this torrent is held to (bytes per second): the lower of the
+    /// engine's and its own.
+    pub(crate) fn rate_limit(&self) -> Option<f64> {
+        let engine = self.limiter.as_ref().and_then(|l| l.rate());
+        match (engine, self.own_limit.rate()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     /// Waits for this torrent's own rate limit (the engine's is applied first).

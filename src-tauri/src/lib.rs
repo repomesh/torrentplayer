@@ -224,7 +224,6 @@ pub fn run() -> anyhow::Result<()> {
             settings::choose_download_dir,
             network::network_status,
             network::recheck_network,
-            network::list_interfaces,
             network::validate_wireguard_config,
             network::import_wireguard_config,
             network::check_connection,

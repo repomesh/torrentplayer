@@ -143,6 +143,7 @@ fn through(proxy: &TestProxy) -> NetworkConfig {
             proxy_dht: true,
         }),
         allow_ipv6: false,
+        hold: None,
     }
 }
 
@@ -295,6 +296,7 @@ async fn a_blocked_mode_makes_no_connections() {
         NetworkConfig {
             mode: NetworkMode::WireGuard(wg),
             allow_ipv6: false,
+            hold: None,
         },
         fast_options(),
     )

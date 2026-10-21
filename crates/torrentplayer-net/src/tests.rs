@@ -40,6 +40,7 @@ fn socks_mode(proxy: &TestProxy, credentials: Option<(&str, &str)>) -> NetworkCo
             proxy_dht: true,
         }),
         allow_ipv6: false,
+        hold: None,
     }
 }
 
@@ -309,6 +310,7 @@ async fn a_protected_mode_blocks_until_verified_and_never_falls_back() {
             proxy_dht: true,
         }),
         allow_ipv6: false,
+        hold: None,
     };
     let net = Network::start(config, fast_options()).await.unwrap();
     let status = net.settled(Duration::from_secs(5)).await;
@@ -396,6 +398,7 @@ async fn wireguard_blocks_everything_until_the_server_authenticates() {
         NetworkConfig {
             mode: NetworkMode::WireGuard(config),
             allow_ipv6: false,
+            hold: None,
         },
         options,
     )
@@ -421,30 +424,65 @@ async fn wireguard_blocks_everything_until_the_server_authenticates() {
     net.shutdown();
 }
 
+/// A SOCKS5 mode whose proxy is down: nothing listens on its port.
+async fn dead_proxy() -> NetworkConfig {
+    let unused = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let dead = unused.local_addr().unwrap();
+    drop(unused);
+    NetworkConfig {
+        mode: NetworkMode::Socks5(Socks5Config {
+            host: dead.ip().to_string(),
+            port: dead.port(),
+            username: None,
+            password: None,
+            remote_dns: true,
+            proxy_trackers: true,
+            proxy_dht: true,
+        }),
+        allow_ipv6: false,
+        hold: None,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_missing_interface_engages_the_kill_switch() {
+async fn a_hold_blocks_direct_mode_until_cleared() {
     let (echo, hits) = echo_server().await;
-    let net = Network::start(
-        NetworkConfig {
-            mode: NetworkMode::BindInterface {
-                interface: "torrentplayer-test-no-such-interface".into(),
-            },
-            allow_ipv6: false,
-        },
-        fast_options(),
-    )
-    .await
-    .unwrap();
+    let held = NetworkConfig {
+        hold: Some("confirm the network settings first".into()),
+        ..NetworkConfig::default()
+    };
+    assert!(held.is_protected() && !NetworkConfig::default().is_protected());
+    let net = Network::start(held, fast_options()).await.unwrap();
     let status = net.settled(Duration::from_secs(5)).await;
     assert!(
-        matches!(&status.state, ConnectionState::KillSwitchActive { reason } if reason.contains("not found")),
+        matches!(&status.state, ConnectionState::Error { reason } if reason.contains("confirm")),
         "{status:?}"
+    );
+    assert!(status.kill_switch_engaged && !status.traffic_allowed);
+    let policy = net.policy();
+    assert!(
+        policy.protected && !policy.udp_allowed,
+        "engines start as behind the kill switch"
     );
     assert!(matches!(
         net.connect(echo).await,
         Err(NetError::KillSwitch(_))
     ));
+    assert!(matches!(
+        net.udp_socket("198.51.100.7:6969".parse().unwrap()).await,
+        Err(NetError::KillSwitch(_))
+    ));
+    assert!(matches!(
+        net.check_public_ip().await,
+        Err(NetError::KillSwitch(_))
+    ));
     assert_eq!(hits.load(Ordering::SeqCst), 0);
+
+    // Cleared (the user confirmed): Direct works at once.
+    let status = net.apply(NetworkConfig::default()).unwrap();
+    assert_eq!(status.state, ConnectionState::Direct);
+    let (_stream, lease) = net.connect(echo).await.unwrap();
+    assert!(lease.is_valid());
     net.shutdown();
 }
 
@@ -520,6 +558,7 @@ async fn an_incomplete_configuration_blocks_traffic() {
             proxy_dht: true,
         }),
         allow_ipv6: false,
+        hold: None,
     };
     let net = Network::start(config.clone(), fast_options())
         .await
@@ -556,53 +595,6 @@ async fn an_incomplete_configuration_blocks_traffic() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn bound_udp_sockets_use_the_interface_address() {
-    // Any up, non-loopback interface with an IPv4 address will do; skip if the machine has none.
-    let Some((name, v4)) = crate::list_interfaces()
-        .unwrap()
-        .into_iter()
-        .filter(|i| i.is_up && !i.is_loopback)
-        .find_map(|i| {
-            let v4 = i
-                .addresses
-                .iter()
-                .filter_map(|a| a.parse::<Ipv4Addr>().ok())
-                .find(|a| !a.is_link_local())?;
-            Some((i.name, v4))
-        })
-    else {
-        return;
-    };
-    let net = Network::start(
-        NetworkConfig {
-            mode: NetworkMode::BindInterface { interface: name },
-            allow_ipv6: false,
-        },
-        fast_options(),
-    )
-    .await
-    .unwrap();
-    let status = net.settled(Duration::from_secs(5)).await;
-    if !status.traffic_allowed {
-        net.shutdown();
-        return;
-    }
-    let policy = net.policy();
-    assert!(policy.bound_udp_allowed && !policy.udp_allowed);
-    assert!(status.udp_allowed, "UDP trackers are usable when bound");
-    let target: SocketAddr = "198.51.100.7:6969".parse().unwrap();
-    let (socket, lease) = net.udp_socket(target).await.unwrap();
-    assert_eq!(socket.local_addr().unwrap().ip(), std::net::IpAddr::V4(v4));
-    assert!(lease.is_valid());
-    let v6: SocketAddr = "[2001:db8::1]:6969".parse().unwrap();
-    assert!(matches!(
-        net.udp_socket(v6).await,
-        Err(NetError::Ipv6Disabled)
-    ));
-    net.shutdown();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unsupported_proxy_udp_is_refused_without_fallback_and_the_kill_switch_blocks_udp() {
     let target: SocketAddr = "198.51.100.7:6969".parse().unwrap();
     let proxy = TestProxy::start(None).await.unwrap();
@@ -617,17 +609,9 @@ async fn unsupported_proxy_udp_is_refused_without_fallback_and_the_kill_switch_b
     ));
     net.shutdown();
 
-    let net = Network::start(
-        NetworkConfig {
-            mode: NetworkMode::BindInterface {
-                interface: "torrentplayer-test-no-such-interface".into(),
-            },
-            allow_ipv6: false,
-        },
-        fast_options(),
-    )
-    .await
-    .unwrap();
+    let net = Network::start(dead_proxy().await, fast_options())
+        .await
+        .unwrap();
     net.settled(Duration::from_secs(5)).await;
     assert!(matches!(
         net.udp_socket(target).await,
@@ -655,6 +639,7 @@ async fn socks_udp_uses_only_the_relay_and_dies_with_its_control_connection() {
             proxy_dht: true,
         }),
         allow_ipv6: false,
+        hold: None,
     };
     let net = Network::start(cfg, fast_options()).await.unwrap();
     assert!(net.settled(Duration::from_secs(3)).await.traffic_allowed);
@@ -713,6 +698,7 @@ async fn socks_udp_domain_targets_do_not_use_local_dns_and_old_leases_fail_close
                 proxy_dht: true,
             }),
             allow_ipv6: false,
+            hold: None,
         },
         fast_options(),
     )
@@ -975,6 +961,7 @@ async fn a_blocked_protected_mode_does_not_listen() {
         NetworkConfig {
             mode: NetworkMode::WireGuard(config),
             allow_ipv6: false,
+            hold: None,
         },
         fast_options(),
     )
@@ -985,18 +972,13 @@ async fn a_blocked_protected_mode_does_not_listen() {
     net.set_incoming(incoming(port));
     wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Paused { .. })).await;
     assert!(!accepts_on_loopback(port).await);
-    // The same holds for a missing VPN interface.
+    // The same holds for Direct mode while traffic is held.
     net.apply(NetworkConfig {
-        mode: NetworkMode::BindInterface {
-            interface: "torrentplayer-test-no-such-interface".into(),
-        },
-        allow_ipv6: false,
+        hold: Some("confirm the network settings first".into()),
+        ..NetworkConfig::default()
     })
     .unwrap();
-    wait_for_state(&net, |s| {
-        matches!(s, ConnectionState::KillSwitchActive { .. })
-    })
-    .await;
+    wait_for_state(&net, |s| matches!(s, ConnectionState::Error { .. })).await;
     wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Paused { .. })).await;
     assert!(!accepts_on_loopback(port).await);
     net.shutdown();

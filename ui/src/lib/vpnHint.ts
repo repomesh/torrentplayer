@@ -20,14 +20,17 @@ import {
 
 /** One sentence. It recommends privacy, and says nothing about what is legal. */
 export const VPN_HINT =
-  'In a swarm every peer and tracker sees your IP address, so a VPN is recommended when downloading or seeding, for example Windscribe through its app (VPN mode) or with a WireGuard configuration (WireGuard mode).';
+  "In a swarm every peer and tracker sees your IP address, so a VPN is recommended when downloading or seeding: connect your VPN app (for example Windscribe) first, or use the WireGuard mode with your provider's WireGuard configuration.";
 
 /** The blog post on VPNs for torrenting. */
 export const VPN_POST_URL = 'https://torrentplayer.io/blog/vpn-for-torrenting/';
 
-/** Whether the note applies: Direct mode, and not dismissed. */
-export function showVpnHint(mode: NetworkMode, dismissed: boolean): boolean {
-  return mode === 'direct' && !dismissed;
+/**
+ * Whether the note applies: Direct mode, and not dismissed. Not while the notice about the removed
+ * VPN adapter mode (`removedMode`, see `src/lib/removedMode.ts`) is shown, which says the same.
+ */
+export function showVpnHint(mode: NetworkMode, dismissed: boolean, removedMode = false): boolean {
+  return mode === 'direct' && !dismissed && !removedMode;
 }
 
 /** Opens the blog post in the system browser. */

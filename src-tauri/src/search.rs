@@ -39,7 +39,7 @@ const PROGRESS_INTERVAL: Duration = Duration::from_millis(150);
 #[derive(Debug)]
 pub(crate) struct SearchState {
     provider: OnceCell<EmberglowProvider>,
-    /// Search requests go through the network manager (VPN interface, proxy, kill switch).
+    /// Search requests go through the network manager (proxy, WireGuard tunnel, kill switch).
     network: torrentplayer_net::Network,
     /// One progressive search at a time: a new one stops the one running.
     searches: Latest,

@@ -48,7 +48,6 @@
     "allow-choose-download-dir",
     "allow-network-status",
     "allow-recheck-network",
-    "allow-list-interfaces",
     "allow-validate-wireguard-config",
     "allow-import-wireguard-config",
     "allow-check-connection",

@@ -42,7 +42,7 @@ a generic message).
 | `metadata-timeout`    | A magnet link's metadata could not be found in time (likely no peers).                                         |
 | `engine`              | The torrent engine failed; details are in the log.                                                             |
 | `search-unavailable`  | The search service is rate limiting, down, timed out, or sent an unreadable response; retrying later may help. |
-| `kill-switch`         | The selected VPN interface, proxy, or tunnel is not working, so the request was blocked; nothing was sent.     |
+| `kill-switch`         | The selected proxy or tunnel is not working, or traffic is held, so the request was blocked; nothing was sent. |
 | `network-unavailable` | A network request (such as the connection check) failed.                                                       |
 | `cancelled`           | The request was cancelled: a search replaced by a newer one or stopped with `cancel_search`. Show nothing.     |
 | `audio-conversion`    | The audio could not be converted for the built-in player; details are in the log.                              |
@@ -927,19 +927,20 @@ file-system permission.
 
 ### Network
 
-VPN interface binding, SOCKS5, the kill switch, and the built-in WireGuard tunnel; see
+Direct, SOCKS5, the kill switch, and the built-in WireGuard tunnel; see
 [Network modes and kill switch](network.md). **Network settings are applied by saving them:**
 the backend follows every `update_settings`, `set_secret`, and `clear_secret` (there is no apply
 command). A Settings page saves the network section, then shows `network-status` events or
-calls `network_status`. A protected mode with incomplete settings (no host, no interface, a
-username without a stored password) is reported as state `error` with a reason, and blocks
-traffic.
+calls `network_status`. A protected mode with incomplete settings (no host, no WireGuard
+configuration, a username without a stored password) is reported as state `error` with a
+reason, and blocks traffic. So is Direct mode while `network.vpnAdapterModeRemoved` is set
+(settings migrated from the removed VPN adapter mode): traffic is held until
+`update_settings` clears it (see [Network](network.md#using-a-vpn-app)).
 
 #### `network_status`
 
-The mode, connection state, endpoint (proxy `host:port`, interface name, or WireGuard endpoint;
-never secrets), whether traffic, UDP, and trackers are allowed, whether the kill switch is
-engaged, the bound interface and addresses, the time of the last check, while connected the time
+The mode, connection state, endpoint (proxy `host:port` or WireGuard endpoint; never secrets), whether traffic, UDP, and
+trackers are allowed, whether the kill switch is engaged, the time of the last check, while connected the time
 it connected (`connectedSinceMs`, for the uptime), the last 50 events (oldest first), and
 `incoming`: whether incoming peer connections are accepted (`kind` `off`, `idle`, `paused`,
 `unsupported`, `failed` with a `reason`, or `listening` with `port`, `addresses`, and `upnp`;
@@ -956,7 +957,7 @@ carry a `reason`.
 
 #### `recheck_network`
 
-Checks the interface or proxy now instead of at the next 5-second interval (a "Try again" button
+Checks the proxy or WireGuard tunnel now instead of at the next 5-second interval (a "Try again" button
 while the kill switch is engaged), waits up to 6 s for the result, and returns the status.
 
 |            |                                                            |
@@ -965,19 +966,6 @@ while the kill switch is engaged), waits up to 6 s for the result, and returns t
 | Returns    | [`NetworkStatus`](../ui/src/lib/bindings/NetworkStatus.ts) |
 | Errors     | none                                                       |
 | Permission | `allow-recheck-network`                                    |
-
-#### `list_interfaces`
-
-The machine's network interfaces for the "VPN adapter" picker: `name` (the value to save
-in `network.interface`; adapter friendly names on Windows), `addresses`, `isUp`, `isLoopback`,
-and `likelyVpn` (point-to-point, or a name such as `wg0`, `tun0`, or one containing "VPN").
-
-|            |                                                                    |
-| ---------- | ------------------------------------------------------------------ |
-| Arguments  | none                                                               |
-| Returns    | [`NetworkInterface[]`](../ui/src/lib/bindings/NetworkInterface.ts) |
-| Errors     | `internal` if the operating system cannot list interfaces          |
-| Permission | `allow-list-interfaces`                                            |
 
 #### `validate_wireguard_config`
 

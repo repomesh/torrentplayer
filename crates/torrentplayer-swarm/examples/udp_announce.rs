@@ -1,35 +1,45 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 //! Announces to UDP trackers through TorrentPlayer's network manager, to check that UDP trackers work
-//! in a mode (for example bound to a VPN interface).
+//! in a mode (direct, or through a SOCKS5 proxy).
 //!
-//! `cargo run -p torrentplayer-swarm --example udp_announce -- <interface|direct> <info-hash-hex> <udp-url>...`
+//! `cargo run -p torrentplayer-swarm --example udp_announce -- <direct|proxy-host:port> <info-hash-hex> <udp-url>...`
 
 // A diagnostic tool: printing is the point.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use std::time::Duration;
 
-use torrentplayer_net::{Network, NetworkConfig, NetworkMode, NetworkOptions};
+use torrentplayer_net::{Network, NetworkConfig, NetworkMode, NetworkOptions, Socks5Config};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let [mode, hash, trackers @ ..] = args.as_slice() else {
-        eprintln!("usage: udp_announce <interface|direct> <info-hash-hex> <udp-url>...");
+        eprintln!("usage: udp_announce <direct|proxy-host:port> <info-hash-hex> <udp-url>...");
         return Ok(());
     };
     let mode = if mode == "direct" {
         NetworkMode::Direct
     } else {
-        NetworkMode::BindInterface {
-            interface: mode.clone(),
-        }
+        let (host, port) = mode
+            .rsplit_once(':')
+            .ok_or("expected direct or host:port")?;
+        NetworkMode::Socks5(Socks5Config {
+            host: host.to_owned(),
+            port: port.parse()?,
+            username: None,
+            password: None,
+            remote_dns: true,
+            proxy_trackers: true,
+            proxy_dht: true,
+        })
     };
     let net = Network::start(
         NetworkConfig {
             mode,
             allow_ipv6: false,
+            hold: None,
         },
         NetworkOptions::default(),
     )

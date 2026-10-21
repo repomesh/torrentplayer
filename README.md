@@ -33,7 +33,7 @@
 <p align="center">
   <a href="assets/demo/torrentplayer-demo.mp4"><img src="assets/demo/torrentplayer-demo.gif" alt="Demo: searching for Sintel, pressing Play on the best pick, and clicking around the seek bar; playback starts in half a second and each skip plays again within about a second, while the queue downloads in the background" width="720"></a>
   <br>
-  <sub>Search, play, skip. Recorded live in real time; nothing is sped up. <a href="assets/demo/torrentplayer-demo.mp4">Full demo with sound (MP4, 33 s)</a>.<br>
+  <sub>Search, play, skip. Recorded live in real time; nothing is sped up. <a href="assets/demo/torrentplayer-demo.mp4">Full demo with sound (MP4, 35 s)</a>.<br>
   <em>Sintel</em> and <em>Tears of Steel</em> © Blender Foundation, CC BY 3.0.</sub>
 </p>
 
@@ -72,9 +72,8 @@ share what you play.
   nothing but the swarm.)
 - **None of the usual limits.** No subscription, ads, watch-time limits, quality caps, storage
   quotas, or speed tiers. Watch at the quality the file has, for as long as you like.
-- **Private by design.** No telemetry, analytics, or crash reporting. Built-in WireGuard, VPN
-  adapter binding, and SOCKS5, with a kill switch that never falls back to a direct
-  connection.
+- **Private by design.** No telemetry, analytics, or crash reporting. Built-in WireGuard and SOCKS5,
+  with a kill switch that never falls back to a direct connection, or your own VPN app.
 - **Free and open source,** every part of it, including the streaming engine. MIT or
   Apache-2.0, your choice.
 
@@ -161,9 +160,9 @@ sources, details, and where other tools are the better fit.
 
 ### Network and privacy controls
 
-- **Four connection modes:** direct; bound to the adapter of your VPN provider's app (connect
-  with the app first, OpenVPN-based apps included); a **built-in WireGuard tunnel** that runs inside the app with
-  no administrator rights or separate VPN app; or a SOCKS5 proxy.
+- **Three connection modes:** direct (with your VPN provider's app connected, OpenVPN-based
+  apps included, traffic goes through it); a **built-in WireGuard tunnel** that runs inside the
+  app with no administrator rights or separate VPN app; or a SOCKS5 proxy.
 - **Kill switch in every protected mode.** If the VPN or proxy drops, all traffic stops and open
   connections close. Nothing falls back to your direct connection, and traffic resumes by
   itself when the tunnel is back.

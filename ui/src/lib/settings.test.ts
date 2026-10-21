@@ -251,7 +251,6 @@ describe('IPC wrappers', () => {
     invoke.mockResolvedValue(undefined);
     await ipc.networkStatus();
     await ipc.recheckNetwork();
-    await ipc.listInterfaces();
     await ipc.checkConnection();
     await ipc.publicIp();
     await ipc.validateWireGuardConfig('[Interface]');
@@ -259,7 +258,6 @@ describe('IPC wrappers', () => {
     expect(invoke.mock.calls).toEqual([
       ['network_status'],
       ['recheck_network'],
-      ['list_interfaces'],
       ['check_connection'],
       ['public_ip'],
       ['validate_wireguard_config', { text: '[Interface]' }],

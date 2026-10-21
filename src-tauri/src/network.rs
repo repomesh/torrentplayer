@@ -18,8 +18,8 @@ use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::watch;
 use torrentplayer_net::wireguard::{WgInterface, WgPeer};
 use torrentplayer_net::{
-    IncomingConfig, InterfaceInfo, NetError, Network, NetworkConfig, NetworkMode, NetworkOptions,
-    NetworkStatus, PublicIp, Secret, Socks5Config, WireGuardConfig, WireGuardSummary,
+    IncomingConfig, NetError, Network, NetworkConfig, NetworkMode, NetworkOptions, NetworkStatus,
+    PublicIp, Secret, Socks5Config, WireGuardConfig, WireGuardSummary,
 };
 use torrentplayer_settings::{
     ExposeSecret as _, Ipv6Policy, NetworkSettings, SecretError, SecretKey, SecretStatus,
@@ -44,6 +44,10 @@ const PUBLIC_IP_EVERY: Duration = Duration::from_secs(10 * 60);
 const PUBLIC_IP_GAP: Duration = Duration::from_secs(5);
 /// Give up on one check after this long.
 const PUBLIC_IP_TIMEOUT: Duration = Duration::from_secs(25);
+/// Why traffic is held after settings that used the removed VPN adapter mode were moved to
+/// Direct, until the user confirms (see [`config_from_settings`]).
+pub(crate) const VPN_ADAPTER_HOLD: &str =
+    "the VPN adapter mode was removed; confirm the change in Settings → Network";
 
 /// Managed state: the network manager.
 #[derive(Clone)]
@@ -236,9 +240,13 @@ pub(crate) fn incoming_from_settings(settings: &NetworkSettings) -> IncomingConf
 }
 
 /// The network configuration for `settings`, with the proxy password read from the credential
-/// store. Settings that cannot work (a missing host or interface, a username without its
-/// password) still select their mode, which then blocks traffic and says why: TorrentPlayer never falls
-/// back to a direct connection.
+/// store. Settings that cannot work (a missing host, a username without its password) still
+/// select their mode, which then blocks traffic and says why: TorrentPlayer never falls back to a
+/// direct connection.
+///
+/// Settings moved from the removed VPN adapter mode to Direct hold all traffic
+/// ([`VPN_ADAPTER_HOLD`]) until the user dismisses the notice or picks another mode: the user
+/// chose to send nothing outside their VPN, so nothing is sent before they confirm the change.
 ///
 /// There is no kill-switch setting: every mode except direct always fails closed. `proxy_dht`
 /// controls DHT through SOCKS5 UDP ASSOCIATE, without a direct fallback. `encryption` is not
@@ -249,9 +257,6 @@ pub(crate) fn config_from_settings(
 ) -> NetworkConfig {
     let mode = match settings.mode {
         torrentplayer_settings::NetworkMode::Direct => NetworkMode::Direct,
-        torrentplayer_settings::NetworkMode::BindInterface => NetworkMode::BindInterface {
-            interface: settings.interface.clone().unwrap_or_default(),
-        },
         torrentplayer_settings::NetworkMode::Socks5 => {
             let s = &settings.socks5;
             let username = s.username.clone().filter(|u| !u.is_empty());
@@ -272,9 +277,12 @@ pub(crate) fn config_from_settings(
             NetworkMode::WireGuard(wireguard(&settings.wireguard, secrets))
         }
     };
+    let hold = (settings.vpn_adapter_mode_removed && mode == NetworkMode::Direct)
+        .then(|| VPN_ADAPTER_HOLD.to_owned());
     NetworkConfig {
         mode,
         allow_ipv6: settings.ipv6 == Ipv6Policy::Tunnel,
+        hold,
     }
 }
 
@@ -341,7 +349,7 @@ pub(crate) fn network_status(state: State<'_, NetworkState>) -> NetworkStatus {
     state.network.status()
 }
 
-/// Checks the VPN interface or proxy again now instead of at the next interval (for a "Try
+/// Checks the proxy or WireGuard tunnel again now instead of at the next interval (for a "Try
 /// again" button while the kill switch is engaged), and returns the status after the check.
 #[tauri::command]
 pub(crate) async fn recheck_network(
@@ -352,15 +360,6 @@ pub(crate) async fn recheck_network(
     state.network.recheck();
     let _ = tokio::time::timeout(RECHECK_WAIT, changes.changed()).await;
     Ok(state.network.status())
-}
-
-/// The machine's network interfaces, for choosing the one to bind to.
-#[tauri::command]
-pub(crate) async fn list_interfaces() -> Result<Vec<InterfaceInfo>, IpcError> {
-    tauri::async_runtime::spawn_blocking(torrentplayer_net::list_interfaces)
-        .await
-        .map_err(|e| IpcError::internal(&e))?
-        .map_err(|e| IpcError::internal(&e))
 }
 
 /// Parses and checks the text of a WireGuard configuration file, returning what it contains
@@ -547,25 +546,17 @@ mod tests {
         let direct = config_from_settings(&NetworkSettings::default(), &store);
         assert_eq!(direct, NetworkConfig::default());
 
-        let mut bind = NetworkSettings {
-            mode: torrentplayer_settings::NetworkMode::BindInterface,
-            interface: Some("wg0".into()),
+        let socks = NetworkSettings {
+            mode: torrentplayer_settings::NetworkMode::Socks5,
             ipv6: Ipv6Policy::Tunnel,
             ..NetworkSettings::default()
         };
-        let config = config_from_settings(&bind, &store);
-        assert_eq!(
-            config.mode,
-            NetworkMode::BindInterface {
-                interface: "wg0".into()
-            }
-        );
+        let config = config_from_settings(&socks, &store);
+        assert!(matches!(config.mode, NetworkMode::Socks5(_)));
         assert!(config.allow_ipv6);
-        bind.interface = None;
-        let config = config_from_settings(&bind, &store);
         assert!(
             config.mode.validate().is_err(),
-            "no interface blocks traffic"
+            "no proxy host blocks traffic"
         );
 
         let mut wg = NetworkSettings {
@@ -578,6 +569,34 @@ mod tests {
         assert_eq!(
             config.mode.endpoint().as_deref(),
             Some("198.51.100.1:51820")
+        );
+    }
+
+    #[test]
+    fn the_removed_vpn_adapter_mode_holds_direct_traffic_until_confirmed() {
+        let store = MemoryStore::new();
+        let mut migrated = NetworkSettings {
+            vpn_adapter_mode_removed: true,
+            ..NetworkSettings::default()
+        };
+        let config = config_from_settings(&migrated, &store);
+        assert_eq!(config.mode, NetworkMode::Direct);
+        assert_eq!(config.hold.as_deref(), Some(VPN_ADAPTER_HOLD));
+        assert!(
+            config.is_protected(),
+            "held like a mode behind the kill switch"
+        );
+
+        // Another mode has its own kill switch, so it does not need the hold.
+        migrated.mode = torrentplayer_settings::NetworkMode::WireGuard;
+        assert_eq!(config_from_settings(&migrated, &store).hold, None);
+
+        // Dismissing the notice lets Direct connect.
+        migrated.mode = torrentplayer_settings::NetworkMode::Direct;
+        migrated.vpn_adapter_mode_removed = false;
+        assert_eq!(
+            config_from_settings(&migrated, &store),
+            NetworkConfig::default()
         );
     }
 

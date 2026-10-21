@@ -164,7 +164,7 @@ mod tests {
         );
         let big = "x".repeat(MAX_PATCH_BYTES);
         assert_eq!(
-            apply_patch(&s, &json!({"network": {"interface": big}})),
+            apply_patch(&s, &json!({"network": {"socks5": {"host": big}}})),
             Err(PatchError::TooLarge)
         );
     }

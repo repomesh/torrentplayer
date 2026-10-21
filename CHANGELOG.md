@@ -7,32 +7,35 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
 ### Changed
 
-- The VPN mode no longer lists OpenVPN as if it were built in: connect with your VPN
-  provider's app first (OpenVPN-based apps included), then pick its adapter.
 - TorrentStream is now TorrentPlayer (torrentplayer.io, `github.com/torrentplayer/torrentplayer`).
   The app identifier is `io.torrentplayer.desktop` and the binary `TorrentPlayer`. Settings, the
-  queue, the download cache, the default `DownloadsTorrentStream` folder, and stored secrets
+  queue, the download cache, the default `Downloads/TorrentStream` folder, and stored secrets
   move to the new names at start-up. The `LUMEN_*` environment variables are now
   `TORRENTPLAYER_*`, and the crates are named `torrentplayer-*`.
+- New app icon: a play button ringed by swarm peers.
 
 ### Added
 
 - Incoming peer connections can be turned on in Settings → VPN and network, on a chosen or
   random port, for more peers and better uploads (off by default, so there is still no firewall
   prompt unless chosen). TorrentPlayer listens only where the network mode allows: every
-  interface in direct mode (with optional UPnP port mapping), only the VPN adapter when bound to
-  one, and only inside the tunnel with WireGuard; never through a SOCKS5 proxy, and never while
+  interface in direct mode (with optional UPnP port mapping) and only inside the tunnel with
+  WireGuard; never through a SOCKS5 proxy, and never while
   the kill switch blocks traffic. Settings shows whether it is listening.
-- Both engines keep their DHT routing tables in the app data folder between runs (Direct mode
-  only), so magnet links find peers sooner after a restart. Protected modes still start with a
-  fresh node and save nothing.
+- torrentplayer-swarm keeps its DHT routing tables in the app data folder between runs (Direct
+  mode only), so magnet links find peers sooner after a restart. Protected modes still start
+  with a fresh node and save nothing. librqbit starts from the bootstrap servers each time: from
+  a saved table it fetched magnet metadata more slowly, not faster.
 - In Direct mode, Settings → Network and the status bar recommend a VPN when downloading or
-  seeding (for example Windscribe, through its app or a WireGuard configuration), with a link
+  seeding (connect a VPN app such as Windscribe first, or use the WireGuard mode with your
+  provider's WireGuard configuration), with a link
   to the blog post on VPNs; it is shown once more when seeding starts, until dismissed
   (`network.vpnHintDismissed`).
-- DHT peer discovery now uses bound VPN sockets and the built-in WireGuard tunnel. SOCKS5
+- DHT peer discovery now runs inside the built-in WireGuard tunnel. SOCKS5
   proxies with UDP ASSOCIATE support carry DHT and UDP trackers, including magnet metadata
   discovery, without falling back to direct UDP or target DNS.
 - torrentplayer-swarm now uploads verified pieces with cancellable, bounded reads, reports per-torrent
@@ -52,6 +55,37 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Videos with Dolby (AC-3, E-AC-3, TrueHD) or DTS audio now play with sound: a bundled,
   playback-only LGPL FFmpeg converts the audio to AAC as the video plays, copying the video, and
   the player keeps the full seek bar and restarts the conversion on far seeks.
+- `torrentplayer-bench` measures streaming with incoming peers only (`local --inbound`), how
+  closely an engine holds a download limit that changes mid-transfer (`limit`), and start-up
+  from a saved DHT state (`--dht-state`, `--no-trackers`). See `docs/performance.md`.
+
+### Removed
+
+- The VPN adapter network mode (binding all traffic to a VPN app's network adapter, saved as
+  `bindInterface`) and its adapter picker. The modes are now Direct, SOCKS5 proxy, and built-in
+  WireGuard: keep a VPN app connected at the system level and choose Direct, or import your
+  provider's WireGuard configuration for a kill switch inside TorrentPlayer (see
+  [ADR 0009](docs/adr/0009-remove-vpn-adapter-mode.md)). Saved settings that used it load as
+  Direct, and TorrentPlayer pauses all torrent traffic and searches until you dismiss the notice
+  in Settings → Network or beside the status bar's network indicator (or choose SOCKS5 or
+  WireGuard), so nothing is sent outside your VPN without your confirmation. Settings files are
+  now version 4.
+
+### Fixed
+
+- A skipped queue item no longer says "Skipped" twice; its second line shows how much of it is
+  already downloaded, if any.
+- The download speed shown for torrentplayer-swarm torrents no longer runs up to a quarter
+  above the real rate while peers come and go (as they do under a download limit), so the
+  queue's "in use" figure stays within the configured limit.
+- Changing the download limit while torrentplayer-swarm downloads from many peers is now
+  smooth. Lowering it used to let every waiting peer through at once (about 1.5 MB within
+  0.2 s with 40 peers) and then deliver nothing for over a second, which could stall playback;
+  waits now stretch or shrink to the new limit, and under a limit each peer is read one block
+  at a time so no peer waits long for its turn.
+- Under a download limit, torrentplayer-swarm no longer asks many peers for more than the limit
+  lets through before requests time out. Those requests were fetched twice, so with 40 peers
+  up to a third of the limited bandwidth went to data that was thrown away.
 
 ### Fixed
 
@@ -304,6 +338,7 @@ The first public preview: stream any torrent, video or audio, and skip to any mo
   never unmuted. It now mutes only when the autoplay policy refuses sound, then shows a "click
   to unmute" button. Interruptions are retried with the sound unchanged.
 
-[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/torrentplayer/torrentplayer/releases/tag/v0.1.0

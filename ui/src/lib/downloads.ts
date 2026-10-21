@@ -100,7 +100,10 @@ export function describeDownload(d: ItemDownload): string | null {
       }
       break;
     case 'skipped':
-      parts.push('Skipped');
+      // The row already says Skipped; say only what is kept.
+      if (pct !== null && d.downloaded > 0) {
+        parts.push(`${pct} downloaded`);
+      }
       break;
     case 'paused':
       parts.push('Paused');

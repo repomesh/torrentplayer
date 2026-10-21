@@ -50,7 +50,8 @@ pub struct EngineConfig {
     /// Use the BitTorrent DHT to find peers (needed for most magnet links).
     pub enable_dht: bool,
     /// Where the DHT's routing tables and port are kept between runs (direct mode only).
-    /// `None` starts from the bootstrap nodes every time.
+    /// `None` starts from the bootstrap nodes every time. The app sets none: a restored table
+    /// slowed magnet metadata (see `StreamEngineConfig::dht_state_dir`).
     pub dht_state_file: Option<PathBuf>,
     /// Announce to trackers listed in torrents.
     pub enable_trackers: bool,
@@ -71,7 +72,7 @@ pub struct EngineConfig {
     pub download_limit_bps: Option<NonZeroU32>,
     /// Maximum upload rate in bytes per second, if limited.
     pub upload_limit_bps: Option<NonZeroU32>,
-    /// TorrentPlayer's network manager. If a protected mode (VPN interface, proxy, or tunnel) is
+    /// TorrentPlayer's network manager. If a protected mode (proxy or tunnel) is
     /// selected when the session starts, the session gets no DHT, no listening socket, no local
     /// discovery, and no UDP trackers, and reaches peers and trackers only through the network's
     /// loopback bridge. `None` connects directly.

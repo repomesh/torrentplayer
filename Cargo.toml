@@ -4,7 +4,7 @@ members = ["crates/*", "src-tauri"]
 exclude = ["vendor/librqbit-dht", "vendor/tokio-wireguard"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -40,7 +40,6 @@ http = "1.3"
 http-body-util = "0.1.3"
 hyper = { version = "1.7", features = ["server", "http1"] }
 hyper-util = { version = "0.1.17", features = ["tokio"] }
-if-addrs = "0.15"
 # OS credential stores (Windows Credential Manager, macOS Keychain, Linux Secret Service) for
 # proxy passwords and WireGuard keys; the `v1` feature selects the platform store.
 keyring = "4.2"

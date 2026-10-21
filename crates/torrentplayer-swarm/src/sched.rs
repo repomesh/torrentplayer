@@ -228,6 +228,15 @@ const RATE_WINDOW: Duration = Duration::from_millis(100);
 /// Time constant of the rate average.
 const RATE_TAU: f64 = 0.5;
 
+/// Blocks a peer delivering `rate` bytes per second sends in `time` (rounded up).
+fn blocks_for(rate: f64, time: Duration) -> usize {
+    let blocks = rate * time.as_secs_f64() / f64::from(BLOCK_LEN);
+    // Saturating float-to-int conversion; callers clamp it.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let blocks = blocks.ceil() as usize;
+    blocks
+}
+
 /// Exponentially weighted download rate, weighted by time rather than by sample count.
 #[derive(Debug, Default, Clone, Copy)]
 struct Rate {
@@ -248,7 +257,8 @@ impl Rate {
         self.bytes_since += bytes;
     }
 
-    /// Folds in the bytes received over `elapsed` (at least [`RATE_WINDOW`]).
+    /// Folds in the bytes received over `elapsed` (at least [`RATE_WINDOW`]). The first
+    /// sample with data is taken whole, so a new peer's queue follows its rate at once.
     fn update(&mut self, elapsed: Duration) {
         let secs = elapsed.as_secs_f64();
         if secs <= 0.0 {
@@ -343,6 +353,14 @@ pub(crate) struct Scheduler {
     /// Interests in their critical phase.
     critical_interests: HashSet<InterestId>,
     last_rate_update: Option<Instant>,
+    /// The download limit in force for this torrent (bytes per second), if any; see
+    /// [`Scheduler::set_rate_limit`].
+    rate_limit: Option<f64>,
+    /// The whole torrent's download rate, for [`SchedStats::download_bps`]. Not the sum of the
+    /// peers' rates: a peer's first sample is taken whole (see [`Rate::update`]) and a
+    /// departing peer takes its average with it, so that sum overstates the rate whenever
+    /// peers come and go, as they do while a download limit holds them back.
+    total_rate: Rate,
     duplicate_requests: u64,
     cancelled_requests: u64,
     wasted_bytes: u64,
@@ -373,6 +391,11 @@ impl Scheduler {
             interests: HashMap::new(),
             critical_interests: HashSet::new(),
             last_rate_update: None,
+            rate_limit: None,
+            total_rate: Rate {
+                measured: true,
+                ..Rate::default()
+            },
             duplicate_requests: 0,
             cancelled_requests: 0,
             wasted_bytes: 0,
@@ -402,7 +425,7 @@ impl Scheduler {
             wasted_bytes: self.wasted_bytes,
             peers: self.peers.len(),
             unchoked: self.peers.values().filter(|p| !p.choked).count(),
-            download_bps: self.peers.values().map(|p| p.rate.bytes_per_sec).sum(),
+            download_bps: self.total_rate.bytes_per_sec,
             have_pieces: self.have_count,
             outstanding: self.peers.values().map(|p| p.outstanding.len()).sum(),
         }
@@ -421,8 +444,22 @@ impl Scheduler {
     /// Queue length (blocks) to keep outstanding for a peer.
     fn target_queue(&self, peer: &Peer) -> usize {
         let max = self.cfg.max_queue.max(self.cfg.min_queue);
+        // Under a download limit a peer gets at most its share of it.
+        let share = self.rate_limit.map(|limit| {
+            let sharing = self.peers.values().filter(|p| !p.choked).count().max(1);
+            #[allow(clippy::cast_precision_loss)]
+            let share = limit / sharing as f64;
+            share
+        });
         if !peer.rate.measured {
-            return self.cfg.initial_queue.clamp(self.cfg.min_queue, max);
+            // Many new peers with full initial queues would otherwise hold requests for longer
+            // than the limit lets through before they time out.
+            let initial = share.map_or(self.cfg.initial_queue, |share| {
+                self.cfg
+                    .initial_queue
+                    .min(blocks_for(share, self.cfg.queue_time))
+            });
+            return initial.clamp(self.cfg.min_queue, max);
         }
         let relaxed = self.relaxed();
         let configured = if relaxed {
@@ -435,15 +472,12 @@ impl Scheduler {
         } else {
             peer.rate.bytes_per_sec.max(peer.rate.peak)
         };
+        let rate = share.map_or(rate, |share| rate.min(share));
         // Never less than a couple of round trips, or the peer idles between requests.
         let queue_time = peer
             .base_rtt
             .map_or(configured, |rtt| configured.max(rtt.mul_f64(QUEUE_RTTS)));
-        let by_rate = rate * queue_time.as_secs_f64() / f64::from(BLOCK_LEN);
-        // Saturating float-to-int conversion; clamped below.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let by_rate = by_rate.ceil() as usize;
-        by_rate.clamp(self.cfg.min_queue, max)
+        blocks_for(rate, queue_time).clamp(self.cfg.min_queue, max)
     }
 
     /// Whether nothing is needed soon: not in the critical phase, and no missing piece is due
@@ -1160,6 +1194,7 @@ impl Scheduler {
         let mut outcome = BlockOutcome::default();
         if let Some(peer) = self.peers.get_mut(&key) {
             peer.rate.add(data.len() as u64);
+            self.total_rate.add(data.len() as u64);
             peer.last_progress = Some(now);
         }
         if !begin.is_multiple_of(BLOCK_LEN) || piece >= self.meta.piece_count() {
@@ -1277,6 +1312,13 @@ impl Scheduler {
             .collect()
     }
 
+    /// Sets the download limit in force (bytes per second), so request queues fit it: under a
+    /// limit the peers share it, and queues sized from each peer's own (bursty) rate would
+    /// together hold requests for many seconds, which then time out and are fetched twice.
+    pub(crate) fn set_rate_limit(&mut self, bytes_per_sec: Option<f64>) {
+        self.rate_limit = bytes_per_sec;
+    }
+
     // ----- Time --------------------------------------------------------------------------
 
     /// Updates rates, gives up on timed-out requests (returned as cancels), and periodically
@@ -1292,6 +1334,7 @@ impl Scheduler {
                 for peer in self.peers.values_mut() {
                     peer.rate.update(elapsed);
                 }
+                self.total_rate.update(elapsed);
                 if tracing::enabled!(tracing::Level::TRACE) {
                     for (key, peer) in &self.peers {
                         tracing::trace!(
@@ -1461,6 +1504,37 @@ mod tests {
     }
 
     #[test]
+    fn the_download_rate_counts_what_arrives_while_peers_come_and_go() {
+        // As under a download limit: peers keep joining, each delivers a burst, then leaves.
+        let mut s = sched(1000, SchedulerConfig::default());
+        let t0 = Instant::now();
+        let step = Duration::from_millis(100);
+        s.tick(t0, true);
+        let (mut delivered, mut reported) = (0u64, 0.0);
+        for i in 1..=300u32 {
+            let key = PeerKey::from(i / 10);
+            if i % 10 == 1 && i < 200 {
+                s.add_peer(key);
+                for block in 0..4 {
+                    s.on_block_at(key, i, block * BLOCK_LEN, &[0; BLOCK_LEN as usize], t0);
+                    delivered += u64::from(BLOCK_LEN);
+                }
+            }
+            if i % 10 == 5 {
+                s.remove_peer(key);
+            }
+            s.tick(t0 + step * i, false);
+            reported += s.stats().download_bps * step.as_secs_f64();
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let ratio = reported / delivered as f64;
+        assert!(
+            (0.95..=1.0).contains(&ratio),
+            "reported {ratio:.2}× what arrived"
+        );
+    }
+
+    #[test]
     fn queues_start_at_the_initial_size_then_follow_the_measured_rate() {
         let mut s = sched(
             1000,
@@ -1500,6 +1574,43 @@ mod tests {
             4,
             "never below min_queue once measured"
         );
+    }
+
+    #[test]
+    fn under_a_download_limit_queues_fit_each_peers_share() {
+        let mut s = sched(
+            1000,
+            SchedulerConfig {
+                relaxed_queue_time: Duration::from_millis(500),
+                ..SchedulerConfig::default()
+            },
+        );
+        s.want_range(0, s.meta.total_len);
+        s.tick(Instant::now(), true);
+        for key in 1..=40 {
+            seed(&mut s, key);
+        }
+        // 40 peers sharing 2 MiB/s: about 51 KiB/s each, 2 blocks in the 0.5 s queue time, so
+        // the minimum queue of 4 applies from the start instead of the initial 32. With 32
+        // each, 20 MiB would be outstanding: ten seconds at the limit, past the request
+        // timeout, and every late block would be fetched twice.
+        assert_eq!(s.target_queue(&s.peers[&1]), 32, "no limit");
+        s.set_rate_limit(Some(2.0 * 1024.0 * 1024.0));
+        assert_eq!(
+            s.target_queue(&s.peers[&1]),
+            4,
+            "initial queue under a limit"
+        );
+        // A measured peer bursting at 4 MiB/s still gets only its share.
+        s.peers.get_mut(&1).unwrap().rate.add(4 * MIB);
+        s.tick(Instant::now() + Duration::from_secs(1), false);
+        assert_eq!(
+            s.target_queue(&s.peers[&1]),
+            4,
+            "measured queue under a limit"
+        );
+        s.set_rate_limit(None);
+        assert_eq!(s.target_queue(&s.peers[&1]), 128, "the limit lifted");
     }
 
     #[test]

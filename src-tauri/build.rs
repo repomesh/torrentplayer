@@ -51,7 +51,6 @@ fn main() {
             "choose_download_dir",
             "network_status",
             "recheck_network",
-            "list_interfaces",
             "validate_wireguard_config",
             "import_wireguard_config",
             "check_connection",
