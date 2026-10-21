@@ -73,6 +73,8 @@ describe('download status', () => {
     );
     expect(describeDownload(d({ state: 'connecting', peersSeen: 0 }))).toBe('Finding peers… · 37%');
     expect(describeDownload(d({ state: 'complete' }))).toBe('Downloaded');
+    expect(describeDownload(d({ state: 'skipped' }))).toBe('37% downloaded');
+    expect(describeDownload(d({ state: 'skipped', downloaded: 0 }))).toBeNull();
     expect(describeDownload(d({ state: 'failed', error: 'No peers.' }))).toBe(
       'No peers. Trying again soon.',
     );
