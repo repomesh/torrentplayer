@@ -5,7 +5,7 @@ TorrentPlayer is a community project. This document describes how decisions are 
 ## Roles
 
 - **Users** use TorrentPlayer and give feedback through issues and the
-  [Discord server](https://discord.gg/fVkWSZAafp).
+  [Discord server](https://discord.gg/SNsKPAu7pT).
 - **Contributors** submit issues, documentation, code, reviews, or designs. Anyone can be a
   contributor.
 - **Maintainers** (listed in [MAINTAINERS.md](MAINTAINERS.md)) have write access. They review

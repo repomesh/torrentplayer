@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/app-icon.png" alt="TorrentPlayer logo: a warm ring of light" width="128" height="128">
+  <img src="assets/app-icon.png" alt="TorrentPlayer logo: a play button ringed by swarm peers" width="128" height="128">
 </p>
 
 <h1 align="center">TorrentPlayer</h1>
@@ -18,7 +18,7 @@
   <a href="#performance">Performance</a> ·
   <a href="#privacy">Privacy</a> ·
   <a href="#get-torrentplayer">Get it</a> ·
-  <a href="https://discord.gg/fVkWSZAafp">Discord</a>
+  <a href="https://discord.gg/SNsKPAu7pT">Discord</a>
 </p>
 
 <p align="center">
@@ -27,7 +27,7 @@
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational" alt="Platforms: Windows, macOS, Linux">
   <img src="https://img.shields.io/badge/telemetry-none-brightgreen" alt="Telemetry: none">
-  <a href="https://discord.gg/fVkWSZAafp"><img src="https://img.shields.io/badge/Discord-come%20talk-5865F2?logo=discord&amp;logoColor=white" alt="Discord: come talk"></a>
+  <a href="https://discord.gg/SNsKPAu7pT"><img src="https://img.shields.io/badge/Discord-come%20talk-5865F2?logo=discord&amp;logoColor=white" alt="Discord: come talk"></a>
 </p>
 
 <p align="center">
@@ -330,7 +330,7 @@ unqueued downloads (see
 ## Community
 
 Questions, ideas, or just want to talk about TorrentPlayer? Join the
-[TorrentPlayer Discord server](https://discord.gg/fVkWSZAafp). Bugs and feature requests are tracked in
+[TorrentPlayer Discord server](https://discord.gg/SNsKPAu7pT). Bugs and feature requests are tracked in
 [GitHub issues](https://github.com/torrentplayer/torrentplayer/issues), so they don't get lost
 in chat.
 
