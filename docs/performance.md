@@ -254,8 +254,8 @@ Incoming peers connect sooner here only because the seeders dial the moment the 
 announces; once connected, both engines serve them like outgoing peers.
 
 **Download limit lowered from 2 to 1 MiB/s** after 10 s (`limit`, swarm engine, three runs
-per row, MiB/s). "Before the fix" is the release candidate's parent commit, 6be11d6, built with
-the same benchmark code; 0.3.0 includes f03d960. Churn takes each seeder offline for 2 s of
+per row, MiB/s). "Before the fix" is the release candidate's parent commit, 8481616, built with
+the same benchmark code; 0.3.0 includes 3e571b3. Churn takes each seeder offline for 2 s of
 every 8 s.
 
 | Seeders, churn | Build          | Before change: delivered / reported | After: delivered / reported | Highest / lowest 1 s after | Excess in 2 s |
