@@ -907,8 +907,11 @@ async fn without_a_consumer_nothing_listens() {
         |s| matches!(s, IncomingStatus::Listening { port: p, .. } if *p == port),
     )
     .await;
-    // A consumer that goes away closes the listener again.
+    // A consumer that goes away closes the listener again. Wait for the engine's listener to
+    // be gone first: otherwise its stale `Listening` status satisfies the wait below before
+    // the network manager has bound its own socket.
     net.set_external_listener(None);
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Idle { .. })).await;
     let peers = net.incoming_peers();
     wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
     assert!(accepts_on_loopback(port).await);
