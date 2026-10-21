@@ -28,12 +28,12 @@ are compatible, and transcoded in real time only as a last resort.
 
 Until libmpv lands, the webview's `<video>` element is the only player (`Player.svelte`).
 
-- **Starting playback** (`src/lib/autoplay.ts`): if the autoplay policy refuses sound
+- **Starting playback** (`ui/src/lib/autoplay.ts`): if the autoplay policy refuses sound
   (`NotAllowedError`), the video plays muted and a "Muted — click to unmute" button appears;
   pressing play, M, or the volume controls also unmutes it. A start interrupted by a pause, seek,
   or load (`AbortError`) is retried with the sound unchanged, and only while playback is still
   wanted. Nothing else mutes the video.
-- **Codecs the webview cannot decode** (`src/lib/audio.ts`, `src/lib/converted.ts`,
+- **Codecs the webview cannot decode** (`ui/src/lib/audio.ts`, `ui/src/lib/converted.ts`,
   `src-tauri/src/convert.rs`, `torrentplayer-media`): WebView2 decodes AAC, MP3, Opus, Vorbis, and FLAC, but
   not Dolby (AC-3, E-AC-3/Atmos, `TrueHD`, AC-4) or DTS. The backend reads the audio codec from the
   container header (`stream_audio`). When the default track is AC-3, E-AC-3, `TrueHD`, or DTS in an
@@ -59,7 +59,7 @@ Until libmpv lands, the webview's `<video>` element is the only player (`Player.
   [IPC contract](ipc.md)), and files the user loads ("Load subtitle file…" in the CC menu).
   The backend downloads a torrent's file at background priority only when it is chosen, then
   parses it in Rust into plain-text cues (`torrentplayer-media`). Nothing is parsed in the webview.
-- **Showing them** (`src/lib/subtitles.ts`): each chosen file becomes a text track
+- **Showing them** (`ui/src/lib/subtitles.ts`): each chosen file becomes a text track
   (`video.addTextTrack('subtitles', label, language)` with `VTTCue`s, text escaped), so they
   follow seeks, need no URL, and leave the CSP unchanged. Chromium scales the text with the
   video, so it grows in fullscreen. The player styles it on a dark background and lifts it

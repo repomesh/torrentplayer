@@ -15,7 +15,7 @@ distribution.
 1. Make sure `main` is green.
 2. Move the `## [Unreleased]` entries in `CHANGELOG.md` under a new `## [x.y.z] - YYYY-MM-DD`
    heading, following [Semantic Versioning](https://semver.org).
-3. Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and `package.json`.
+3. Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and `ui/package.json`.
 4. Open a PR titled `chore(release): vx.y.z`, get it reviewed, and merge it.
 5. Tag the merge commit and push the tag:
    ```sh

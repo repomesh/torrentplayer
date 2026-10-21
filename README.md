@@ -265,7 +265,7 @@ Then:
 
 ```sh
 git clone https://github.com/torrentplayer/torrentplayer.git
-cd torrentplayer
+cd torrentplayer/ui    # npm commands run in the frontend folder
 npm ci
 npm run tauri dev      # run the app with hot reload
 npm run tauri build    # build optimized installers for your platform

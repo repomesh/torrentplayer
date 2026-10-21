@@ -81,6 +81,8 @@ jobs:
         id: tauri
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
         with:
+          # The Tauri CLI is installed in ui/; its "tauri" script runs it from the repository root.
+          tauriScript: npm --prefix ui run tauri
           args: --target ${{ matrix.target }} --config src-tauri/tauri.sidecar.conf.json
 
       - name: Collect installers

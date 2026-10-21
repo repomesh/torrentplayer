@@ -11,10 +11,10 @@ from the Rust definitions, which turns into runtime bugs that the type checker c
 ## Decision
 
 Payload types derive [`ts_rs::TS`](https://crates.io/crates/ts-rs) with `#[ts(export)]`.
-`cargo test` writes the TypeScript definitions to `src/lib/bindings/` (configured with
+`cargo test` writes the TypeScript definitions to `ui/src/lib/bindings/` (configured with
 `TS_RS_EXPORT_DIR` in `.cargo/config.toml`). The generated files are committed, and CI fails if
 regenerating them produces a diff. Command names and signatures are documented in `docs/ipc.md`
-and wrapped in `src/lib/ipc.ts`.
+and wrapped in `ui/src/lib/ipc.ts`.
 
 ## Alternatives considered
 

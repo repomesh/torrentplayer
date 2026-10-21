@@ -7,35 +7,41 @@ picks up the pinned toolchain from `rust-toolchain.toml` automatically.
 
 ## Everyday commands
 
+The frontend lives in `ui/`, and every `npm` command runs there (from the repository root,
+`npm --prefix ui run <script>` does the same). `npm run tauri` starts the Tauri CLI from the
+repository root, so paths passed to it, such as `--config src-tauri/tauri.sidecar.conf.json`, are
+relative to the root. `cargo` commands run from the root.
+
 | Task                                       | Command                                  |
 | ------------------------------------------ | ---------------------------------------- |
-| Install frontend dependencies              | `npm ci`                                 |
-| Run the app with hot reload                | `npm run tauri dev`                      |
-| Build installers for your OS               | `npm run tauri build`                    |
+| Install frontend dependencies              | `npm ci` (in `ui/`)                      |
+| Run the app with hot reload                | `npm run tauri dev` (in `ui/`)           |
+| Build installers for your OS               | `npm run tauri build` (in `ui/`)         |
 | Rust tests (also regenerates IPC bindings) | `cargo test --workspace`                 |
-| Frontend tests                             | `npm test`                               |
+| Frontend tests                             | `npm test` (in `ui/`)                    |
 | Open API docs                              | `cargo doc --workspace --no-deps --open` |
 | Preview this guide                         | `mdbook serve docs`                      |
 
-Note that `cargo` commands that build `torrentplayer-app` need the frontend built first (`npm run build`),
-because Tauri embeds `dist/` at compile time.
+Note that `cargo` commands that build `torrentplayer-app` need the frontend built first
+(`npm run build` in `ui/`), because Tauri embeds `ui/dist/` at compile time.
 
 ## Running the CI checks locally
 
 CI runs these on Windows, macOS, and Linux. Run them before pushing:
 
 ```sh
-npm ci && npm run build
+(cd ui && npm ci && npm run build)
 
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
-git diff --exit-code src/lib/bindings   # IPC bindings must be committed
+git diff --exit-code ui/src/lib/bindings   # IPC bindings must be committed
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-cargo deny check                        # cargo install cargo-deny --locked
+cargo deny check                           # cargo install cargo-deny --locked
 
-npm run format:check
-npm run lint
+cd ui
+npm run format:check   # the whole repository, including Markdown and YAML
+npm run lint           # ui/ and scripts/
 npm run check
 npm test
 ```
@@ -43,12 +49,16 @@ npm test
 ## Repository layout
 
 ```text
-crates/           Rust library crates, one per subsystem (see architecture.md)
-src-tauri/        Tauri app shell (torrentplayer-app): commands, capabilities, bundling config
-src/              Svelte + TypeScript frontend
-src/lib/bindings/ TypeScript types generated from Rust by ts-rs (do not edit)
-docs/             This guide (mdBook) and Architecture Decision Records
-.github/          CI, release, and security workflows; issue and PR templates
+crates/              Rust library crates, one per subsystem (see architecture.md)
+src-tauri/           Tauri app shell (torrentplayer-app): commands, capabilities, bundling config
+ui/                  Svelte + TypeScript frontend, with its Vite, ESLint, and Prettier configs
+ui/src/lib/bindings/ TypeScript types generated from Rust by ts-rs (do not edit)
+docs/                This guide (mdBook) and Architecture Decision Records
+scripts/             FFmpeg sidecar build and benchmark helpers
+vendor/              Patched copies of third-party crates
+.cargo/              Cargo settings and the cargo-about config for THIRD_PARTY_NOTICES.md
+.github/             CI, release, and security workflows; issue and PR templates; the
+                     contributing, security, and governance policies
 ```
 
 ## Platform notes
@@ -73,7 +83,7 @@ Optional for development. Without it, videos with Dolby or DTS audio play withou
 show a notice. `scripts/build-ffmpeg.sh <target triple> src-tauri/binaries` builds the
 playback-only LGPL FFmpeg (on Linux, macOS, or Windows with MinGW; it cross-compiles for Windows
 on Linux with mingw-w64). `npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json`
-then bundles it as CI does. Development builds also take its path from `TORRENTPLAYER_FFMPEG`.
+(in `ui/`) then bundles it as CI does. Development builds also take its path from `TORRENTPLAYER_FFMPEG`.
 
 To play a local file through the app, seed it with
 `cargo run -p torrentplayer-bench --release -- seed <file> <file.torrent>`, which logs its address, and

@@ -129,6 +129,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          # The Tauri CLI is installed in ui/; its "tauri" script runs it from the repository root.
+          tauriScript: npm --prefix ui run tauri
           tagName: ${{ github.ref_name }}
           releaseName: TorrentPlayer ${{ github.ref_name }}
           releaseBody: See CHANGELOG.md for what changed. Verify downloads as described in docs/release.md.

@@ -11,6 +11,8 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     host: '127.0.0.1',
+    // The About screen imports THIRD_PARTY_NOTICES.md from the repository root.
+    fs: { allow: ['.', '../THIRD_PARTY_NOTICES.md'] },
   },
   build: {
     target: ['es2022', 'chrome120', 'safari16'],

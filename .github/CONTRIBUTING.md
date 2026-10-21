@@ -31,7 +31,8 @@ cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo deny check
 
-# Frontend
+# Frontend (in ui/; format:check covers the whole repository)
+cd ui
 npm run format:check
 npm run lint
 npm run check
@@ -103,8 +104,8 @@ The rules are enforced by tooling, so in most cases you only need to run the for
 ### Frontend
 
 - TypeScript in strict mode, formatted by Prettier and linted by ESLint.
-- All backend calls go through `src/lib/ipc.ts`. IPC payload types are generated from Rust by
-  `ts-rs` into `src/lib/bindings/` (run `cargo test -p torrentplayer-app` to regenerate) and must not be
+- All backend calls go through `ui/src/lib/ipc.ts`. IPC payload types are generated from Rust by
+  `ts-rs` into `ui/src/lib/bindings/` (run `cargo test -p torrentplayer-app` to regenerate) and must not be
   edited by hand.
 
 ### File headers

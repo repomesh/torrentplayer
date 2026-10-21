@@ -34,3 +34,4 @@ jobs:
         with:
           node-version: 22
       - run: npm audit --audit-level=moderate
+        working-directory: ui

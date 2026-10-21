@@ -18,7 +18,7 @@ updates:
       prefix: build(deps)
 
   - package-ecosystem: npm
-    directory: /
+    directory: /ui
     schedule:
       interval: weekly
     cooldown:

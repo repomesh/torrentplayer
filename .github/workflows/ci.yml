@@ -38,9 +38,9 @@ jobs:
       - name: Check generated IPC bindings are committed
         shell: bash
         run: |
-          if ! git diff --exit-code -- src/lib/bindings \
-            || [ -n "$(git ls-files --others --exclude-standard -- src/lib/bindings)" ]; then
-            echo "::error::IPC bindings are out of date. Run 'cargo test -p torrentplayer-app' and commit src/lib/bindings."
+          if ! git diff --exit-code -- ui/src/lib/bindings \
+            || [ -n "$(git ls-files --others --exclude-standard -- ui/src/lib/bindings)" ]; then
+            echo "::error::IPC bindings are out of date. Run 'cargo test -p torrentplayer-app' and commit ui/src/lib/bindings."
             exit 1
           fi
 
@@ -109,6 +109,9 @@ jobs:
   frontend:
     name: Frontend
     runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: ui
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -117,7 +120,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: ui/package-lock.json
       - run: npm ci
+      # Covers the whole repository (Markdown, YAML, JSON), not only ui/.
       - name: Formatting
         run: npm run format:check
       - name: Lint

@@ -11,9 +11,9 @@ The webview talks to the Rust backend only through Tauri commands (request/respo
 - **Validate in Rust.** Treat every argument as untrusted. Validate ranges, lengths, and formats
   before use, and return a typed error rather than panicking.
 - **Generated types.** Payload types derive `ts_rs::TS` with `#[ts(export)]`. Running
-  `cargo test -p torrentplayer-app` writes them to `src/lib/bindings/`. Never edit those files by hand;
+  `cargo test -p torrentplayer-app` writes them to `ui/src/lib/bindings/`. Never edit those files by hand;
   CI fails if they are out of date.
-- **One wrapper module.** Frontend code calls commands only through `src/lib/ipc.ts`.
+- **One wrapper module.** Frontend code calls commands only through `ui/src/lib/ipc.ts`.
 - **Naming.** Commands are `snake_case` verbs or nouns (`app_info`, `add_torrent`). Events are
   `kebab-case` with a subsystem prefix (`stream-stats`, `net-state-changed`). Payload fields are
   `camelCase` (`#[serde(rename_all = "camelCase")]`).
@@ -48,7 +48,7 @@ a generic message).
 | `audio-conversion`    | The audio could not be converted for the built-in player; details are in the log.                              |
 | `internal`            | Something unexpected failed; details are in the log.                                                           |
 
-`errorMessage` in `src/lib/ipc.ts` shows `message` as is, and for `kill-switch` and
+`errorMessage` in `ui/src/lib/ipc.ts` shows `message` as is, and for `kill-switch` and
 `network-unavailable` adds what it means and what to do (nothing was sent; traffic resumes by
 itself; check Settings → Network).
 
@@ -71,12 +71,12 @@ serving a stream is reported in `StreamStats.engine` and logged when the stream 
 
 Returns static information about the running build, for the About screen.
 
-|            |                                             |
-| ---------- | ------------------------------------------- |
-| Arguments  | none                                        |
-| Returns    | [`AppInfo`](../src/lib/bindings/AppInfo.ts) |
-| Errors     | none                                        |
-| Permission | `allow-app-info` (granted to `main`)        |
+|            |                                                |
+| ---------- | ---------------------------------------------- |
+| Arguments  | none                                           |
+| Returns    | [`AppInfo`](../ui/src/lib/bindings/AppInfo.ts) |
+| Errors     | none                                           |
+| Permission | `allow-app-info` (granted to `main`)           |
 
 ```ts
 type AppInfo = {
@@ -102,7 +102,7 @@ torrents in torrentplayer-swarm it carries up to 20 of their trackers (about 4 K
 |            |                                                                  |
 | ---------- | ---------------------------------------------------------------- |
 | Arguments  | `{ link: string }` (at most 16 KiB)                              |
-| Returns    | [`TorrentSummary`](../src/lib/bindings/TorrentSummary.ts)        |
+| Returns    | [`TorrentSummary`](../ui/src/lib/bindings/TorrentSummary.ts)     |
 | Errors     | `source-refused`, `unsafe-torrent`, `metadata-timeout`, `engine` |
 | Permission | `allow-add-torrent-link`                                         |
 
@@ -111,12 +111,12 @@ torrents in torrentplayer-swarm it carries up to 20 of their trackers (about 4 K
 As `add_torrent_link`, from the raw bytes of a `.torrent` file sent as the request body
 (`invoke('add_torrent_file', bytes)` with a `Uint8Array`). At most 16 MiB.
 
-|            |                                                           |
-| ---------- | --------------------------------------------------------- |
-| Arguments  | raw request body                                          |
-| Returns    | [`TorrentSummary`](../src/lib/bindings/TorrentSummary.ts) |
-| Errors     | `invalid-argument` (not raw bytes), as `add_torrent_link` |
-| Permission | `allow-add-torrent-file`                                  |
+|            |                                                              |
+| ---------- | ------------------------------------------------------------ |
+| Arguments  | raw request body                                             |
+| Returns    | [`TorrentSummary`](../ui/src/lib/bindings/TorrentSummary.ts) |
+| Errors     | `invalid-argument` (not raw bytes), as `add_torrent_link`    |
+| Permission | `allow-add-torrent-file`                                     |
 
 `TorrentSummary` lists `files` with videos first; each has an `index` (used to start a stream),
 `path`, `length`, and `kind` (`video`, `subtitle`, `document`, `other`).
@@ -129,7 +129,7 @@ stream server.
 |            |                                                         |
 | ---------- | ------------------------------------------------------- |
 | Arguments  | `{ torrentId: number, fileIndex: number }`              |
-| Returns    | [`StreamInfo`](../src/lib/bindings/StreamInfo.ts)       |
+| Returns    | [`StreamInfo`](../ui/src/lib/bindings/StreamInfo.ts)    |
 | Errors     | `not-found`, `invalid-argument` (not a video), `engine` |
 | Permission | `allow-start-stream`                                    |
 
@@ -171,12 +171,12 @@ Records a decoder-level timing measured in the webview: `firstFrame` (play to fi
 
 Live statistics for a stream, polled about once a second by the debug overlay.
 
-|            |                                                     |
-| ---------- | --------------------------------------------------- |
-| Arguments  | `{ streamId: number }`                              |
-| Returns    | [`StreamStats`](../src/lib/bindings/StreamStats.ts) |
-| Errors     | `not-found`, `engine`                               |
-| Permission | `allow-stream-stats`                                |
+|            |                                                        |
+| ---------- | ------------------------------------------------------ |
+| Arguments  | `{ streamId: number }`                                 |
+| Returns    | [`StreamStats`](../ui/src/lib/bindings/StreamStats.ts) |
+| Errors     | `not-found`, `engine`                                  |
+| Permission | `allow-stream-stats`                                   |
 
 Fields include transfer rates, peer counts, buffered bytes (and seconds once the duration is
 reported), a 200-cell `pieceMap` (0–255 per cell), player timings, and `engine`
@@ -190,12 +190,12 @@ The stream's audio tracks, read from its container header (MP4, MOV, Matroska, o
 stream's own reader, which waits for those pieces, and gives up after 45 s. The command waits for
 the probe, so the player calls it once.
 
-|            |                                                     |
-| ---------- | --------------------------------------------------- |
-| Arguments  | `{ streamId: number }`                              |
-| Returns    | [`StreamAudio`](../src/lib/bindings/StreamAudio.ts) |
-| Errors     | `not-found` (unknown or stopped stream)             |
-| Permission | `allow-stream-audio`                                |
+|            |                                                        |
+| ---------- | ------------------------------------------------------ |
+| Arguments  | `{ streamId: number }`                                 |
+| Returns    | [`StreamAudio`](../ui/src/lib/bindings/StreamAudio.ts) |
+| Errors     | `not-found` (unknown or stopped stream)                |
+| Permission | `allow-stream-audio`                                   |
 
 ```ts
 type StreamAudio = {
@@ -214,7 +214,7 @@ type AudioTrackDto = {
 
 When `convertible`, the player plays the stream through `convert_audio`. Otherwise it shows a
 notice when the codec cannot be decoded, after Chromium's decoder counters confirm that no audio
-is being decoded (see `src/lib/audio.ts`). The same probe lists the embedded subtitle tracks that
+is being decoded (see `ui/src/lib/audio.ts`). The same probe lists the embedded subtitle tracks that
 `stream_subtitles` returns.
 
 ### `convert_audio`
@@ -223,12 +223,12 @@ Starts converting a stream's primary audio track (Dolby or DTS) to AAC with the 
 from `start` seconds, and stops the stream's previous conversion. Waits for the probe and for
 FFmpeg's initialization segment (at most 60 s). The result is a live stream: fragmented MP4 with
 the video copied and the original timestamps, read once with `fetch` and fed to Media Source
-Extensions (see `src/lib/converted.ts` and [ADR 0007](adr/0007-dolby-and-dts-audio.md)).
+Extensions (see `ui/src/lib/converted.ts` and [ADR 0007](adr/0007-dolby-and-dts-audio.md)).
 
 |            |                                                                                                      |
 | ---------- | ---------------------------------------------------------------------------------------------------- |
 | Arguments  | `{ streamId: number, start: number }`                                                                |
-| Returns    | [`ConvertedStream`](../src/lib/bindings/ConvertedStream.ts)                                          |
+| Returns    | [`ConvertedStream`](../ui/src/lib/bindings/ConvertedStream.ts)                                       |
 | Errors     | `not-found`, `invalid-argument` (bad `start`, or audio that needs no conversion), `audio-conversion` |
 | Permission | `allow-convert-audio`                                                                                |
 
@@ -253,12 +253,12 @@ The subtitles available for a stream, at once (it does not wait).
   `stpp`, `c608`). It is `null` until the probe has finished, so the player asks again once
   `stream_audio` resolves. The built-in player cannot show these yet.
 
-|            |                                                             |
-| ---------- | ----------------------------------------------------------- |
-| Arguments  | `{ streamId: number }`                                      |
-| Returns    | [`StreamSubtitles`](../src/lib/bindings/StreamSubtitles.ts) |
-| Errors     | `not-found`                                                 |
-| Permission | `allow-stream-subtitles`                                    |
+|            |                                                                |
+| ---------- | -------------------------------------------------------------- |
+| Arguments  | `{ streamId: number }`                                         |
+| Returns    | [`StreamSubtitles`](../ui/src/lib/bindings/StreamSubtitles.ts) |
+| Errors     | `not-found`                                                    |
+| Permission | `allow-stream-subtitles`                                       |
 
 ### `load_subtitles`
 
@@ -272,7 +272,7 @@ UTF-16, or Windows-1252. The text is plain (markup and control characters remove
 |            |                                                                                        |
 | ---------- | -------------------------------------------------------------------------------------- |
 | Arguments  | `{ streamId: number, fileIndex: number }` (a subtitle file of the stream's torrent)    |
-| Returns    | [`SubtitleCues`](../src/lib/bindings/SubtitleCues.ts)                                  |
+| Returns    | [`SubtitleCues`](../ui/src/lib/bindings/SubtitleCues.ts)                               |
 | Errors     | `invalid-argument` (not a subtitle file, too large, unreadable), `engine`, `not-found` |
 | Permission | `allow-load-subtitles`                                                                 |
 
@@ -289,15 +289,15 @@ type SubtitleCues = {
 Parses a subtitle file the user chose ("Load subtitle file…"), sent as the raw request body
 (`invoke('parse_subtitles', bytes)`), the same way as `load_subtitles`.
 
-|            |                                                       |
-| ---------- | ----------------------------------------------------- |
-| Arguments  | raw request body (at most 5 MiB)                      |
-| Returns    | [`SubtitleCues`](../src/lib/bindings/SubtitleCues.ts) |
-| Errors     | `invalid-argument`                                    |
-| Permission | `allow-parse-subtitles`                               |
+|            |                                                          |
+| ---------- | -------------------------------------------------------- |
+| Arguments  | raw request body (at most 5 MiB)                         |
+| Returns    | [`SubtitleCues`](../ui/src/lib/bindings/SubtitleCues.ts) |
+| Errors     | `invalid-argument`                                       |
+| Permission | `allow-parse-subtitles`                                  |
 
 The player adds cues with the TextTrack API (`addTextTrack` and `VTTCue`, text escaped), so they
-never pass through a URL or HTML (see `src/lib/subtitles.ts`).
+never pass through a URL or HTML (see `ui/src/lib/subtitles.ts`).
 
 ### `stop_stream`
 
@@ -317,12 +317,12 @@ Development builds only (always `null` in release builds): adds the torrent name
 timings can be measured automatically. The optional peers are addresses to connect to, such as
 a local `torrentplayer-bench seed` (see [Building](building.md)).
 
-|            |                                                               |
-| ---------- | ------------------------------------------------------------- |
-| Arguments  | none                                                          |
-| Returns    | [`DevAutoplay`](../src/lib/bindings/DevAutoplay.ts) or `null` |
-| Errors     | as `add_torrent_link`                                         |
-| Permission | `allow-dev-autoplay`                                          |
+|            |                                                                  |
+| ---------- | ---------------------------------------------------------------- |
+| Arguments  | none                                                             |
+| Returns    | [`DevAutoplay`](../ui/src/lib/bindings/DevAutoplay.ts) or `null` |
+| Errors     | as `add_torrent_link`                                            |
+| Permission | `allow-dev-autoplay`                                             |
 
 ### `search_torrents`
 
@@ -374,12 +374,12 @@ be at least 100 MiB. Finished searches are kept for 10 minutes
 instant. When the search finishes, the best pick is preloaded (see
 [`preload_status`](#preload_status)) if the `search.preloadTopResult` setting is on.
 
-|            |                                                                                                         |
-| ---------- | ------------------------------------------------------------------------------------------------------- |
-| Arguments  | `{ query: string, categories?: number[] }` (query trimmed; 1–200 characters; no control characters)     |
-| Returns    | [`SearchResponseDto`](../src/lib/bindings/SearchResponseDto.ts): `results`, `indexers`, `excludedAdult` |
-| Errors     | `invalid-argument`, `search-unavailable`                                                                |
-| Permission | `allow-search-torrents`                                                                                 |
+|            |                                                                                                            |
+| ---------- | ---------------------------------------------------------------------------------------------------------- |
+| Arguments  | `{ query: string, categories?: number[] }` (query trimmed; 1–200 characters; no control characters)        |
+| Returns    | [`SearchResponseDto`](../ui/src/lib/bindings/SearchResponseDto.ts): `results`, `indexers`, `excludedAdult` |
+| Errors     | `invalid-argument`, `search-unavailable`                                                                   |
+| Permission | `allow-search-torrents`                                                                                    |
 
 The query is sent to the search service through the selected network mode (see
 [Network](#network)); while the kill switch is engaged the search fails with
@@ -431,15 +431,15 @@ the final one is preloaded when the search finishes, so a search starts at most 
 (usually one). A search that finishes without a best pick evicts the previous preload. The
 rule is `torrentplayer_search::settle`.
 
-|            |                                                                                                                                      |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| Arguments  | `{ query: string, categories?: number[], onProgress: Channel<SearchProgressDto> }` (see [`search_torrents`](#search_torrents))       |
-| Channel    | [`SearchProgressDto`](../src/lib/bindings/SearchProgressDto.ts): `response` (results so far), `completed`, `total`, `done`, `cached` |
-| Returns    | [`SearchResponseDto`](../src/lib/bindings/SearchResponseDto.ts), equal to the last progress `response`                               |
-| Errors     | `invalid-argument`; `search-unavailable`; `cancelled`                                                                                |
-| Permission | `allow-search-torrents-progressive`                                                                                                  |
+|            |                                                                                                                                         |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | `{ query: string, categories?: number[], onProgress: Channel<SearchProgressDto> }` (see [`search_torrents`](#search_torrents))          |
+| Channel    | [`SearchProgressDto`](../ui/src/lib/bindings/SearchProgressDto.ts): `response` (results so far), `completed`, `total`, `done`, `cached` |
+| Returns    | [`SearchResponseDto`](../ui/src/lib/bindings/SearchResponseDto.ts), equal to the last progress `response`                               |
+| Errors     | `invalid-argument`; `search-unavailable`; `cancelled`                                                                                   |
+| Permission | `allow-search-torrents-progressive`                                                                                                     |
 
-Use `searchTorrentsProgressive(query, onProgress)` in `src/lib/ipc.ts`, which creates the
+Use `searchTorrentsProgressive(query, onProgress)` in `ui/src/lib/ipc.ts`, which creates the
 channel.
 
 ### `cancel_search`
@@ -481,16 +481,16 @@ have no DHT, so magnet links without working trackers fail there, and in protect
 librqbit is given the magnet link, not the kept metadata. Does nothing while
 `search.preloadTopResult` is off. Starts the engine.
 
-|            |                                                                                                    |
-| ---------- | -------------------------------------------------------------------------------------------------- |
-| Arguments  | `{ results: PrefetchRequest[], onReady: Channel<PrefetchedDto> }` (at most 200 results)            |
-| Channel    | [`PrefetchedDto`](../src/lib/bindings/PrefetchedDto.ts): `key` (`SearchResultDto.key`), `infoHash` |
-| Returns    | nothing, once every result is done or a newer call or search stops it                              |
-| Errors     | `invalid-argument` (too many results), `engine` if the engine cannot start                         |
-| Permission | `allow-prefetch-torrents`                                                                          |
+|            |                                                                                                       |
+| ---------- | ----------------------------------------------------------------------------------------------------- |
+| Arguments  | `{ results: PrefetchRequest[], onReady: Channel<PrefetchedDto> }` (at most 200 results)               |
+| Channel    | [`PrefetchedDto`](../ui/src/lib/bindings/PrefetchedDto.ts): `key` (`SearchResultDto.key`), `infoHash` |
+| Returns    | nothing, once every result is done or a newer call or search stops it                                 |
+| Errors     | `invalid-argument` (too many results), `engine` if the engine cannot start                            |
+| Permission | `allow-prefetch-torrents`                                                                             |
 
-Use `prefetchTorrents(results, onReady)` in `src/lib/ipc.ts` with
-[`PrefetchRequest`](../src/lib/bindings/PrefetchRequest.ts)s. The search page asks for the first
+Use `prefetchTorrents(results, onReady)` in `ui/src/lib/ipc.ts` with
+[`PrefetchRequest`](../ui/src/lib/bindings/PrefetchRequest.ts)s. The search page asks for the first
 12 results shown (without the best pick) once the list has held still for 1.5 s, and marks the
 ready ones "details ready".
 
@@ -520,7 +520,7 @@ the user searches for.
 |            |                                                                                                    |
 | ---------- | -------------------------------------------------------------------------------------------------- |
 | Arguments  | `{ results: ThumbnailRequest[], onReady: Channel<ThumbnailDto> }` (`key`, `infoHash`; at most 200) |
-| Channel    | [`ThumbnailDto`](../src/lib/bindings/ThumbnailDto.ts): `key` (`SearchResultDto.key`), `dataUrl`    |
+| Channel    | [`ThumbnailDto`](../ui/src/lib/bindings/ThumbnailDto.ts): `key` (`SearchResultDto.key`), `dataUrl` |
 | Returns    | nothing, once every result is done or a newer call or search stops it                              |
 | Errors     | `invalid-argument` (too many results), `engine` if the engine cannot start                         |
 | Permission | `allow-fetch-thumbnails`                                                                           |
@@ -536,12 +536,12 @@ for videos the webview decodes). `null` unless a preload is ready. It does not c
 preload, does not count as playing, and replaces the previous one. The URL carries the stream
 server's session token. Never starts the engine.
 
-|            |                                                                                          |
-| ---------- | ---------------------------------------------------------------------------------------- |
-| Arguments  | none                                                                                     |
-| Returns    | [`PreviewFrameDto`](../src/lib/bindings/PreviewFrameDto.ts) or `null`: `infoHash`, `url` |
-| Errors     | none                                                                                     |
-| Permission | `allow-preview-frame`                                                                    |
+|            |                                                                                             |
+| ---------- | ------------------------------------------------------------------------------------------- |
+| Arguments  | none                                                                                        |
+| Returns    | [`PreviewFrameDto`](../ui/src/lib/bindings/PreviewFrameDto.ts) or `null`: `infoHash`, `url` |
+| Errors     | none                                                                                        |
+| Permission | `allow-preview-frame`                                                                       |
 
 ### `torrent_details`
 
@@ -558,7 +558,7 @@ the magnet link, as [`prefetch_torrents`](#prefetch_torrents) does), which start
 |            |                                                                                                 |
 | ---------- | ----------------------------------------------------------------------------------------------- |
 | Arguments  | `{ infoHash: string \| null, magnet: string \| null, download: string \| null, load: boolean }` |
-| Returns    | [`TorrentDetailsDto`](../src/lib/bindings/TorrentDetailsDto.ts) or `null`                       |
+| Returns    | [`TorrentDetailsDto`](../ui/src/lib/bindings/TorrentDetailsDto.ts) or `null`                    |
 | Errors     | with `load`: `source-refused`, `metadata-timeout`, `unsafe-torrent`, `engine`                   |
 | Permission | `allow-torrent-details`                                                                         |
 
@@ -594,12 +594,12 @@ is also deleted when the engine shuts down, or at the next start if the app exit
 command never starts the engine. Poll it (about every 700 ms) while `phase` is `resolving` or
 `buffering`.
 
-|            |                                                                                                                                     |
-| ---------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| Arguments  | none                                                                                                                                |
-| Returns    | [`PreloadStatusDto`](../src/lib/bindings/PreloadStatusDto.ts) or `null`: `infoHash`, `phase`, `claimed`, `fileIndex`, `progress`, … |
-| Errors     | none                                                                                                                                |
-| Permission | `allow-preload-status`                                                                                                              |
+|            |                                                                                                                                        |
+| ---------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | none                                                                                                                                   |
+| Returns    | [`PreloadStatusDto`](../ui/src/lib/bindings/PreloadStatusDto.ts) or `null`: `infoHash`, `phase`, `claimed`, `fileIndex`, `progress`, … |
+| Errors     | none                                                                                                                                   |
+| Permission | `allow-preload-status`                                                                                                                 |
 
 `phase` is `resolving`, `buffering`, `ready` (the target, or as much as arrived before a
 limit), `failed` (with `error`), or `cancelled`. Match it to a result with
@@ -614,12 +614,12 @@ identified by `infoHash` plus `fileIndex` and contains a safe replay `source`, p
 and `torrentName`, optional `sizeBytes` and `durationSecs`, `positionSecs`, `completed`, and
 `updatedAtSecs`. It never contains the loopback stream URL or token.
 
-|            |                                                       |
-| ---------- | ----------------------------------------------------- |
-| Arguments  | none                                                  |
-| Returns    | [`LibraryItem[]`](../src/lib/bindings/LibraryItem.ts) |
-| Errors     | `internal` if the local database cannot be read       |
-| Permission | `allow-library-items`                                 |
+|            |                                                          |
+| ---------- | -------------------------------------------------------- |
+| Arguments  | none                                                     |
+| Returns    | [`LibraryItem[]`](../ui/src/lib/bindings/LibraryItem.ts) |
+| Errors     | `internal` if the local database cannot be read          |
+| Permission | `allow-library-items`                                    |
 
 The database is `library.sqlite3` in the per-user app-data directory. SQLite values use
 parameterized queries only. Its directory and file are forced to mode `0700` and `0600` on Unix;
@@ -628,7 +628,7 @@ runtime.
 
 ### Queue
 
-The play queue is a playlist with a cursor, kept by the UI (`src/lib/queue.ts`) and saved
+The play queue is a playlist with a cursor, kept by the UI (`ui/src/lib/queue.ts`) and saved
 whole after each change. Each item holds only what is needed to play it again: the torrent's
 link (`source`: a magnet link, or an http(s) link to a `.torrent` file; torrents opened from a
 file are saved as their `TorrentSummary.magnet`, with the info hash, name, and up to 20 of the
@@ -644,12 +644,12 @@ The saved queue (`queue.json` in the app data folder), or an empty one. Invalid 
 dropped, a `current` that names no item is cleared, and a damaged file is set aside as
 `queue.invalid.json`.
 
-|            |                                                                       |
-| ---------- | --------------------------------------------------------------------- |
-| Arguments  | none                                                                  |
-| Returns    | [`Queue`](../src/lib/bindings/Queue.ts): `items`, `current` (item id) |
-| Errors     | none                                                                  |
-| Permission | `allow-load-queue`                                                    |
+|            |                                                                          |
+| ---------- | ------------------------------------------------------------------------ |
+| Arguments  | none                                                                     |
+| Returns    | [`Queue`](../ui/src/lib/bindings/Queue.ts): `items`, `current` (item id) |
+| Errors     | none                                                                     |
+| Permission | `allow-load-queue`                                                       |
 
 #### `save_queue`
 
@@ -669,7 +669,7 @@ titles 1–1024 characters without control characters; `infoHash` 40 hex digits.
 Prepares the queue's next video on behalf of the open stream `streamId`. The UI asks only once
 the playing file cannot be slowed down: it is fully downloaded, or less than two minutes of
 playback are left and the rest of the file arrives in under half that time
-(`shouldPreloadNext` in `src/lib/upnext.ts`).
+(`shouldPreloadNext` in `ui/src/lib/upnext.ts`).
 
 - **A torrent not added yet** goes through the same one-slot preload as a search's best pick
   (see [`preload_status`](#preload_status)): the start and end of `fileIndex` if that is a
@@ -681,12 +681,12 @@ playback are left and the rest of the file arrives in under half that time
   after the playhead's read-ahead; librqbit selects the whole file and, for the torrent
   playing, prioritizes its start and end in the last minute of playback.
 
-|            |                                                                                                                                       |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Arguments  | `{ streamId: number, next: NextVideo }`: [`NextVideo`](../src/lib/bindings/NextVideo.ts) `link`, `fileIndex`, `infoHash`, `torrentId` |
-| Returns    | nothing, once started                                                                                                                 |
-| Errors     | `source-refused` (bad link), `not-found` (stream or torrent), `engine`                                                                |
-| Permission | `allow-preload-next`                                                                                                                  |
+|            |                                                                                                                                          |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | `{ streamId: number, next: NextVideo }`: [`NextVideo`](../ui/src/lib/bindings/NextVideo.ts) `link`, `fileIndex`, `infoHash`, `torrentId` |
+| Returns    | nothing, once started                                                                                                                    |
+| Errors     | `source-refused` (bad link), `not-found` (stream or torrent), `engine`                                                                   |
+| Permission | `allow-preload-next`                                                                                                                     |
 
 #### `queue_readiness`
 
@@ -699,12 +699,12 @@ reads which pieces are present and nothing else: it never starts the engine, add
 downloads anything. Each torrent's pieces are read once per call. The UI asks every 4 s while
 the queue is on screen.
 
-|            |                                                                                                                                                                        |
-| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Arguments  | `{ items: ReadinessQuery[] }` (at most 500): [`ReadinessQuery`](../src/lib/bindings/ReadinessQuery.ts) `id`, `infoHash`, `fileIndex`                                   |
-| Returns    | [`ItemReadiness`](../src/lib/bindings/ItemReadiness.ts)`[]`: `id`, `state` ([`ReadinessState`](../src/lib/bindings/ReadinessState.ts)), `downloaded`, `length` (bytes) |
-| Errors     | `invalid-argument` (too many items)                                                                                                                                    |
-| Permission | `allow-queue-readiness`                                                                                                                                                |
+|            |                                                                                                                                                                              |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | `{ items: ReadinessQuery[] }` (at most 500): [`ReadinessQuery`](../ui/src/lib/bindings/ReadinessQuery.ts) `id`, `infoHash`, `fileIndex`                                      |
+| Returns    | [`ItemReadiness`](../ui/src/lib/bindings/ItemReadiness.ts)`[]`: `id`, `state` ([`ReadinessState`](../ui/src/lib/bindings/ReadinessState.ts)), `downloaded`, `length` (bytes) |
+| Errors     | `invalid-argument` (too many items)                                                                                                                                          |
+| Permission | `allow-queue-readiness`                                                                                                                                                      |
 
 #### `queue_downloads`
 
@@ -720,12 +720,12 @@ downloads at once (`maxActive`, `null` for none), and how many items download. T
 that, so it never starts the engine. Pause an item, or change the order, with `save_queue`
 (`QueueItem.paused`, `Queue.order`). The UI asks every second while the queue is on screen.
 
-|            |                                                                                                                                                                                            |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Arguments  | none                                                                                                                                                                                       |
-| Returns    | [`DownloadsSnapshot`](../src/lib/bindings/DownloadsSnapshot.ts): `items` ([`ItemDownload`](../src/lib/bindings/ItemDownload.ts)`[]`), `link` ([`LinkUse`](../src/lib/bindings/LinkUse.ts)) |
-| Errors     | none                                                                                                                                                                                       |
-| Permission | `allow-queue-downloads`                                                                                                                                                                    |
+|            |                                                                                                                                                                                                     |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | none                                                                                                                                                                                                |
+| Returns    | [`DownloadsSnapshot`](../ui/src/lib/bindings/DownloadsSnapshot.ts): `items` ([`ItemDownload`](../ui/src/lib/bindings/ItemDownload.ts)`[]`), `link` ([`LinkUse`](../ui/src/lib/bindings/LinkUse.ts)) |
+| Errors     | none                                                                                                                                                                                                |
+| Permission | `allow-queue-downloads`                                                                                                                                                                             |
 
 #### `preview_file`
 
@@ -748,12 +748,12 @@ call stops the previous one's wait (its answer is empty). Never starts the engin
 
 A file that does not arrive within 20 s gives a `note` ("Still downloading…").
 
-|            |                                                                                                                  |
-| ---------- | ---------------------------------------------------------------------------------------------------------------- |
-| Arguments  | `{ torrentId: number, fileIndex: number }`                                                                       |
-| Returns    | [`FilePreviewDto`](../src/lib/bindings/FilePreviewDto.ts): `kind`, `image`, `text`, `truncated`, `video`, `note` |
-| Errors     | `not-found` (torrent or file, or the engine has not started)                                                     |
-| Permission | `allow-preview-file`                                                                                             |
+|            |                                                                                                                     |
+| ---------- | ------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | `{ torrentId: number, fileIndex: number }`                                                                          |
+| Returns    | [`FilePreviewDto`](../ui/src/lib/bindings/FilePreviewDto.ts): `kind`, `image`, `text`, `truncated`, `video`, `note` |
+| Errors     | `not-found` (torrent or file, or the engine has not started)                                                        |
+| Permission | `allow-preview-file`                                                                                                |
 
 ### FFmpeg (optional)
 
@@ -790,12 +790,12 @@ Looks for `ffprobe` and `ffmpeg` again (in `advanced.ffmpegDir` or its `bin` fol
 `PATH`; relative `PATH` entries are skipped) and reports each one's path and the version it
 prints, for the Settings page.
 
-|            |                                                                                                                     |
-| ---------- | ------------------------------------------------------------------------------------------------------------------- |
-| Arguments  | none                                                                                                                |
-| Returns    | [`MediaToolsDto`](../src/lib/bindings/MediaToolsDto.ts): `ffprobe` and `ffmpeg`, each `{ path, version }` or `null` |
-| Errors     | none                                                                                                                |
-| Permission | `allow-media-tools`                                                                                                 |
+|            |                                                                                                                        |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | none                                                                                                                   |
+| Returns    | [`MediaToolsDto`](../ui/src/lib/bindings/MediaToolsDto.ts): `ffprobe` and `ffmpeg`, each `{ path, version }` or `null` |
+| Errors     | none                                                                                                                   |
+| Permission | `allow-media-tools`                                                                                                    |
 
 #### `choose_ffmpeg_dir`
 
@@ -822,17 +822,17 @@ problems and incomplete choices such as a proxy without a host), `restartRequire
 of changes that apply after a restart), `defaultDownloadDir`, `activeDownloadDir`,
 `engineOverride` (the `TORRENTPLAYER_ENGINE` value, if set), and `logLevelOverride` (`RUST_LOG` is set).
 
-|            |                                                       |
-| ---------- | ----------------------------------------------------- |
-| Arguments  | none                                                  |
-| Returns    | [`SettingsView`](../src/lib/bindings/SettingsView.ts) |
-| Errors     | none                                                  |
-| Permission | `allow-get-settings`                                  |
+|            |                                                          |
+| ---------- | -------------------------------------------------------- |
+| Arguments  | none                                                     |
+| Returns    | [`SettingsView`](../ui/src/lib/bindings/SettingsView.ts) |
+| Errors     | none                                                     |
+| Permission | `allow-get-settings`                                     |
 
 #### `update_settings`
 
 Applies a partial update with the same shape as
-[`Settings`](../src/lib/bindings/Settings.ts), containing only the changed fields, for example
+[`Settings`](../ui/src/lib/bindings/Settings.ts), containing only the changed fields, for example
 `{ "bandwidth": { "peerLimit": 80 } }`; `null` clears an optional setting. The patch must be an
 object of at most 64 KiB, may not contain `version`, and may name only existing settings. The
 merged result is fully validated, and nothing is saved unless all of it is valid. A changed
@@ -842,7 +842,7 @@ atomically, the log level is applied at once, and `settings-changed` is emitted.
 |            |                                                                                                                   |
 | ---------- | ----------------------------------------------------------------------------------------------------------------- |
 | Arguments  | `{ patch: object }`                                                                                               |
-| Returns    | [`SettingsView`](../src/lib/bindings/SettingsView.ts)                                                             |
+| Returns    | [`SettingsView`](../ui/src/lib/bindings/SettingsView.ts)                                                          |
 | Errors     | `invalid-argument` (the message starts with the setting's dotted path, e.g. `bandwidth.peerLimit: …`), `internal` |
 | Permission | `allow-update-settings`                                                                                           |
 
@@ -856,7 +856,7 @@ contain the value. Emits `settings-changed`.
 |            |                                                                                                                    |
 | ---------- | ------------------------------------------------------------------------------------------------------------------ |
 | Arguments  | `{ key: SecretKey, value: string }`, `key` one of `socks5Password`, `wireGuardPrivateKey`, `wireGuardPresharedKey` |
-| Returns    | [`SecretStatus`](../src/lib/bindings/SecretStatus.ts)                                                              |
+| Returns    | [`SecretStatus`](../ui/src/lib/bindings/SecretStatus.ts)                                                           |
 | Errors     | `invalid-argument`; `internal` if the credential store is unavailable or refuses                                   |
 | Permission | `allow-set-secret`                                                                                                 |
 
@@ -864,24 +864,24 @@ contain the value. Emits `settings-changed`.
 
 Removes a secret (succeeds if none was set). Emits `settings-changed`.
 
-|            |                                                       |
-| ---------- | ----------------------------------------------------- |
-| Arguments  | `{ key: SecretKey }`                                  |
-| Returns    | [`SecretStatus`](../src/lib/bindings/SecretStatus.ts) |
-| Errors     | `internal` if the credential store refuses            |
-| Permission | `allow-clear-secret`                                  |
+|            |                                                          |
+| ---------- | -------------------------------------------------------- |
+| Arguments  | `{ key: SecretKey }`                                     |
+| Returns    | [`SecretStatus`](../ui/src/lib/bindings/SecretStatus.ts) |
+| Errors     | `internal` if the credential store refuses               |
+| Permission | `allow-clear-secret`                                     |
 
 #### `secret_status`
 
 Which secrets are set, and whether a credential store is available. There is no command that
 returns a secret's value.
 
-|            |                                                       |
-| ---------- | ----------------------------------------------------- |
-| Arguments  | none                                                  |
-| Returns    | [`SecretStatus`](../src/lib/bindings/SecretStatus.ts) |
-| Errors     | none                                                  |
-| Permission | `allow-secret-status`                                 |
+|            |                                                          |
+| ---------- | -------------------------------------------------------- |
+| Arguments  | none                                                     |
+| Returns    | [`SecretStatus`](../ui/src/lib/bindings/SecretStatus.ts) |
+| Errors     | none                                                     |
+| Permission | `allow-secret-status`                                    |
 
 #### `cache_usage`
 
@@ -889,12 +889,12 @@ Size, configured limit, file count, and safely reclaimable finished data in Torr
 folders (`torrentplayer-swarm/`, `librqbit/`) in the download folder in use. Symbolic links are not
 followed; counting stops after 200 000 entries (`complete: false`).
 
-|            |                                                   |
-| ---------- | ------------------------------------------------- |
-| Arguments  | none                                              |
-| Returns    | [`CacheUsage`](../src/lib/bindings/CacheUsage.ts) |
-| Errors     | none                                              |
-| Permission | `allow-cache-usage`                               |
+|            |                                                      |
+| ---------- | ---------------------------------------------------- |
+| Arguments  | none                                                 |
+| Returns    | [`CacheUsage`](../ui/src/lib/bindings/CacheUsage.ts) |
+| Errors     | none                                                 |
+| Permission | `allow-cache-usage`                                  |
 
 #### `clear_cache`
 
@@ -903,12 +903,12 @@ info-hash directories under `torrentplayer-swarm/` and `librqbit/` are removed; 
 layouts, and unrelated files are left alone. The result reports bytes and downloads removed. The
 frontend asks for confirmation first.
 
-|            |                                                                 |
-| ---------- | --------------------------------------------------------------- |
-| Arguments  | none                                                            |
-| Returns    | [`ClearCacheOutcome`](../src/lib/bindings/ClearCacheOutcome.ts) |
-| Errors     | `internal`                                                      |
-| Permission | `allow-clear-cache`                                             |
+|            |                                                                    |
+| ---------- | ------------------------------------------------------------------ |
+| Arguments  | none                                                               |
+| Returns    | [`ClearCacheOutcome`](../ui/src/lib/bindings/ClearCacheOutcome.ts) |
+| Errors     | `internal`                                                         |
+| Permission | `allow-clear-cache`                                                |
 
 #### `choose_download_dir`
 
@@ -947,24 +947,24 @@ see [incoming peer connections](network.md#incoming-peer-connections)). `state.k
 `killSwitchActive`, `error`, `disconnected`; `reconnecting`, `killSwitchActive`, and `error`
 carry a `reason`.
 
-|            |                                                         |
-| ---------- | ------------------------------------------------------- |
-| Arguments  | none                                                    |
-| Returns    | [`NetworkStatus`](../src/lib/bindings/NetworkStatus.ts) |
-| Errors     | none                                                    |
-| Permission | `allow-network-status`                                  |
+|            |                                                            |
+| ---------- | ---------------------------------------------------------- |
+| Arguments  | none                                                       |
+| Returns    | [`NetworkStatus`](../ui/src/lib/bindings/NetworkStatus.ts) |
+| Errors     | none                                                       |
+| Permission | `allow-network-status`                                     |
 
 #### `recheck_network`
 
 Checks the interface or proxy now instead of at the next 5-second interval (a "Try again" button
 while the kill switch is engaged), waits up to 6 s for the result, and returns the status.
 
-|            |                                                         |
-| ---------- | ------------------------------------------------------- |
-| Arguments  | none                                                    |
-| Returns    | [`NetworkStatus`](../src/lib/bindings/NetworkStatus.ts) |
-| Errors     | none                                                    |
-| Permission | `allow-recheck-network`                                 |
+|            |                                                            |
+| ---------- | ---------------------------------------------------------- |
+| Arguments  | none                                                       |
+| Returns    | [`NetworkStatus`](../ui/src/lib/bindings/NetworkStatus.ts) |
+| Errors     | none                                                       |
+| Permission | `allow-recheck-network`                                    |
 
 #### `list_interfaces`
 
@@ -972,12 +972,12 @@ The machine's network interfaces for the "VPN adapter" picker: `name` (the value
 in `network.interface`; adapter friendly names on Windows), `addresses`, `isUp`, `isLoopback`,
 and `likelyVpn` (point-to-point, or a name such as `wg0`, `tun0`, or one containing "VPN").
 
-|            |                                                                 |
-| ---------- | --------------------------------------------------------------- |
-| Arguments  | none                                                            |
-| Returns    | [`NetworkInterface[]`](../src/lib/bindings/NetworkInterface.ts) |
-| Errors     | `internal` if the operating system cannot list interfaces       |
-| Permission | `allow-list-interfaces`                                         |
+|            |                                                                    |
+| ---------- | ------------------------------------------------------------------ |
+| Arguments  | none                                                               |
+| Returns    | [`NetworkInterface[]`](../ui/src/lib/bindings/NetworkInterface.ts) |
+| Errors     | `internal` if the operating system cannot list interfaces          |
+| Permission | `allow-list-interfaces`                                            |
 
 #### `validate_wireguard_config`
 
@@ -991,7 +991,7 @@ after parsing. The Settings page shows this before saving with
 |            |                                                                  |
 | ---------- | ---------------------------------------------------------------- |
 | Arguments  | `{ text: string }`                                               |
-| Returns    | [`WireGuardSummary`](../src/lib/bindings/WireGuardSummary.ts)    |
+| Returns    | [`WireGuardSummary`](../ui/src/lib/bindings/WireGuardSummary.ts) |
 | Errors     | `invalid-argument`, naming the line; never contains key material |
 | Permission | `allow-validate-wireguard-config`                                |
 
@@ -1007,12 +1007,12 @@ is stored, so an invalid file saves nothing. The text is wiped from memory after
 `settings-changed` once. The built-in tunnel does not exist yet, so importing does not change the
 mode.
 
-|            |                                                                                                                                       |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Arguments  | `{ text: string, name: string \| null }` (`name` labels it, for example the file name; trimmed)                                       |
-| Returns    | [`WireGuardImport`](../src/lib/bindings/WireGuardImport.ts): `summary` (no keys), `view` (`SettingsView`), `secrets` (`SecretStatus`) |
-| Errors     | `invalid-argument` (the file, or `network.wireguard: …`); `internal` if the credential store is unavailable or refuses                |
-| Permission | `allow-import-wireguard-config`                                                                                                       |
+|            |                                                                                                                                          |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | `{ text: string, name: string \| null }` (`name` labels it, for example the file name; trimmed)                                          |
+| Returns    | [`WireGuardImport`](../ui/src/lib/bindings/WireGuardImport.ts): `summary` (no keys), `view` (`SettingsView`), `secrets` (`SecretStatus`) |
+| Errors     | `invalid-argument` (the file, or `network.wireguard: …`); `internal` if the credential store is unavailable or refuses                   |
+| Permission | `allow-import-wireguard-config`                                                                                                          |
 
 #### `check_connection`
 
@@ -1022,12 +1022,12 @@ the IPv6 one without IPv4). While the kill switch is engaged it fails with `kill
 without sending anything. With `network.showPublicIp` on, the answer also updates the status
 bar.
 
-|            |                                               |
-| ---------- | --------------------------------------------- |
-| Arguments  | none                                          |
-| Returns    | [`PublicIp`](../src/lib/bindings/PublicIp.ts) |
-| Errors     | `kill-switch`, `network-unavailable`          |
-| Permission | `allow-check-connection`                      |
+|            |                                                  |
+| ---------- | ------------------------------------------------ |
+| Arguments  | none                                             |
+| Returns    | [`PublicIp`](../ui/src/lib/bindings/PublicIp.ts) |
+| Errors     | `kill-switch`, `network-unavailable`             |
+| Permission | `allow-check-connection`                         |
 
 #### `public_ip`
 
@@ -1035,26 +1035,26 @@ The status bar's latest public addresses, kept current by the app (see the publi
 [network](network.md)): `null` while unknown, while traffic is blocked, or when
 `network.showPublicIp` is off. Updates arrive as `network-public-ip` events. Sends nothing.
 
-|            |                                                         |
-| ---------- | ------------------------------------------------------- |
-| Arguments  | none                                                    |
-| Returns    | [`PublicIp`](../src/lib/bindings/PublicIp.ts) or `null` |
-| Errors     | none                                                    |
-| Permission | `allow-public-ip`                                       |
+|            |                                                            |
+| ---------- | ---------------------------------------------------------- |
+| Arguments  | none                                                       |
+| Returns    | [`PublicIp`](../ui/src/lib/bindings/PublicIp.ts) or `null` |
+| Errors     | none                                                       |
+| Permission | `allow-public-ip`                                          |
 
 ## Events
 
-| Event               | Payload                                                 | When                                                               |
-| ------------------- | ------------------------------------------------------- | ------------------------------------------------------------------ |
-| `settings-changed`  | [`Settings`](../src/lib/bindings/Settings.ts)           | After `update_settings`, `set_secret`, or `clear_secret` succeeds. |
-| `library-changed`   | [`LibraryItem`](../src/lib/bindings/LibraryItem.ts)     | After an item is opened or a playback checkpoint is saved.         |
-| `network-status`    | [`NetworkStatus`](../src/lib/bindings/NetworkStatus.ts) | At start-up and whenever the network state changes.                |
-| `network-public-ip` | [`PublicIp`](../src/lib/bindings/PublicIp.ts) or `null` | When the status bar's public addresses change (see `public_ip`).   |
-| `seeding-started`   | none                                                    | When a torrent starts seeding after a playback ends (once each).   |
+| Event               | Payload                                                    | When                                                               |
+| ------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------ |
+| `settings-changed`  | [`Settings`](../ui/src/lib/bindings/Settings.ts)           | After `update_settings`, `set_secret`, or `clear_secret` succeeds. |
+| `library-changed`   | [`LibraryItem`](../ui/src/lib/bindings/LibraryItem.ts)     | After an item is opened or a playback checkpoint is saved.         |
+| `network-status`    | [`NetworkStatus`](../ui/src/lib/bindings/NetworkStatus.ts) | At start-up and whenever the network state changes.                |
+| `network-public-ip` | [`PublicIp`](../ui/src/lib/bindings/PublicIp.ts) or `null` | When the status bar's public addresses change (see `public_ip`).   |
+| `seeding-started`   | none                                                       | When a torrent starts seeding after a playback ends (once each).   |
 
 The main window may listen to events (`core:event:allow-listen` and `core:event:allow-unlisten`
 in `src-tauri/capabilities/main.json`; it cannot emit them). The frontend follows
-`network-status` with `followNetwork` in `src/lib/network.ts`, which calls `network_status` once
+`network-status` with `followNetwork` in `ui/src/lib/network.ts`, which calls `network_status` once
 and then applies each event. `followLibrary` registers its listener before reading
 `library_items`, then overlays any changes that race the initial read. Rust subsystems get the
 same settings and network notifications from `SettingsState::subscribe` (a `watch` channel) and
