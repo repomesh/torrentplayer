@@ -27,7 +27,8 @@ use std::time::Duration;
 use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
-use tokio_util::sync::{CancellationToken, DropGuard};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use ts_rs::TS;
 
 use crate::bind;
@@ -312,7 +313,7 @@ pub(crate) async fn serve(inner: Weak<Inner>, cancel: CancellationToken) {
     else {
         return;
     };
-    let mut active: Option<(Key, DropGuard)> = None;
+    let mut active: Option<(Key, Listening)> = None;
     loop {
         let Some(net) = inner.upgrade() else {
             return;
@@ -320,7 +321,7 @@ pub(crate) async fn serve(inner: Weak<Inner>, cancel: CancellationToken) {
         let plan = plan(&net.state());
         let (consumer, retry) = match plan {
             Plan::Stop(status) => {
-                active = None;
+                close(&mut active).await;
                 set_status(&net, status);
                 (None, false)
             }
@@ -328,10 +329,10 @@ pub(crate) async fn serve(inner: Weak<Inner>, cancel: CancellationToken) {
                 let mut failed = false;
                 if active.as_ref().is_none_or(|(current, _)| *current != key) {
                     // Close the old sockets before opening the new ones on the same port.
-                    active = None;
+                    close(&mut active).await;
                     match open(&net, key, &tx).await {
-                        Ok((port, addresses, guard)) => {
-                            active = Some((Key { port, ..key }, guard));
+                        Ok((port, addresses, listening)) => {
+                            active = Some((Key { port, ..key }, listening));
                             set_status(
                                 &net,
                                 IncomingStatus::Listening {
@@ -374,7 +375,7 @@ pub(crate) async fn serve(inner: Weak<Inner>, cancel: CancellationToken) {
                 }
             } => {
                 // Forget the failed attempt so it is made again.
-                active = None;
+                close(&mut active).await;
             }
         }
     }
@@ -421,6 +422,31 @@ fn set_status(net: &Inner, status: IncomingStatus) {
     net.status_changed();
 }
 
+/// The accept loops of one open listener. Dropping it stops them; [`close`] also waits until
+/// their sockets are closed.
+struct Listening {
+    cancel: CancellationToken,
+    accepting: Vec<JoinHandle<()>>,
+}
+
+impl Drop for Listening {
+    fn drop(&mut self) {
+        self.cancel.cancel();
+    }
+}
+
+/// Closes the active listener and waits until its sockets are closed, so the port neither
+/// accepts after the status says it stopped nor is still taken when it is opened again.
+async fn close(active: &mut Option<(Key, Listening)>) {
+    let Some((_, mut listening)) = active.take() else {
+        return;
+    };
+    listening.cancel.cancel();
+    for task in listening.accepting.drain(..) {
+        let _ = task.await;
+    }
+}
+
 /// Sockets opened for one route.
 enum Bound {
     Os(Vec<(TcpListener, SocketAddr)>),
@@ -428,12 +454,12 @@ enum Bound {
 }
 
 /// Opens the listening sockets for `key` and starts accepting. Returns the port (a random one
-/// may have been replaced), the addresses, and a guard that closes everything when dropped.
+/// may have been replaced), the addresses, and the accept loops.
 async fn open(
     net: &Arc<Inner>,
     key: Key,
     tx: &mpsc::Sender<IncomingPeer>,
-) -> Result<(u16, Vec<String>, DropGuard), NetError> {
+) -> Result<(u16, Vec<String>, Listening), NetError> {
     let network = Network {
         inner: Arc::clone(net),
     };
@@ -466,35 +492,36 @@ async fn open(
     }
     let cancel = CancellationToken::new();
     let mut addresses = Vec::new();
+    let mut accepting = Vec::new();
     match bound {
         Bound::Os(listeners) => {
             for (listener, addr) in listeners {
                 addresses.push(addr.to_string());
-                tokio::spawn(accept_os(
+                accepting.push(tokio::spawn(accept_os(
                     listener,
                     tx.clone(),
                     lease.clone(),
                     cancel.child_token(),
-                ));
+                )));
             }
         }
         Bound::Tunnel(listeners, tunnel) => {
             for (listener, addr) in listeners {
                 addresses.push(addr.to_string());
-                tokio::spawn(accept_tunnel(
+                accepting.push(tokio::spawn(accept_tunnel(
                     listener,
                     tunnel.clone(),
                     tx.clone(),
                     lease.clone(),
                     cancel.child_token(),
-                ));
+                )));
             }
         }
     }
     if key.upnp && matches!(route, Route::Direct) {
         tokio::spawn(forward_port(port, cancel.child_token()));
     }
-    Ok((port, addresses, cancel.drop_guard()))
+    Ok((port, addresses, Listening { cancel, accepting }))
 }
 
 /// Opens the sockets for `route`, never anywhere else: every interface in direct mode, the
