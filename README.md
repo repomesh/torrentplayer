@@ -163,9 +163,12 @@ sources, details, and where other tools are the better fit.
 - **Three connection modes:** direct (with your VPN provider's app connected, OpenVPN-based
   apps included, traffic goes through it); a **built-in WireGuard tunnel** that runs inside the
   app with no administrator rights or separate VPN app; or a SOCKS5 proxy.
-- **Kill switch in every protected mode.** If the VPN or proxy drops, all traffic stops and open
-  connections close. Nothing falls back to your direct connection, and traffic resumes by
-  itself when the tunnel is back.
+- **Kill switch in the WireGuard and SOCKS5 modes.** If the tunnel or proxy drops, all traffic
+  stops and open connections close. Nothing falls back to your direct connection, and traffic
+  resumes by itself when the tunnel is back. With your own VPN app, use its kill switch.
+- **Incoming peer connections, if you want them** (off by default, so there is no firewall
+  prompt): on a chosen or random port, with optional UPnP in Direct mode, or inside the
+  WireGuard tunnel on a port your provider forwards. Never through a SOCKS5 proxy.
 - **See your speed and where you appear from.** The status bar shows the total download and
   upload speed of every torrent, and your public IPv4 and IPv6 addresses as the
   internet sees them, through the current mode (optional; see [Privacy](#privacy)).
@@ -220,17 +223,18 @@ the playback library is a user-only local SQLite database and is never sent anyw
 
 ## Get TorrentPlayer
 
-TorrentPlayer is an early preview; there are no signed releases yet. You can:
+TorrentPlayer is an early preview. The latest version is **0.3.0**; see the
+[changelog](CHANGELOG.md) for what changed. You can:
 
+- **Download a release** from the [Releases](https://github.com/torrentplayer/torrentplayer/releases)
+  page: installers for Windows, macOS, and Linux with SHA-256 checksums, an SBOM, and build
+  provenance attestations ([how to verify them](docs/release.md#verifying-a-download)). They
+  are not code-signed yet, so Windows SmartScreen and macOS Gatekeeper will warn on first launch.
 - **Download a test build.** Every push to `main` builds unsigned installers for Windows, macOS,
   and Linux: open the latest [Build workflow run](https://github.com/torrentplayer/torrentplayer/actions/workflows/build.yml)
   and download the `installers-<platform>` artifact. Unsigned builds trigger SmartScreen on
   Windows and Gatekeeper on macOS.
 - **Build from source** (below).
-
-Signed installers will be published on the [Releases](https://github.com/torrentplayer/torrentplayer/releases)
-page with SHA-256 checksums, an SBOM, and build provenance attestations; see
-[docs/release.md](docs/release.md) for how to verify them.
 
 | Platform                         | Packages                 |
 | -------------------------------- | ------------------------ |
@@ -292,12 +296,14 @@ The docs also build as a book with [mdBook](https://rust-lang.github.io/mdBook/)
 ## Roadmap
 
 Working today: the streaming engine (for `.torrent` files and magnet links), player, search, the
-queue with background downloads, VPN, WireGuard, and proxy modes with a kill switch, and
+queue with background downloads, the WireGuard and SOCKS5 modes with a kill switch, and
 bandwidth limits. Next:
 
 - [x] Seeding controls: keep sharing after watching, ratio and time targets, peer limits
 - [x] Cache size limit and automatic clean-up of old downloads
 - [x] Resume where you left off
+- [x] Dolby and DTS audio (converted as it plays)
+- [x] Incoming peer connections, with optional UPnP
 - [ ] More search sources: Internet Archive, Academic Torrents, and your own
 - [ ] libmpv player for codecs the system web engine cannot play
 - [ ] Signed releases for every platform
@@ -317,8 +323,9 @@ pick one that plays smoothly, or switch the queue to "Fastest first".
 active, under the global upload limit. Settings can keep sharing after playback until either a
 ratio or time target is reached.
 
-**What happens if my VPN drops?** The kill switch stops all traffic and closes connections until
-the tunnel is back; nothing falls back to a direct connection. See
+**What happens if my VPN drops?** In the WireGuard and SOCKS5 modes, the kill switch stops all
+traffic and closes connections until the tunnel is back; nothing falls back to a direct
+connection. If you use your own VPN app (Direct mode), turn on that app's kill switch. See
 [network modes](docs/network.md).
 
 **Where are videos stored?** In `TorrentPlayer` inside your Downloads folder, unless you choose
