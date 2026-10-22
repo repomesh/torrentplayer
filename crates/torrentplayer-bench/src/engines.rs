@@ -7,10 +7,11 @@ use std::net::{Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use futures_util::future::BoxFuture;
-use torrentplayer_net::{IncomingConfig, Network, NetworkConfig, NetworkOptions};
+use torrentplayer_net::{IncomingConfig, Network, NetworkConfig, NetworkMode, NetworkOptions};
 use torrentplayer_stream::{MediaReader, MediaSource};
 use torrentplayer_swarm::{Metainfo, Swarm, SwarmConfig, Torrent};
 use torrentplayer_torrent::{
@@ -94,14 +95,40 @@ pub(crate) enum BenchEngine {
     Rqbit {
         engine: Engine,
         id: Option<TorrentId>,
+        /// The network manager of a protected mode ([`BenchConfig::network`]).
+        network: Option<Network>,
     },
     Swarm {
         swarm: Swarm,
         torrent: Option<Torrent>,
-        /// The network manager whose listener takes incoming peers, with
-        /// [`BenchConfig::incoming`].
+        /// The network manager: of a protected mode ([`BenchConfig::network`]), or a direct one
+        /// whose listener takes incoming peers ([`BenchConfig::incoming`]).
         network: Option<Network>,
     },
+}
+
+/// How long a protected mode may take to come up before the run fails.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A network manager in the protected mode `mode`, as the app runs one: verified and with its
+/// kill switch. Fails if the tunnel or proxy does not let traffic through, so a dead tunnel is
+/// reported as such rather than measured as a slow swarm.
+async fn protected_network(mode: &NetworkMode) -> anyhow::Result<Network> {
+    let config = NetworkConfig {
+        mode: mode.clone(),
+        ..NetworkConfig::default()
+    };
+    let network = Network::start(config, NetworkOptions::default()).await?;
+    let status = network.settled(CONNECT_TIMEOUT).await;
+    if !status.traffic_allowed {
+        network.shutdown();
+        bail!(
+            "the {:?} connection is not up ({:?}); check the configuration",
+            status.mode,
+            status.state
+        );
+    }
+    Ok(network)
 }
 
 impl BenchEngine {
@@ -123,9 +150,17 @@ impl BenchEngine {
                 if config.incoming {
                     c.listen_addr = Some((Ipv6Addr::UNSPECIFIED, 0).into());
                 }
+                // As in the app's protected modes: no DHT, listener, or UDP of librqbit's own,
+                // and peers and trackers through the network's loopback bridge.
+                let network = match config.network.as_ref().filter(|_| config.public_swarm) {
+                    Some(mode) => Some(protected_network(mode).await?),
+                    None => None,
+                };
+                c.network.clone_from(&network);
                 Self::Rqbit {
                     engine: Engine::start(c).await?,
                     id: None,
+                    network,
                 }
             }
             EngineKind::Swarm => {
@@ -139,23 +174,28 @@ impl BenchEngine {
                     .as_ref()
                     .zip(kind.dht_state_file())
                     .map(|(d, f)| d.join(f));
-                // As in the app: the network manager listens (direct mode: every interface, a
-                // random port) and hands accepted connections to the engine, which announces
-                // the port to trackers.
-                let network = if config.incoming {
-                    let network =
-                        Network::start(NetworkConfig::default(), NetworkOptions::default()).await?;
-                    network.set_incoming(IncomingConfig {
-                        enabled: true,
-                        port: 0,
-                        upnp: false,
-                    });
-                    c.network = Some(network.clone());
-                    c.accept_incoming = true;
-                    Some(network)
-                } else {
-                    None
+                // As in the app: everything goes through the network manager of the selected
+                // mode. With incoming peers, it also listens where the mode allows (direct:
+                // every interface; WireGuard: inside the tunnel; SOCKS5: nowhere) and hands
+                // accepted connections to the engine, which announces the port to trackers.
+                let network = match config.network.as_ref().filter(|_| config.public_swarm) {
+                    Some(mode) => Some(protected_network(mode).await?),
+                    None if config.incoming => Some(
+                        Network::start(NetworkConfig::default(), NetworkOptions::default()).await?,
+                    ),
+                    None => None,
                 };
+                if let Some(network) = &network {
+                    if config.incoming {
+                        network.set_incoming(IncomingConfig {
+                            enabled: true,
+                            port: 0,
+                            upnp: false,
+                        });
+                        c.accept_incoming = true;
+                    }
+                    c.network = Some(network.clone());
+                }
                 c.allow_local_web_seeds = config.local_web_seeds;
                 c.enable_web_seeds = config.web_seeds;
                 c.download_limit_bps = config.download_limit_bps;
@@ -181,7 +221,7 @@ impl BenchEngine {
         peers: Vec<SocketAddr>,
     ) -> anyhow::Result<(String, Vec<BenchFile>)> {
         match self {
-            Self::Rqbit { engine, id } => {
+            Self::Rqbit { engine, id, .. } => {
                 let info = engine.add_with_peers(source, peers).await?;
                 *id = Some(info.id);
                 let files = info
@@ -225,7 +265,9 @@ impl BenchEngine {
 
     pub(crate) fn media(&self, file: &BenchFile) -> anyhow::Result<Arc<dyn MediaSource>> {
         Ok(match self {
-            Self::Rqbit { engine, id } => Arc::new(engine.media_source(added(*id)?, file.index)?),
+            Self::Rqbit { engine, id, .. } => {
+                Arc::new(engine.media_source(added(*id)?, file.index)?)
+            }
             Self::Swarm { torrent, .. } => Arc::new(SwarmMedia {
                 torrent: torrent.clone().context("no torrent added")?,
                 file: file.index,
@@ -243,7 +285,7 @@ impl BenchEngine {
         byte_rate: u64,
     ) -> anyhow::Result<Box<dyn Playhead>> {
         match self {
-            Self::Rqbit { engine, id } => {
+            Self::Rqbit { engine, id, .. } => {
                 let session = engine
                     .start_playback(added(*id)?, file.index, config.prioritization.clone())
                     .await?;
@@ -269,7 +311,7 @@ impl BenchEngine {
 
     pub(crate) fn stats(&self) -> anyhow::Result<BenchStats> {
         Ok(match self {
-            Self::Rqbit { engine, id } => {
+            Self::Rqbit { engine, id, .. } => {
                 let s = engine.stats(added(*id)?)?;
                 BenchStats {
                     wasted_bytes: None,
@@ -308,11 +350,18 @@ impl BenchEngine {
     /// Removes the torrent and stops the engine.
     pub(crate) async fn finish(self) -> anyhow::Result<()> {
         match self {
-            Self::Rqbit { engine, id } => {
+            Self::Rqbit {
+                engine,
+                id,
+                network,
+            } => {
                 if let Some(id) = id {
                     engine.remove(id, true).await?;
                 }
                 engine.shutdown().await;
+                if let Some(network) = network {
+                    network.shutdown();
+                }
             }
             Self::Swarm {
                 swarm,

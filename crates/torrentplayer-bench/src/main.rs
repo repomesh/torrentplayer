@@ -30,6 +30,15 @@
 //!   --anchors N          anchor budget for prioritization; 0 = librqbit's built-in only
 //!   --no-dht             public swarms: use trackers only
 //!   --no-trackers        public swarms: use the DHT only (as for a trackerless magnet link)
+//!   --wireguard FILE     public swarms: run both engines through TorrentPlayer's built-in
+//!                        WireGuard tunnel with this `.conf` file, as the app's WireGuard mode
+//!                        (kill switch on; the run fails if the tunnel does not come up)
+//!   --socks5 HOST:PORT   public swarms: run both engines through this SOCKS5 proxy, as the
+//!                        app's SOCKS5 mode (names, trackers, and DHT through the proxy)
+//!   --socks5-user NAME   the proxy's username; the password is read from the environment
+//!                        variable TORRENTPLAYER_BENCH_SOCKS5_PASSWORD, never the command line.
+//!                        In both modes librqbit has no DHT of its own and connects through the
+//!                        network's bridge, as in the app; local media in `suite` runs directly
 //!   --dht-state DIR      keep the swarm engine's DHT routing tables in DIR between sessions,
 //!                        as the app does in its data folder (`swarm.json`); the first session
 //!                        without a saved state starts cold. librqbit keeps none, as in the app
@@ -133,6 +142,7 @@ use torrentplayer_bench::suite::{
 use torrentplayer_bench::tracker::LocalTracker;
 use torrentplayer_bench::webseed::{WebSeedServer, with_web_seed};
 use torrentplayer_bench::{BenchConfig, EngineKind, Report, Summary, run_once};
+use torrentplayer_net::{NetworkMode, Secret, Socks5Config, WireGuardConfig};
 use torrentplayer_torrent::TorrentSource;
 use tracing_subscriber::EnvFilter;
 
@@ -241,6 +251,12 @@ fn parse_args() -> anyhow::Result<Args> {
         other => bail!("unknown mode {other:?}; expected `local`, `torrent`, or `limit`"),
     };
     let bench = bench_options(&mut take)?;
+    // A tunnel or proxy cannot reach the local seeders on 127.0.0.1, and the app never sends
+    // peer traffic there either.
+    anyhow::ensure!(
+        bench.network.is_none() || matches!(mode, Mode::Torrent(_)),
+        "--wireguard and --socks5 apply to public swarms: use them with `torrent` or `suite`"
+    );
     let engine = take("engine").map_or(Ok(EngineKind::Rqbit), |e| e.parse())?;
     let args = Args {
         mode,
@@ -313,6 +329,66 @@ fn add_churn(peers: &mut [PeerProfile], period: Duration, total: Duration) {
             peer.offline.push((from, from + period / 4));
             from += period;
         }
+    }
+}
+
+/// Environment variable holding the SOCKS5 password, so it stays off the command line (and out
+/// of the suite report, which lists the options).
+const SOCKS5_PASSWORD_VAR: &str = "TORRENTPLAYER_BENCH_SOCKS5_PASSWORD";
+
+/// The protected network mode from `--wireguard FILE` or `--socks5 HOST:PORT` (with
+/// `--socks5-user`), configured as the app configures them; `None` connects directly.
+fn network_mode(
+    take: &mut dyn FnMut(&str) -> Option<String>,
+) -> anyhow::Result<Option<NetworkMode>> {
+    let wireguard = take("wireguard");
+    let socks5 = take("socks5");
+    let user = take("socks5-user");
+    match (wireguard, socks5) {
+        (Some(_), Some(_)) => bail!("choose one of --wireguard and --socks5"),
+        (Some(path), None) => {
+            anyhow::ensure!(user.is_none(), "--socks5-user needs --socks5");
+            let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
+            let (config, notes) =
+                WireGuardConfig::parse(&text).context("the WireGuard configuration is invalid")?;
+            for note in notes {
+                tracing::warn!("{path}: {note}");
+            }
+            Ok(Some(NetworkMode::WireGuard(config)))
+        }
+        (None, Some(addr)) => {
+            let (host, port) = addr
+                .rsplit_once(':')
+                .context("--socks5 expects HOST:PORT")?;
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            anyhow::ensure!(!host.is_empty(), "--socks5 expects HOST:PORT");
+            let port = port.parse().context("--socks5 expects HOST:PORT")?;
+            Ok(Some(NetworkMode::Socks5(Socks5Config {
+                host: host.to_owned(),
+                port,
+                username: user,
+                password: std::env::var(SOCKS5_PASSWORD_VAR)
+                    .ok()
+                    .filter(|p| !p.is_empty())
+                    .map(Secret::new),
+                // The app's defaults: names, trackers, and DHT all through the proxy.
+                remote_dns: true,
+                proxy_trackers: true,
+                proxy_dht: true,
+            })))
+        }
+        (None, None) => {
+            anyhow::ensure!(user.is_none(), "--socks5-user needs --socks5");
+            Ok(None)
+        }
+    }
+}
+
+/// A protected mode for reports and logs, without secrets: `WireGuard via 198.51.100.1:51820`.
+fn describe_network(mode: &NetworkMode) -> String {
+    match mode.endpoint() {
+        Some(endpoint) => format!("{:?} via {endpoint}", mode.kind()),
+        None => format!("{:?}", mode.kind()),
     }
 }
 
@@ -428,6 +504,7 @@ fn bench_options(take: &mut dyn FnMut(&str) -> Option<String>) -> anyhow::Result
     }
     bench.dht = take("no-dht").is_none();
     bench.trackers = take("no-trackers").is_none();
+    bench.network = network_mode(take)?;
     bench.dht_state_dir = take("dht-state").map(PathBuf::from);
     bench.web_seeds = take("no-web-seeds").is_none();
     bench.cold_seeks = take("shared-cache").is_none();
@@ -685,6 +762,12 @@ async fn run(args: &Args) -> anyhow::Result<Report> {
             }
         }
         Mode::Torrent(input) => {
+            if let Some(mode) = &bench.network {
+                tracing::info!(
+                    "network: {} (as the app's protected mode)",
+                    describe_network(mode)
+                );
+            }
             for i in 0..args.runs {
                 runs.push(
                     run_once(args.engine, || source_from(input), &bench)
@@ -1062,6 +1145,7 @@ fn suite(args: impl Iterator<Item = String>) -> anyhow::Result<bool> {
         started: torrentplayer_bench::suite::timestamp(now),
         list: args.list.display().to_string(),
         options: args.options.clone(),
+        network: args.bench.network.as_ref().map(describe_network),
         runs: args.runs,
         entries: Vec::new(),
     };
@@ -1439,6 +1523,64 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mode(options: &[(&str, &str)]) -> anyhow::Result<Option<NetworkMode>> {
+        let mut options: Options = options
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        network_mode(&mut |name| options.remove(name))
+    }
+
+    #[test]
+    fn socks5_options() {
+        let Some(NetworkMode::Socks5(c)) = mode(&[("socks5", "proxy.example:1080")]).unwrap()
+        else {
+            panic!("not SOCKS5");
+        };
+        assert_eq!((c.host.as_str(), c.port), ("proxy.example", 1080));
+        assert!(c.remote_dns && c.proxy_trackers && c.proxy_dht);
+        assert_eq!(c.username, None);
+        let Some(NetworkMode::Socks5(c)) =
+            mode(&[("socks5", "[2001:db8::1]:9050"), ("socks5-user", "me")]).unwrap()
+        else {
+            panic!("not SOCKS5");
+        };
+        assert_eq!((c.host.as_str(), c.port), ("2001:db8::1", 9050));
+        assert_eq!(c.username.as_deref(), Some("me"));
+        assert!(mode(&[("socks5", "no-port")]).is_err());
+        assert!(mode(&[("socks5", ":1080")]).is_err());
+        assert!(
+            mode(&[("socks5-user", "me")]).is_err(),
+            "a user without a proxy"
+        );
+        assert!(mode(&[]).unwrap().is_none(), "direct by default");
+    }
+
+    #[test]
+    fn wireguard_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("wg0.conf");
+        // Example keys from the `wg(8)` manual.
+        std::fs::write(
+            &conf,
+            "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\n\
+             Address = 10.0.0.2/32\n[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\n\
+             AllowedIPs = 0.0.0.0/0\nEndpoint = 198.51.100.1:51820\n",
+        )
+        .unwrap();
+        let path = conf.display().to_string();
+        let parsed = mode(&[("wireguard", &path)]).unwrap().unwrap();
+        assert!(matches!(parsed, NetworkMode::WireGuard(_)));
+        let described = describe_network(&parsed);
+        assert_eq!(described, "WireGuard via 198.51.100.1:51820");
+        assert!(!described.contains("yAnz"), "no private key in reports");
+        assert!(mode(&[("wireguard", "missing.conf")]).is_err());
+        assert!(
+            mode(&[("wireguard", &path), ("socks5", "p:1")]).is_err(),
+            "one mode at a time"
+        );
+    }
 
     #[test]
     fn churn_staggers_outages() {

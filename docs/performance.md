@@ -169,6 +169,37 @@ off. `first peer` is the time from adding the torrent to the first connected pee
 a magnet link only once it has the metadata, which already needs a peer, so for magnet links
 sampling starts after the metadata arrived and the metadata time is the measure to compare.
 
+## Through a VPN or proxy
+
+Public-swarm runs (`torrent`, and the torrents and magnet links of `suite`) can go through the
+app's protected network modes instead of connecting directly, to measure what users of those
+modes get:
+
+```sh
+torrentplayer-bench torrent sintel.torrent --engine swarm --runs 1 --wireguard wg0.conf
+TORRENTPLAYER_BENCH_SOCKS5_PASSWORD=... torrentplayer-bench torrent sintel.torrent \
+  --socks5 proxy.example:1080 --socks5-user me
+cargo bench-suite my-files.txt --public --wireguard wg0.conf
+```
+
+- `--wireguard FILE` reads a WireGuard `.conf` with the app's parser and runs both engines
+  through TorrentPlayer's built-in tunnel, as the app's WireGuard mode does.
+- `--socks5 HOST:PORT` (with `--socks5-user`; the password comes from
+  `TORRENTPLAYER_BENCH_SOCKS5_PASSWORD`, never the command line) uses the app's SOCKS5 mode
+  with its defaults: host names, trackers, and DHT through the proxy.
+
+Each engine gets its own network manager, verified before the run starts: a tunnel or proxy that
+does not let traffic through within 30 seconds fails the run with the network's reason instead
+of being measured as a slow swarm. The kill switch stays on, so nothing leaves outside the
+tunnel or proxy. As in the app, librqbit then has no DHT, listener, or UDP of its own and reaches
+peers through the network's loopback bridge, so it finds fewer peers than torrentplayer-swarm,
+whose DHT and UDP trackers use the tunnel or the proxy's UDP relay. The app also hands
+librqbit peers it found through scoped DHT and UDP trackers; the bench does not, so for librqbit
+magnet links this is a lower bound. Local media (`local`, and local entries of `suite`) always
+runs directly: a tunnel cannot reach seeders on `127.0.0.1`. The suite report names the mode
+and endpoint (never keys or passwords). The app's former bind-to-adapter VPN mode no longer
+exists; to measure a VPN app, connect it system-wide and run without these options.
+
 ## Benchmark your own files
 
 `cargo bench-suite` runs the streaming benchmark on a list of your own media files, torrents,

@@ -100,6 +100,9 @@ pub struct BenchConfig {
     /// listener (direct mode, a random port), librqbit on its own listener, as in the app.
     /// Both listen on every interface (librqbit announces no port for a loopback listener).
     pub incoming: bool,
+    /// Run both engines in this protected network mode (the app's WireGuard or SOCKS5 mode,
+    /// verified and with its kill switch) instead of connecting directly. `None`: direct.
+    pub network: Option<torrentplayer_net::NetworkMode>,
     /// Cap the download rate (bytes per second), to model a home connection and limit usage.
     pub download_limit_bps: Option<std::num::NonZeroU32>,
     /// Maximum connected peers.
@@ -141,6 +144,7 @@ impl Default for BenchConfig {
             trackers: true,
             dht_state_dir: None,
             incoming: false,
+            network: None,
             download_limit_bps: None,
             peer_limit: None,
             max_connecting: None,

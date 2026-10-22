@@ -353,6 +353,9 @@ pub struct SuiteReport {
     pub list: String,
     /// The options, as given.
     pub options: Vec<String>,
+    /// The protected network mode public entries ran in (`WireGuard via host:port`), without
+    /// secrets; `None` if they connected directly. Local media always runs directly.
+    pub network: Option<String>,
     /// Runs per engine and scenario.
     pub runs: usize,
     /// One per list entry.
@@ -574,6 +577,14 @@ pub fn render_markdown(suite: &SuiteReport) -> String {
             suite.options.join(" ")
         }
     );
+    if let Some(network) = &suite.network {
+        let _ = writeln!(
+            out,
+            "Network: torrents and magnet links ran through {network}, as the app's protected \
+             mode does (kill switch on; librqbit without its own DHT). Local media ran \
+             directly.\n"
+        );
+    }
     out.push_str(GUIDE);
     for e in &suite.entries {
         let _ = writeln!(out, "\n## {}\n", e.entry.label);
@@ -906,6 +917,7 @@ mod tests {
             started: "20261022-000000".into(),
             list: "list.txt".into(),
             options: Vec::new(),
+            network: None,
             runs: 2,
             entries: vec![EntryResult {
                 entry,
