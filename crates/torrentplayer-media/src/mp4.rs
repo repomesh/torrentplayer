@@ -9,6 +9,7 @@
 //! sample tables are skipped without being read.
 
 use crate::audio::{AudioCodec, AudioTrack, MAX_AUDIO_TRACKS};
+use crate::layout::{MAX_SAMPLES, MAX_SEEK_POINTS, MediaLayout, SeekPoint, push_range, thin};
 use crate::sparse::{Sparse, Stop};
 use crate::tracks::{
     Container, MAX_SUBTITLE_TRACKS, SubtitleCodec, SubtitleTrack, TrackReport, duration_ms,
@@ -419,6 +420,296 @@ fn object_type(oti: u8) -> AudioCodec {
     }
 }
 
+/// The layout of an MP4 or MOV file (see [`crate::layout`]): the top-level boxes a player
+/// reads up to `moov`, the first chunk of any track, and the first video track's sync samples.
+pub(crate) fn layout(data: &Sparse) -> Result<MediaLayout, Stop> {
+    let len = data.len();
+    let mut ranges = Vec::new();
+    let mut mdat_first = false;
+    let mut found = None;
+    let mut at = 0;
+    for _ in 0..MAX_TOP_LEVEL {
+        if len - at < 8 {
+            break;
+        }
+        let b = header(data, at, len)?;
+        match &b.kind {
+            b"moov" => {
+                push_range(&mut ranges, at..b.end);
+                found = Some(b);
+                break;
+            }
+            // A player reads the header and skips the payload.
+            b"mdat" | b"free" | b"skip" | b"wide" => {
+                mdat_first |= &b.kind == b"mdat";
+                push_range(&mut ranges, at..b.body);
+            }
+            _ => push_range(&mut ranges, at..b.end),
+        }
+        at = b.end;
+    }
+    let moov = found.ok_or(Stop::Invalid("no moov box"))?;
+    let mut duration = None;
+    let mut media_start: Option<u64> = None;
+    let mut video: Option<(String, Vec<SeekPoint>)> = None;
+    walk(data, moov.body, moov.end, |b| {
+        if &b.kind == b"mvhd" {
+            duration = movie_duration(data, b)?;
+        } else if &b.kind == b"trak"
+            && let Some(t) = track_layout(data, b, video.is_none())?
+        {
+            media_start = Some(media_start.map_or(t.first_chunk, |m| m.min(t.first_chunk)));
+            if video.is_none() {
+                video = t.video;
+            }
+        }
+        Ok(None::<()>)
+    })?;
+    let media_start =
+        media_start.ok_or(Stop::Invalid("no samples in moov (a fragmented MP4 file?)"))?;
+    let (video_codec, seek_points) = match video {
+        Some((codec, points)) => (Some(codec), thin(points)),
+        None => (None, Vec::new()),
+    };
+    Ok(MediaLayout {
+        container: Container::Mp4,
+        video_codec,
+        header: ranges,
+        media_start,
+        seek_index: None,
+        seek_points,
+        duration_ms: duration,
+        index_at_end: mdat_first,
+    })
+}
+
+/// What [`layout`] needs from one track.
+struct TrackLayout {
+    /// Offset of its first chunk.
+    first_chunk: u64,
+    /// For a video track (when asked for): its codec and sync samples.
+    video: Option<(String, Vec<SeekPoint>)>,
+}
+
+/// The track's first chunk and, if it is a video track and `want_video`, its keyframes.
+/// `None` for a track without samples.
+fn track_layout(data: &Sparse, trak: Bx, want_video: bool) -> Result<Option<TrackLayout>, Stop> {
+    let Some(mdia) = child(data, trak, *b"mdia")? else {
+        return Ok(None);
+    };
+    let Some(stbl) = child(data, mdia, *b"minf")?
+        .map(|minf| child(data, minf, *b"stbl"))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    let chunks = match (child(data, stbl, *b"stco")?, child(data, stbl, *b"co64")?) {
+        (Some(stco), _) => Table::new(data, stco, 4, 4)?,
+        (None, Some(co64)) => Table::new(data, co64, 4, 8)?,
+        (None, None) => return Ok(None),
+    };
+    if chunks.count == 0 {
+        return Ok(None);
+    }
+    let first_chunk = chunks.uint(data, 0)?;
+    let is_video = match child(data, mdia, *b"hdlr")? {
+        Some(hdlr) if hdlr.body_len() >= 12 => &data.array::<4>(hdlr.body + 8)? == b"vide",
+        _ => false,
+    };
+    let video = if want_video && is_video {
+        let codec = sample_entry(data, mdia)?
+            .map_or_else(|| "unknown".to_owned(), |e| video_codec_name(e.kind));
+        Some((codec, sync_points(data, mdia, stbl, &chunks)?))
+    } else {
+        None
+    };
+    Ok(Some(TrackLayout { first_chunk, video }))
+}
+
+/// A short name for a video sample entry type.
+fn video_codec_name(kind: [u8; 4]) -> String {
+    let name = match &kind {
+        b"avc1" | b"avc2" | b"avc3" | b"avc4" => "H.264",
+        b"hvc1" | b"hev1" => "HEVC",
+        b"dvh1" | b"dvhe" => "HEVC (Dolby Vision)",
+        b"av01" => "AV1",
+        b"vp08" => "VP8",
+        b"vp09" => "VP9",
+        b"mp4v" => "MPEG-4 Part 2",
+        b"mjpa" | b"mjpb" | b"jpeg" => "Motion JPEG",
+        b"apch" | b"apcn" | b"apcs" | b"apco" | b"ap4h" => "ProRes",
+        other => return String::from_utf8_lossy(other).trim().to_owned(),
+    };
+    name.to_owned()
+}
+
+/// A sample table: `count` entries of `width` bytes, after `skip` bytes of the box and the
+/// 4-byte count.
+struct Table {
+    start: u64,
+    count: u64,
+    width: u64,
+}
+
+impl Table {
+    fn new(data: &Sparse, b: Bx, skip: u64, width: u64) -> Result<Self, Stop> {
+        if b.body_len() < skip + 4 {
+            return Err(Stop::Invalid("sample table too short"));
+        }
+        let count = u64::from(data.u32_at(b.body + skip)?);
+        let start = b.body + skip + 4;
+        if count.saturating_mul(width) > b.end - start {
+            return Err(Stop::Invalid("sample table runs past its box"));
+        }
+        Ok(Self {
+            start,
+            count,
+            width,
+        })
+    }
+
+    /// The table's bytes, read in one piece.
+    fn bytes<'a>(&self, data: &'a Sparse) -> Result<&'a [u8], Stop> {
+        let len = usize::try_from(self.count * self.width)
+            .map_err(|_| Stop::Invalid("sample table too large"))?;
+        data.get(self.start, len)
+    }
+
+    /// Entry `i` as an unsigned integer (4 or 8 bytes wide).
+    fn uint(&self, data: &Sparse, i: u64) -> Result<u64, Stop> {
+        let at = self.start + i * self.width;
+        if self.width == 8 {
+            data.u64_at(at)
+        } else {
+            data.u32_at(at).map(u64::from)
+        }
+    }
+}
+
+/// Big-endian `u32` number `i` of `bytes` (0 past the end).
+fn be32(bytes: &[u8], i: usize) -> u32 {
+    bytes
+        .get(i * 4..i * 4 + 4)
+        .and_then(|b| b.try_into().ok())
+        .map_or(0, u32::from_be_bytes)
+}
+
+/// The sync samples (keyframes) of a video track, with their decode times and offsets, from
+/// `stts`, `stss`, `stsc`, `stsz`, and the chunk offsets.
+// One pass over the sample tables, in step with each other.
+#[allow(clippy::too_many_lines)]
+fn sync_points(data: &Sparse, mdia: Bx, stbl: Bx, chunks: &Table) -> Result<Vec<SeekPoint>, Stop> {
+    let mdhd = child(data, mdia, *b"mdhd")?.ok_or(Stop::Invalid("no mdhd box"))?;
+    let scale_at = if mdhd.body_len() >= 1 && data.u8_at(mdhd.body)? == 1 {
+        20
+    } else {
+        12
+    };
+    if mdhd.body_len() < scale_at + 4 {
+        return Err(Stop::Invalid("mdhd box too short"));
+    }
+    let scale = u128::from(data.u32_at(mdhd.body + scale_at)?);
+    if scale == 0 {
+        return Err(Stop::Invalid("zero time scale"));
+    }
+    let need =
+        |kind: &[u8; 4]| child(data, stbl, *kind)?.ok_or(Stop::Invalid("missing sample table"));
+    let size_box = need(b"stsz")?;
+    if size_box.body_len() < 12 {
+        return Err(Stop::Invalid("stsz box too short"));
+    }
+    let fixed_size = u64::from(data.u32_at(size_box.body + 4)?);
+    let samples = u64::from(data.u32_at(size_box.body + 8)?);
+    if samples > MAX_SAMPLES {
+        return Err(Stop::Invalid("too many samples"));
+    }
+    let sizes = if fixed_size == 0 {
+        Table::new(data, size_box, 8, 4)?.bytes(data)?
+    } else {
+        &[]
+    };
+    let stts = Table::new(data, need(b"stts")?, 4, 8)?;
+    let stts_bytes = stts.bytes(data)?;
+    let runs = Table::new(data, need(b"stsc")?, 4, 12)?;
+    let runs_bytes = runs.bytes(data)?;
+    let syncs = child(data, stbl, *b"stss")?
+        .map(|b| Table::new(data, b, 4, 4))
+        .transpose()?;
+    let sync_bytes = syncs.as_ref().map(|t| t.bytes(data)).transpose()?;
+    let offsets = chunks.bytes(data)?;
+    let chunk_offset = |i: usize| -> u64 {
+        if chunks.width == 8 {
+            offsets
+                .get(i * 8..i * 8 + 8)
+                .and_then(|b| b.try_into().ok())
+                .map_or(0, u64::from_be_bytes)
+        } else {
+            u64::from(be32(offsets, i))
+        }
+    };
+    // Without `stss` every sample is a sync sample; keep a bounded, even selection.
+    let stride = if sync_bytes.is_none() {
+        samples.div_ceil(MAX_SEEK_POINTS as u64).max(1)
+    } else {
+        1
+    };
+    let to_usize = |n: u64| usize::try_from(n).map_err(|_| Stop::Invalid("table too large"));
+    let (stts_len, runs_len) = (to_usize(stts.count)?, to_usize(runs.count)?);
+    let sync_len = syncs.as_ref().map_or(Ok(0), |t| to_usize(t.count))?;
+
+    let mut points = Vec::new();
+    let (mut stts_at, mut stts_left, mut delta) = (0usize, 0u64, 0u64);
+    let (mut run_at, mut sync_at) = (0usize, 0usize);
+    let mut time: u128 = 0;
+    let mut sample: u64 = 0;
+    for chunk in 0..to_usize(chunks.count)? {
+        // Entries give 1-based first chunks; the last one that has started applies.
+        while run_at + 1 < runs_len
+            && u64::from(be32(runs_bytes, (run_at + 1) * 3)) <= chunk as u64 + 1
+        {
+            run_at += 1;
+        }
+        let per_chunk = u64::from(be32(runs_bytes, run_at * 3 + 1));
+        let mut offset = chunk_offset(chunk);
+        for _ in 0..per_chunk {
+            if sample >= samples {
+                return Ok(points);
+            }
+            let sync = match sync_bytes {
+                Some(sync_table) => {
+                    while sync_at < sync_len && u64::from(be32(sync_table, sync_at)) < sample + 1 {
+                        sync_at += 1;
+                    }
+                    sync_at < sync_len && u64::from(be32(sync_table, sync_at)) == sample + 1
+                }
+                None => sample.is_multiple_of(stride),
+            };
+            if sync {
+                points.push(SeekPoint {
+                    time_ms: u64::try_from(time * 1000 / scale).unwrap_or(u64::MAX),
+                    offset,
+                });
+            }
+            let size = if fixed_size == 0 {
+                u64::from(be32(sizes, to_usize(sample)?))
+            } else {
+                fixed_size
+            };
+            offset = offset.saturating_add(size);
+            while stts_left == 0 && stts_at < stts_len {
+                stts_left = u64::from(be32(stts_bytes, stts_at * 2));
+                delta = u64::from(be32(stts_bytes, stts_at * 2 + 1));
+                stts_at += 1;
+            }
+            stts_left = stts_left.saturating_sub(1);
+            time += u128::from(delta);
+            sample += 1;
+        }
+    }
+    Ok(points)
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -805,5 +1096,112 @@ pub(crate) mod tests {
         data.insert(0, file[..40].to_vec());
         let moov_at = (ftyp().len() + 100_008) as u64;
         assert_eq!(parse(&data), Err(Stop::Need(moov_at..moov_at + 8)));
+    }
+
+    /// A `FullBox` with `count` entries, given as `u32` words.
+    fn table(kind: &[u8], count: usize, words: &[u32]) -> Vec<u8> {
+        let mut body = vec![0; 4];
+        body.extend_from_slice(&u32::try_from(count).unwrap().to_be_bytes());
+        for e in words {
+            body.extend_from_slice(&e.to_be_bytes());
+        }
+        bx(kind, &body)
+    }
+
+    /// An H.264 track of samples of `size` bytes, one per chunk at `offsets`, one second
+    /// apart, with the 1-based sync samples `sync`.
+    pub(crate) fn video_trak(offsets: &[u32], size: u32, sync: &[u32]) -> Vec<u8> {
+        let n = u32::try_from(offsets.len()).unwrap();
+        let stsd = bx(
+            b"stsd",
+            &[&[0, 0, 0, 0, 0, 0, 0, 1][..], &bx(b"avc1", &[0; 78])].concat(),
+        );
+        let stbl = boxes(
+            b"stbl",
+            &[
+                stsd,
+                table(b"stts", 1, &[n, 1000]),
+                table(b"stss", sync.len(), sync),
+                // One run: from chunk 1, one sample per chunk, description 1.
+                table(b"stsc", 1, &[1, 1, 1]),
+                bx(
+                    b"stsz",
+                    &[[0; 4], size.to_be_bytes(), n.to_be_bytes()].concat(),
+                ),
+                table(b"stco", offsets.len(), offsets),
+            ],
+        );
+        let mut mdhd = vec![0; 24];
+        mdhd[12..16].copy_from_slice(&1000u32.to_be_bytes());
+        let mdia = boxes(
+            b"mdia",
+            &[bx(b"mdhd", &mdhd), hdlr(b"vide"), boxes(b"minf", &[stbl])],
+        );
+        boxes(b"trak", &[tkhd(true), mdia])
+    }
+
+    /// Four 100-byte samples with keyframes at 0 s and 2 s, in a file with `moov` before
+    /// (`faststart`) or after the media.
+    fn layout_file(faststart: bool) -> (Vec<u8>, u64, u64) {
+        let mdat = bx(b"mdat", &[0; 400]);
+        let moov_len = moov(&[video_trak(&[0; 4], 100, &[1, 3])]).len() as u64;
+        let base = ftyp().len() as u64 + 8 + if faststart { moov_len } else { 0 };
+        let offsets: Vec<u32> = (0..4)
+            .map(|i| u32::try_from(base + i * 100).unwrap())
+            .collect();
+        let moov = moov(&[video_trak(&offsets, 100, &[1, 3])]);
+        let file = if faststart {
+            [ftyp(), moov, mdat].concat()
+        } else {
+            [ftyp(), mdat, moov].concat()
+        };
+        (file, base, moov_len)
+    }
+
+    #[test]
+    fn layout_of_a_faststart_file() {
+        let (file, base, moov_len) = layout_file(true);
+        let layout = layout(&Sparse::whole(file)).unwrap();
+        let ftyp_len = ftyp().len() as u64;
+        assert_eq!(layout.header, vec![0..ftyp_len + moov_len]);
+        assert_eq!(layout.media_start, base);
+        assert!(!layout.index_at_end);
+        assert_eq!(layout.video_codec.as_deref(), Some("H.264"));
+        assert_eq!(
+            layout.seek_points,
+            [
+                SeekPoint {
+                    time_ms: 0,
+                    offset: base
+                },
+                SeekPoint {
+                    time_ms: 2000,
+                    offset: base + 200
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn layout_of_a_file_with_moov_at_the_end() {
+        let (file, base, moov_len) = layout_file(false);
+        let len = file.len() as u64;
+        let layout = layout(&Sparse::whole(file)).unwrap();
+        // The head up to the mdat header, then moov at the end.
+        assert_eq!(layout.header, [0..base, len - moov_len..len]);
+        assert_eq!(layout.media_start, base);
+        assert!(layout.index_at_end);
+        assert_eq!(layout.seek_points[1].offset, base + 200);
+        assert_eq!(layout.seek_point(3500), Some(layout.seek_points[1]));
+    }
+
+    #[test]
+    fn layout_without_samples_is_an_error() {
+        // Fragmented files keep their samples outside moov.
+        let file = [ftyp(), moov(&[]), bx(b"moof", &[0; 16])].concat();
+        assert!(matches!(
+            layout(&Sparse::whole(file)),
+            Err(Stop::Invalid(_))
+        ));
     }
 }

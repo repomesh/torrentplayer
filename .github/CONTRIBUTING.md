@@ -10,7 +10,9 @@ look for. By participating, you agree to follow the [Code of Conduct](CODE_OF_CO
   keeping ends up there.
 - **Report bugs or performance regressions** with the issue templates. For streaming problems,
   include the metrics from the debug overlay (press <kbd>D</kbd>) and, if possible, a link to
-  the openly licensed torrent you were watching.
+  the openly licensed torrent you were watching. `cargo bench-suite <list file>` benchmarks your
+  own files on a local swarm and writes a report you can attach (see
+  [Benchmark your own files](../docs/performance.md#benchmark-your-own-files)).
 - **Suggest features** with the feature request template. Explain the problem before the solution.
 - **Improve documentation.** Docs PRs are always welcome.
 - **Write code.** For anything bigger than a small fix, open an issue first so we can agree on the

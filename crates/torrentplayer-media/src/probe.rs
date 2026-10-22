@@ -44,16 +44,30 @@ pub async fn probe_tracks<R>(reader: &mut R, len: u64) -> Result<TrackReport, Pr
 where
     R: AsyncRead + AsyncSeek + Unpin + ?Sized,
 {
+    read_parsed(reader, len, MAX_READS, parse).await
+}
+
+/// Runs `parse` over a [`Sparse`] view of the `len`-byte file behind `reader`, reading what it
+/// asks for (at least [`BLOCK`] at a time) until it answers, at most `max_reads` times.
+pub(crate) async fn read_parsed<R, T>(
+    reader: &mut R,
+    len: u64,
+    max_reads: usize,
+    parse: impl Fn(&Sparse) -> Result<T, Stop>,
+) -> Result<T, ProbeError>
+where
+    R: AsyncRead + AsyncSeek + Unpin + ?Sized,
+{
     let mut data = Sparse::new(len);
     let mut reads = 0;
     loop {
         let range = match parse(&data) {
-            Ok(report) => return Ok(report),
+            Ok(answer) => return Ok(answer),
             Err(Stop::Need(range)) => range,
             Err(Stop::Invalid(why)) => return Err(ProbeError::Malformed(why)),
             Err(Stop::Unsupported) => return Err(ProbeError::UnsupportedContainer),
         };
-        if reads == MAX_READS {
+        if reads == max_reads {
             return Err(ProbeError::TooManyReads);
         }
         reads += 1;
@@ -69,14 +83,23 @@ where
 
 /// Picks the parser by the first bytes of the file.
 fn parse(data: &Sparse) -> Result<TrackReport, Stop> {
+    by_container(data, mkv::parse, mp4::parse)
+}
+
+/// Runs `matroska` or `mp4` on `data`, chosen by the first bytes of the file.
+pub(crate) fn by_container<T>(
+    data: &Sparse,
+    matroska: impl FnOnce(&Sparse) -> Result<T, Stop>,
+    mp4: impl FnOnce(&Sparse) -> Result<T, Stop>,
+) -> Result<T, Stop> {
     let head = data.get(0, 8).map_err(|stop| match stop {
         Stop::Invalid(_) => Stop::Unsupported,
         other => other,
     })?;
     if mkv::sniff(head) {
-        mkv::parse(data)
+        matroska(data)
     } else if mp4::sniff(head) {
-        mp4::parse(data)
+        mp4(data)
     } else {
         Err(Stop::Unsupported)
     }
@@ -287,6 +310,7 @@ mod tests {
             };
             let data = Sparse::whole([head, &tail].concat());
             let _ = parse(&data);
+            let _ = crate::layout::parse(&data);
         }
 
         /// Valid files with bytes changed, or cut short: an answer or an error, never a panic.
@@ -302,7 +326,9 @@ mod tests {
                 file[at] = value;
             }
             let _ = parse(&Sparse::whole(file.clone()));
+            let _ = crate::layout::parse(&Sparse::whole(file.clone()));
             file.truncate(cut % (file.len() + 1));
+            let _ = crate::layout::parse(&Sparse::whole(file.clone()));
             let _ = parse(&Sparse::whole(file));
         }
     }

@@ -22,6 +22,9 @@
 //! bandwidth planner use them), and `ffmpeg` for seek-bar thumbnails. Both read the media
 //! from the loopback stream server and are locked down to it. See `docs/architecture.md`.
 //!
+//! Layout: [`probe_layout`] reads where a player finds the header, the media, and the video
+//! keyframes (MP4 sync samples, Matroska cue points), for the streaming benchmark.
+//!
 //! Converted audio: [`init_segment_len`] and [`mse_type`] read the fragmented MP4 that the audio
 //! conversion writes, for Media Source Extensions.
 //!
@@ -33,6 +36,7 @@ mod cues;
 mod ffmpeg;
 mod fragmented;
 mod language;
+mod layout;
 mod matching;
 mod mkv;
 mod mp4;
@@ -50,6 +54,7 @@ pub use ffmpeg::{
 };
 pub use fragmented::{InitError, MAX_INIT_SEGMENT, init_segment_len, mse_type};
 pub use language::{Language, language};
+pub use layout::{MAX_LAYOUT_READS, MAX_SEEK_POINTS, MediaLayout, SeekPoint, probe_layout};
 pub use matching::{MAX_SUBTITLE_FILES, SUBTITLE_EXTENSIONS, SubtitleFile, subtitle_files};
 pub use probe::{MAX_READS, ProbeError, probe_tracks};
 pub use tracks::{Container, MAX_DURATION_MS, SubtitleCodec, SubtitleTrack, TrackReport};

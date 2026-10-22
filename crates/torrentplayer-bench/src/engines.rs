@@ -15,10 +15,11 @@ use torrentplayer_stream::{MediaReader, MediaSource};
 use torrentplayer_swarm::{Metainfo, Swarm, SwarmConfig, Torrent};
 use torrentplayer_torrent::{
     Engine, EngineConfig, FileKind, PlaybackInput, PlaybackSession, PlayheadPosition, TorrentId,
-    TorrentSource, mime_type,
+    TorrentSource, mime_type, protected_magnet_peers,
 };
 
 use crate::BenchConfig;
+use crate::network::RECOVER_TIMEOUT;
 
 /// Which torrent engine to benchmark.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,14 +95,52 @@ pub(crate) enum BenchEngine {
     Rqbit {
         engine: Engine,
         id: Option<TorrentId>,
+        /// The shared network of a protected mode ([`BenchConfig::shared_network`]), for peer
+        /// discovery of magnet links as in the app.
+        protected: Option<Network>,
+        public_discovery: bool,
     },
     Swarm {
         swarm: Swarm,
         torrent: Option<Torrent>,
-        /// The network manager whose listener takes incoming peers, with
-        /// [`BenchConfig::incoming`].
-        network: Option<Network>,
+        /// The shared network of a protected mode, as for [`BenchEngine::Rqbit`].
+        protected: Option<Network>,
+        /// A direct network manager of this engine's own, whose listener takes incoming peers
+        /// ([`BenchConfig::incoming`]); stopped with the engine.
+        owned: Option<Network>,
+        /// How librqbit is set up to fetch a magnet link's metadata for this engine, as the
+        /// app hands magnet links to torrentplayer-swarm.
+        resolver: Box<EngineConfig>,
+        public_discovery: bool,
     },
+}
+
+/// The network every engine of a run uses: the shared one of a protected mode, or `None` to
+/// connect directly. Benchmarks never start a protected network per run (see
+/// [`crate::network`]); one must be started once and put in [`BenchConfig::shared_network`].
+fn protected_network(config: &BenchConfig) -> anyhow::Result<Option<Network>> {
+    if !config.public_swarm || config.network.is_none() {
+        return Ok(None);
+    }
+    let shared = config
+        .shared_network
+        .as_ref()
+        .context("a protected network mode needs its shared network started first")?;
+    Ok(Some(shared.network().clone()))
+}
+
+/// librqbit's settings for `config`, as the app sets them (also for the swarm engine's
+/// metadata resolver).
+fn rqbit_config(dir: PathBuf, config: &BenchConfig, network: Option<&Network>) -> EngineConfig {
+    let mut c = EngineConfig::new(dir);
+    c.enable_dht = config.public_swarm && config.dht;
+    c.enable_trackers = (config.public_swarm && config.trackers) || config.local_tracker;
+    c.download_limit_bps = config.download_limit_bps;
+    c.peer_limit = config.peer_limit;
+    // As in the app's protected modes: no DHT, listener, or UDP of librqbit's own, and peers
+    // and trackers through the network's loopback bridge.
+    c.network = network.cloned();
+    c
 }
 
 impl BenchEngine {
@@ -110,14 +149,19 @@ impl BenchEngine {
         dir: PathBuf,
         config: &BenchConfig,
     ) -> anyhow::Result<Self> {
+        if let Some(shared) = config
+            .shared_network
+            .as_ref()
+            .filter(|_| config.public_swarm)
+        {
+            // The tunnel reconnects by itself; wait for it rather than starting another.
+            shared.ready(RECOVER_TIMEOUT).await?;
+        }
+        let protected = protected_network(config)?;
+        let public_discovery = config.dht || config.trackers;
         Ok(match kind {
             EngineKind::Rqbit => {
-                let mut c = EngineConfig::new(dir);
-                c.enable_dht = config.public_swarm && config.dht;
-                c.enable_trackers =
-                    (config.public_swarm && config.trackers) || config.local_tracker;
-                c.download_limit_bps = config.download_limit_bps;
-                c.peer_limit = config.peer_limit;
+                let mut c = rqbit_config(dir, config, protected.as_ref());
                 // librqbit runs its own listener, on every interface as in the app (direct mode
                 // only). It announces no port for a loopback listener.
                 if config.incoming {
@@ -126,9 +170,16 @@ impl BenchEngine {
                 Self::Rqbit {
                     engine: Engine::start(c).await?,
                     id: None,
+                    protected,
+                    public_discovery,
                 }
             }
             EngineKind::Swarm => {
+                let resolver = Box::new(rqbit_config(
+                    dir.join("metadata"),
+                    config,
+                    protected.as_ref(),
+                ));
                 let mut c = SwarmConfig::new(dir);
                 c.scheduler = config.scheduler.clone();
                 c.enable_trackers =
@@ -139,23 +190,26 @@ impl BenchEngine {
                     .as_ref()
                     .zip(kind.dht_state_file())
                     .map(|(d, f)| d.join(f));
-                // As in the app: the network manager listens (direct mode: every interface, a
-                // random port) and hands accepted connections to the engine, which announces
-                // the port to trackers.
-                let network = if config.incoming {
-                    let network =
-                        Network::start(NetworkConfig::default(), NetworkOptions::default()).await?;
-                    network.set_incoming(IncomingConfig {
-                        enabled: true,
-                        port: 0,
-                        upnp: false,
-                    });
-                    c.network = Some(network.clone());
-                    c.accept_incoming = true;
-                    Some(network)
+                // As in the app: everything goes through the network manager of the selected
+                // mode. With incoming peers, it also listens where the mode allows (direct:
+                // every interface; WireGuard: inside the tunnel; SOCKS5: nowhere) and hands
+                // accepted connections to the engine, which announces the port to trackers.
+                let owned = if protected.is_none() && config.incoming {
+                    Some(Network::start(NetworkConfig::default(), NetworkOptions::default()).await?)
                 } else {
                     None
                 };
+                if let Some(network) = protected.as_ref().or(owned.as_ref()) {
+                    if config.incoming {
+                        network.set_incoming(IncomingConfig {
+                            enabled: true,
+                            port: 0,
+                            upnp: false,
+                        });
+                        c.accept_incoming = true;
+                    }
+                    c.network = Some(network.clone());
+                }
                 c.allow_local_web_seeds = config.local_web_seeds;
                 c.enable_web_seeds = config.web_seeds;
                 c.download_limit_bps = config.download_limit_bps;
@@ -168,20 +222,34 @@ impl BenchEngine {
                 Self::Swarm {
                     swarm: Swarm::start(c).await?,
                     torrent: None,
-                    network,
+                    protected,
+                    owned,
+                    resolver,
+                    public_discovery,
                 }
             }
         })
     }
 
-    /// Adds the torrent and returns its name and files.
+    /// Adds the torrent and returns its name and files. As in the app, a magnet link in a
+    /// protected mode gets peers from the mode's own DHT and UDP trackers first, and for the
+    /// swarm engine librqbit fetches its metadata only.
     pub(crate) async fn add(
         &mut self,
         source: TorrentSource,
-        peers: Vec<SocketAddr>,
+        mut peers: Vec<SocketAddr>,
     ) -> anyhow::Result<(String, Vec<BenchFile>)> {
         match self {
-            Self::Rqbit { engine, id } => {
+            Self::Rqbit {
+                engine,
+                id,
+                protected,
+                public_discovery,
+            } => {
+                if let (TorrentSource::Magnet(link), Some(network)) = (&source, protected.as_ref())
+                {
+                    peers.extend(protected_magnet_peers(network, link, *public_discovery).await);
+                }
                 let info = engine.add_with_peers(source, peers).await?;
                 *id = Some(info.id);
                 let files = info
@@ -196,9 +264,30 @@ impl BenchEngine {
                     .collect();
                 Ok((info.name, files))
             }
-            Self::Swarm { swarm, torrent, .. } => {
-                let TorrentSource::File(bytes) = source else {
-                    bail!("the swarm engine needs a .torrent file (magnet links arrive in M3)");
+            Self::Swarm {
+                swarm,
+                torrent,
+                protected,
+                resolver,
+                public_discovery,
+                ..
+            } => {
+                let bytes = match source {
+                    TorrentSource::File(bytes) => bytes,
+                    TorrentSource::Magnet(link) => {
+                        if let Some(network) = protected.as_ref() {
+                            peers.extend(
+                                protected_magnet_peers(network, &link, *public_discovery).await,
+                            );
+                        }
+                        let (bytes, seen) =
+                            resolve_magnet((**resolver).clone(), link, peers.clone()).await?;
+                        peers.extend(seen);
+                        bytes
+                    }
+                    TorrentSource::Url(_) => {
+                        bail!("the swarm engine needs the .torrent file; download it first")
+                    }
                 };
                 let meta = Metainfo::from_bytes(&bytes)?;
                 let name = meta.name.clone();
@@ -217,6 +306,8 @@ impl BenchEngine {
                         }
                     })
                     .collect();
+                peers.sort_unstable();
+                peers.dedup();
                 *torrent = Some(swarm.add(meta, peers)?);
                 Ok((name, files))
             }
@@ -225,7 +316,9 @@ impl BenchEngine {
 
     pub(crate) fn media(&self, file: &BenchFile) -> anyhow::Result<Arc<dyn MediaSource>> {
         Ok(match self {
-            Self::Rqbit { engine, id } => Arc::new(engine.media_source(added(*id)?, file.index)?),
+            Self::Rqbit { engine, id, .. } => {
+                Arc::new(engine.media_source(added(*id)?, file.index)?)
+            }
             Self::Swarm { torrent, .. } => Arc::new(SwarmMedia {
                 torrent: torrent.clone().context("no torrent added")?,
                 file: file.index,
@@ -243,7 +336,7 @@ impl BenchEngine {
         byte_rate: u64,
     ) -> anyhow::Result<Box<dyn Playhead>> {
         match self {
-            Self::Rqbit { engine, id } => {
+            Self::Rqbit { engine, id, .. } => {
                 let session = engine
                     .start_playback(added(*id)?, file.index, config.prioritization.clone())
                     .await?;
@@ -269,7 +362,7 @@ impl BenchEngine {
 
     pub(crate) fn stats(&self) -> anyhow::Result<BenchStats> {
         Ok(match self {
-            Self::Rqbit { engine, id } => {
+            Self::Rqbit { engine, id, .. } => {
                 let s = engine.stats(added(*id)?)?;
                 BenchStats {
                     wasted_bytes: None,
@@ -308,7 +401,7 @@ impl BenchEngine {
     /// Removes the torrent and stops the engine.
     pub(crate) async fn finish(self) -> anyhow::Result<()> {
         match self {
-            Self::Rqbit { engine, id } => {
+            Self::Rqbit { engine, id, .. } => {
                 if let Some(id) = id {
                     engine.remove(id, true).await?;
                 }
@@ -317,19 +410,36 @@ impl BenchEngine {
             Self::Swarm {
                 swarm,
                 torrent,
-                network,
+                owned,
+                ..
             } => {
                 if let Some(t) = torrent {
                     t.stop();
                 }
                 swarm.shutdown();
-                if let Some(network) = network {
+                // The shared network of a protected mode outlives the run.
+                if let Some(network) = owned {
                     network.shutdown();
                 }
             }
         }
         Ok(())
     }
+}
+
+/// Fetches a magnet link's metadata with librqbit (metadata only: nothing is downloaded or
+/// shared), as the app does for torrentplayer-swarm. Returns the `.torrent` file and the peers
+/// seen.
+async fn resolve_magnet(
+    config: EngineConfig,
+    link: String,
+    peers: Vec<SocketAddr>,
+) -> anyhow::Result<(bytes::Bytes, Vec<SocketAddr>)> {
+    let engine = Engine::start(config).await?;
+    let resolved = engine.resolve(TorrentSource::Magnet(link), peers).await;
+    engine.shutdown().await;
+    let resolved = resolved?.context("librqbit already had this torrent")?;
+    Ok((resolved.torrent_bytes, resolved.seen_peers))
 }
 
 fn added(id: Option<TorrentId>) -> anyhow::Result<TorrentId> {
@@ -391,5 +501,36 @@ impl MediaSource for SwarmMedia {
     fn open(&self) -> BoxFuture<'static, io::Result<Box<dyn MediaReader>>> {
         let reader = self.torrent.reader(self.file).map_err(io::Error::other);
         Box::pin(async move { reader.map(|r| Box::new(r) as Box<dyn MediaReader>) })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use torrentplayer_net::NetworkMode;
+
+    use super::*;
+    use crate::network::SharedNetwork;
+
+    #[tokio::test]
+    async fn every_engine_uses_the_one_shared_network() {
+        let mut config = BenchConfig {
+            network: Some(NetworkMode::Direct),
+            ..BenchConfig::default()
+        };
+        // Engines never start a protected network of their own.
+        assert!(protected_network(&config).is_err());
+        let network = Network::start(NetworkConfig::default(), NetworkOptions::default())
+            .await
+            .unwrap();
+        config.shared_network = Some(SharedNetwork::wrap(network));
+        let starts = SharedNetwork::starts();
+        for _ in 0..3 {
+            assert!(protected_network(&config).unwrap().is_some());
+        }
+        assert_eq!(SharedNetwork::starts(), starts);
+        // Local swarms always connect directly.
+        config.public_swarm = false;
+        assert!(protected_network(&config).unwrap().is_none());
+        config.shared_network.take().unwrap().shutdown();
     }
 }

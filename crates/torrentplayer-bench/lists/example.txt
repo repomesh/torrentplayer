@@ -1,0 +1,28 @@
+# Example list for `cargo bench-suite` (see "Benchmark your own files" in docs/performance.md).
+#
+# One entry per line: a local media file, a .torrent file, an https:// link to a .torrent
+# file, or a magnet link. The whole line is the entry, so paths with spaces need no quotes.
+# Add " | label" to name it in the report. Relative paths are relative to this file.
+# Lines starting with # are comments.
+
+# Local media files (MP4, MOV, MKV, WebM) are seeded on 127.0.0.1 and never leave this
+# machine. Replace the placeholder with your own files:
+# D:\Videos\My Lecture 01.mkv | lecture 1 (MKV)
+# /home/me/videos/talk.mp4 | conference talk
+
+# Public swarms run only with `cargo bench-suite LIST public`: they download from and upload
+# to other people. Use only content you have the right to download and share.
+#
+# Peers-only baseline: a torrent without web seeds, so both engines download from the same
+# peers. The Ubuntu 24.04.3 server image's .torrent (checked 2026-10-22) lists two
+# trackers and no url-list. Copy a current .torrent link from https://releases.ubuntu.com/
+# (each release folder lists *.iso.torrent files); the report's "Torrent" line shows whether a
+# torrent has web seeds. File names change with every point release, so none is hard-coded.
+#
+# Blender open movies (Creative Commons Attribution) served by WebTorrent. Each .torrent lists
+# an HTTP web seed (url-list https://webtorrent.io/torrents/). The suite runs them from peers
+# only; add --web-seeds for an extra swarm-engine row that also uses the web seed.
+# https://webtorrent.io/torrents/sintel.torrent | Sintel
+# https://webtorrent.io/torrents/big-buck-bunny.torrent | Big Buck Bunny
+# https://webtorrent.io/torrents/tears-of-steel.torrent | Tears of Steel
+# https://webtorrent.io/torrents/cosmos-laundromat.torrent | Cosmos Laundromat

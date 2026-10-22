@@ -7,6 +7,7 @@
 //! size without reading their contents. The `Info` element before `Tracks` gives the duration.
 
 use crate::audio::{AudioCodec, AudioTrack, MAX_AUDIO_TRACKS};
+use crate::layout::{MediaLayout, SeekPoint, push_range, thin};
 use crate::sparse::{Sparse, Stop};
 use crate::tracks::{
     Container, MAX_SUBTITLE_TRACKS, SubtitleCodec, SubtitleTrack, TrackReport, duration_ms,
@@ -182,7 +183,9 @@ fn segment(data: &Sparse, start: u64, end: u64) -> Result<TrackReport, Stop> {
         match el.id {
             TRACKS => return tracks(data, el, duration),
             INFO if duration.is_none() => duration = info_duration(data, el)?,
-            SEEK_HEAD if tracks_at.is_none() => tracks_at = seek_tracks(data, el, start)?,
+            SEEK_HEAD if tracks_at.is_none() => {
+                tracks_at = seek_position(data, el, start, TRACKS)?;
+            }
             CLUSTER => match tracks_at.take() {
                 // Positions only move forward, so the walk ends.
                 Some(pos) if pos > at && pos < end => {
@@ -198,8 +201,13 @@ fn segment(data: &Sparse, start: u64, end: u64) -> Result<TrackReport, Stop> {
     Err(Stop::Invalid("no Tracks element"))
 }
 
-/// Where the `SeekHead` says `Tracks` is, as an offset in the file.
-fn seek_tracks(data: &Sparse, head: Element, segment_start: u64) -> Result<Option<u64>, Stop> {
+/// Where the `SeekHead` says the element `target` is, as an offset in the file.
+fn seek_position(
+    data: &Sparse,
+    head: Element,
+    segment_start: u64,
+    target: u32,
+) -> Result<Option<u64>, Stop> {
     for seek in children(data, head)? {
         if seek.id != SEEK {
             continue;
@@ -212,7 +220,7 @@ fn seek_tracks(data: &Sparse, head: Element, segment_start: u64) -> Result<Optio
                 _ => {}
             }
         }
-        if id == Some(u64::from(TRACKS))
+        if id == Some(u64::from(target))
             && let Some(pos) = pos
         {
             return Ok(segment_start.checked_add(pos));
@@ -407,6 +415,198 @@ fn codec_from_id(id: &[u8]) -> AudioCodec {
     } else {
         AudioCodec::Other
     }
+}
+
+const CUES: u32 = 0x1C53_BB6B;
+const CUE_POINT: u32 = 0xBB;
+const CUE_TIME: u32 = 0xB3;
+const CUE_TRACK_POSITIONS: u32 = 0xB7;
+const CUE_TRACK: u32 = 0xF7;
+const CUE_CLUSTER_POSITION: u32 = 0xF1;
+/// `TrackType` of video tracks.
+const VIDEO: u64 = 1;
+/// Elements visited in `Cues`; more are ignored.
+const MAX_CUE_ELEMENTS: usize = 2_000_000;
+/// Largest `Cues` element read.
+const MAX_CUES_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The layout of a Matroska or `WebM` file (see [`crate::layout`]): everything before the first
+/// `Cluster`, and the cue points of the first video track. `Cues` after the clusters are found
+/// through the `SeekHead`.
+pub(crate) fn layout(data: &Sparse) -> Result<MediaLayout, Stop> {
+    let len = data.len();
+    let header = element(data, 0, len)?;
+    if header.id != EBML {
+        return Err(Stop::Unsupported);
+    }
+    let mut at = header.known_end()?;
+    let mut segment = None;
+    for _ in 0..MAX_TOP_LEVEL {
+        let el = element(data, at, len)?;
+        if el.id == SEGMENT {
+            segment = Some(el);
+            break;
+        }
+        at = el.known_end()?;
+    }
+    let segment = segment.ok_or(Stop::Invalid("no Segment element"))?;
+    let (start, end) = (segment.body, segment.end.unwrap_or(len));
+    let (mut scale, mut duration, mut video) = (1_000_000, None, None);
+    let (mut cues_at, mut first_cluster) = (None, None);
+    let mut at = start;
+    for _ in 0..MAX_SEGMENT_CHILDREN {
+        if at >= end {
+            break;
+        }
+        let el = element(data, at, end)?;
+        match el.id {
+            CLUSTER => {
+                first_cluster = Some(at);
+                break;
+            }
+            INFO => {
+                duration = info_duration(data, el)?;
+                scale = info_scale(data, el)?;
+            }
+            TRACKS => video = video_track(data, el)?,
+            CUES => cues_at = Some(at),
+            SEEK_HEAD if cues_at.is_none() => cues_at = seek_position(data, el, start, CUES)?,
+            _ => {}
+        }
+        at = el.known_end()?;
+    }
+    let media_start = first_cluster.ok_or(Stop::Invalid("no Cluster element"))?;
+    let (seek_index, seek_points) = match cues_at.filter(|at| *at < end) {
+        Some(at) => {
+            let cues = element(data, at, end)?;
+            if cues.id == CUES {
+                let track = video.as_ref().and_then(|v: &(Option<u64>, String)| v.0);
+                let points = cue_points(data, cues, start, scale, track)?;
+                (Some(at..cues.known_end()?), thin(points))
+            } else {
+                (None, Vec::new())
+            }
+        }
+        None => (None, Vec::new()),
+    };
+    let mut ranges = Vec::new();
+    push_range(&mut ranges, 0..media_start);
+    Ok(MediaLayout {
+        container: Container::Matroska,
+        video_codec: video.map(|v| v.1),
+        header: ranges,
+        media_start,
+        index_at_end: seek_index.as_ref().is_some_and(|i| i.start > media_start),
+        seek_index,
+        seek_points,
+        duration_ms: duration,
+    })
+}
+
+/// The `TimestampScale` in `Info` (nanoseconds per unit; Matroska's default is a millisecond).
+fn info_scale(data: &Sparse, info: Element) -> Result<u64, Stop> {
+    let fields = match children(data, info) {
+        Ok(fields) => fields,
+        Err(Stop::Invalid(_)) => return Ok(1_000_000),
+        Err(other) => return Err(other),
+    };
+    for field in fields {
+        if field.id == TIMESTAMP_SCALE {
+            return Ok(uint(data, field)?.max(1));
+        }
+    }
+    Ok(1_000_000)
+}
+
+/// The first enabled video track: its number and codec name.
+fn video_track(data: &Sparse, tracks: Element) -> Result<Option<(Option<u64>, String)>, Stop> {
+    for entry in children(data, tracks)? {
+        if entry.id != TRACK_ENTRY {
+            continue;
+        }
+        let e = track_entry(data, entry)?;
+        if e.kind == Some(VIDEO) && e.enabled {
+            return Ok(Some((e.number, video_codec_name(&e.codec))));
+        }
+    }
+    Ok(None)
+}
+
+/// A short name for a Matroska video `CodecID`.
+fn video_codec_name(id: &[u8]) -> String {
+    let name = match id {
+        b"V_MPEG4/ISO/AVC" => "H.264",
+        b"V_MPEGH/ISO/HEVC" => "HEVC",
+        b"V_AV1" => "AV1",
+        b"V_VP8" => "VP8",
+        b"V_VP9" => "VP9",
+        b"V_MPEG2" => "MPEG-2",
+        b"V_THEORA" => "Theora",
+        _ if id.starts_with(b"V_MPEG4/ISO/") => "MPEG-4 Part 2",
+        _ => return String::from_utf8_lossy(id).into_owned(),
+    };
+    name.to_owned()
+}
+
+/// The cue points in `Cues` for `track` (any track if unknown), as file offsets of their
+/// clusters. The element is read in one piece.
+fn cue_points(
+    data: &Sparse,
+    cues: Element,
+    segment_start: u64,
+    scale: u64,
+    track: Option<u64>,
+) -> Result<Vec<SeekPoint>, Stop> {
+    let end = cues.known_end()?;
+    if end - cues.body > MAX_CUES_BYTES {
+        return Err(Stop::Invalid("Cues element too large"));
+    }
+    data.get(
+        cues.body,
+        usize::try_from(end - cues.body).unwrap_or(usize::MAX),
+    )?;
+    let mut points = Vec::new();
+    let mut at = cues.body;
+    for _ in 0..MAX_CUE_ELEMENTS {
+        if at >= end {
+            break;
+        }
+        let point = element(data, at, end)?;
+        at = point.known_end()?;
+        if point.id != CUE_POINT {
+            continue;
+        }
+        let (mut time, mut position) = (None, None);
+        for field in children(data, point)? {
+            match field.id {
+                CUE_TIME => time = Some(uint(data, field)?),
+                CUE_TRACK_POSITIONS if position.is_none() => {
+                    let (mut cue_track, mut cluster) = (None, None);
+                    for f in children(data, field)? {
+                        match f.id {
+                            CUE_TRACK => cue_track = Some(uint(data, f)?),
+                            CUE_CLUSTER_POSITION => cluster = Some(uint(data, f)?),
+                            _ => {}
+                        }
+                    }
+                    if track.is_none() || cue_track == track {
+                        position = cluster;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let (Some(time), Some(position)) = (time, position)
+            && let Some(offset) = segment_start.checked_add(position)
+        {
+            let ms = u128::from(time) * u128::from(scale) / 1_000_000;
+            points.push(SeekPoint {
+                time_ms: u64::try_from(ms).unwrap_or(u64::MAX),
+                offset,
+            });
+        }
+    }
+    Ok(points)
 }
 
 #[cfg(test)]
@@ -695,5 +895,98 @@ pub(crate) mod tests {
         assert!(invalid(file(&[el(TRACKS, &many.concat())])));
         // An unknown-size element inside a master element.
         assert!(invalid(file(&[el(TRACKS, &[0xAE, 0xFF])])));
+    }
+
+    fn seek_head(cues_at: u64) -> Vec<u8> {
+        el(
+            SEEK_HEAD,
+            &el(
+                SEEK,
+                &[
+                    el(SEEK_ID, &CUES.to_be_bytes()),
+                    el(SEEK_POSITION, &cues_at.to_be_bytes()),
+                ]
+                .concat(),
+            ),
+        )
+    }
+
+    fn cue_point(time: u64, cluster: u64) -> Vec<u8> {
+        el(
+            CUE_POINT,
+            &[
+                el(CUE_TIME, &time.to_be_bytes()),
+                el(
+                    CUE_TRACK_POSITIONS,
+                    &[
+                        uint_el(CUE_TRACK, 1),
+                        el(CUE_CLUSTER_POSITION, &cluster.to_be_bytes()),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat(),
+        )
+    }
+
+    #[test]
+    fn layout_reads_cues_after_the_clusters() {
+        let tracks = el(
+            TRACKS,
+            &[track(1, "V_MPEG4/ISO/AVC", None), track(2, "A_AC3", None)].concat(),
+        );
+        let cluster = el(CLUSTER, &[0; 1000]);
+        // Positions are relative to the Segment's payload; the SeekHead's size is fixed.
+        let first = (seek_head(0).len() + info().len() + tracks.len()) as u64;
+        let second = first + cluster.len() as u64;
+        let cues_at = second + cluster.len() as u64;
+        let cues = el(
+            CUES,
+            &[cue_point(0, first), cue_point(5000, second)].concat(),
+        );
+        let f = file(&[
+            seek_head(cues_at),
+            info(),
+            tracks,
+            cluster.clone(),
+            cluster,
+            cues,
+        ]);
+        let start = (ebml_header().len() + 12) as u64;
+        let len = f.len() as u64;
+        let layout = layout(&Sparse::whole(f)).unwrap();
+        assert_eq!(layout.container, Container::Matroska);
+        assert_eq!(layout.video_codec.as_deref(), Some("H.264"));
+        assert_eq!(layout.header, vec![0..start + first]);
+        assert_eq!(layout.media_start, start + first);
+        assert_eq!(layout.seek_index, Some(start + cues_at..len));
+        assert!(layout.index_at_end);
+        assert_eq!(
+            layout.seek_points,
+            [
+                SeekPoint {
+                    time_ms: 0,
+                    offset: start + first
+                },
+                SeekPoint {
+                    time_ms: 5000,
+                    offset: start + second
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn layout_without_cues_has_no_seek_points() {
+        let f = file(&[
+            info(),
+            el(TRACKS, &track(1, "V_VP9", None)),
+            el(CLUSTER, &[0; 10]),
+        ]);
+        let layout = layout(&Sparse::whole(f)).unwrap();
+        assert_eq!(layout.video_codec.as_deref(), Some("VP9"));
+        assert!(layout.seek_points.is_empty());
+        assert_eq!(layout.seek_index, None);
+        assert!(!layout.index_at_end);
     }
 }

@@ -169,6 +169,189 @@ off. `first peer` is the time from adding the torrent to the first connected pee
 a magnet link only once it has the metadata, which already needs a peer, so for magnet links
 sampling starts after the metadata arrived and the metadata time is the measure to compare.
 
+## Through a VPN or proxy
+
+Public-swarm runs (`torrent`, and the torrents and magnet links of `suite`) can go through the
+app's protected network modes instead of connecting directly, to measure what users of those
+modes get:
+
+```sh
+torrentplayer-bench torrent sintel.torrent --engine swarm --runs 1 --wireguard wg0.conf
+TORRENTPLAYER_BENCH_SOCKS5_PASSWORD=... torrentplayer-bench torrent sintel.torrent \
+  --socks5 proxy.example:1080 --socks5-user me
+cargo bench-suite my-files.txt --public --wireguard wg0.conf
+```
+
+- `--wireguard FILE` reads a WireGuard `.conf` with the app's parser and runs both engines
+  through TorrentPlayer's built-in tunnel, as the app's WireGuard mode does.
+- `--socks5 HOST:PORT` (with `--socks5-user`; the password comes from
+  `TORRENTPLAYER_BENCH_SOCKS5_PASSWORD`, never the command line) uses the app's SOCKS5 mode
+  with its defaults: host names, trackers, and DHT through the proxy.
+
+One network manager serves the whole benchmark, as the app keeps one tunnel: `torrent` starts
+it once for all runs, and `suite` once for all public entries. It must let traffic through
+within 30 seconds or the benchmark stops with the network's reason instead of measuring a slow
+swarm. Starting a tunnel per run reconnected to the VPN server every few seconds, and some
+servers then stop completing handshakes. If the tunnel or proxy drops later, the manager
+reconnects by itself: each run first waits up to 90 seconds for traffic to flow again, and an
+entry that cannot start reports "tunnel down". The kill switch stays on, so nothing leaves
+outside the tunnel or proxy.
+
+The engines run as the app runs them in these modes. librqbit has no DHT, listener, or UDP of
+its own and reaches peers through the network's loopback bridge; it only takes magnet links
+(the app opens `.torrent` files and links on its own engine there), so the suite shows those
+librqbit rows as "not used in this network mode". For a magnet link, both engines first get
+peers from the mode's own DHT and UDP trackers (inside the tunnel, or through the proxy's UDP
+relay), and the swarm engine has librqbit fetch the metadata only, as the app does. Local
+media (`local`, and local entries of `suite`) always runs directly: a tunnel cannot reach
+seeders on `127.0.0.1`. The suite report names the mode and endpoint (never keys or
+passwords). The app's former bind-to-adapter VPN mode no longer exists; to measure a VPN app,
+connect it system-wide and run without these options.
+
+## Benchmark your own files
+
+`cargo bench-suite` runs the streaming benchmark on a list of your own media files, torrents,
+and magnet links, and writes a report. Each local file is seeded on `127.0.0.1` through the same
+link emulator as the generated fixture, so nothing leaves the machine.
+
+```sh
+cargo bench-suite my-files.txt --quick     # 1 run, 2 scenarios: a few minutes per file
+cargo bench-suite my-files.txt             # the full matrix: about 20 minutes per file
+cargo bench-suite my-files.txt public      # also run the torrents and magnet links (peers only)
+cargo bench-suite my-files.txt public --web-seeds   # plus a swarm-engine row with web seeds
+cargo bench-file "D:\Videos\My Lecture.mkv" --upload-mibps 4 --seeders 2   # one file, one scenario
+```
+
+The aliases (in `.cargo/config.toml`) build `torrentplayer-bench` in release mode and run
+`suite` and `local --media`. A list has one entry per line:
+
+```text
+# Comments start with #; blank lines are ignored.
+D:\Videos\My Lecture 01.mkv | lecture 1
+clips/talk.mp4
+https://webtorrent.io/torrents/sintel.torrent | Sintel
+magnet:?xt=urn:btih:...
+downloads/some.torrent
+```
+
+The whole line is the entry, so Windows paths with spaces need no quotes (quotes from "Copy as
+path" are removed). ` | label` names the entry in the report. Relative paths are relative to
+the list file. Lines ending in `.torrent` are torrent files; `https://` links must point to a
+`.torrent` file. `crates/torrentplayer-bench/lists/example.txt` has commented examples.
+
+**Local files** run both engines on a local swarm: links of 2, 8, and 25 MiB/s (the viewer's
+downlink, shared by the seeders) × 1 or 4 seeders at 40 ms round trip, plus 8 MiB/s with 4
+seeders at 120 ms; 3 runs each, seeking to 10%, 50%, 90%, and 25% of the duration, each seek
+in its own session. 2 MiB/s is a slow home connection, 25 MiB/s a fast one, and the 120 ms row
+a distant swarm. `--quick` runs once, with 2 MiB/s and 1 seeder and 25 MiB/s and 4 seeders.
+`--links 2,8`, `--seeders 1,4`, `--rtt-ms 40`, `--runs N`, and `--engines rqbit,swarm` change
+the matrix; other `torrentplayer-bench` options (`--seeks`, `--watch`, `--piece-kib`,
+`--download-mibps`, scheduler tuning) apply to every run. The file is hashed once and seeded
+in place without being modified; each run downloads into a temporary folder that is deleted
+afterwards.
+
+Start-up and seeks follow the file's container, read with TorrentPlayer's own parsers
+(`torrentplayer-media`), instead of a flat 1 MiB at each end:
+
+- **Start-up** reads the header in the order a player does, one read after the other: for MP4
+  and MOV, the top-level boxes up to `moov` (only the header of an `mdat` before it), so a file
+  with `moov` at the end needs a read at the tail before any media; for Matroska and WebM,
+  everything before the first `Cluster`. Then one second of media (at the file's average
+  bitrate) from where the media data starts.
+- **Seeks** go to a fraction of the duration. The player starts at the keyframe at or before the
+  target (MP4 sync samples, Matroska cue points) and needs the media from there through the
+  target plus one second. A Matroska file with `Cues` after the clusters reads them before its
+  first seek, as FFmpeg-based players do.
+
+The duration comes from the container and sets the read-ahead, as `--duration` does. Fragmented
+MP4, files without a keyframe index, and other containers fall back to the flat reads; the
+report says so. `--startup-mib` and `--seek-mib` force the flat reads.
+
+**Torrents and magnet links** play from their public swarm with both engines, a 10 MiB/s
+download limit (`--download-mibps`), 3 runs, and the same seeks. They download from and upload
+to other people's computers, which see your IP address, so the suite skips them unless the
+command includes `public` or `--public`, and prints a notice before it starts. Only list
+content you have the right to download and share; this project uses openly licensed films
+(such as the Blender open movies) and free-software images for public runs.
+
+Public rows use peers only. Many torrents also list HTTP web seeds (BEP 19 `url-list`, or `ws=`
+in a magnet link): the WebTorrent copies of the Blender films each list one. The swarm engine
+can download from them and librqbit cannot, so with web seeds a public row would partly measure
+a web server and the engine comparison would be unfair. The suite downloads a linked `.torrent`
+once per entry, reports its trackers and web seeds on the "Torrent" line, and runs the swarm
+engine without web seeds. `--web-seeds` adds a separate swarm row, labelled _peers + web
+seeds_, that uses them. For a peers-only baseline, prefer torrents without web seeds, such as
+the Ubuntu release images (the 24.04.3 server image lists none). Magnet links run on both
+engines: librqbit fetches the metadata for the swarm engine, as in the app.
+
+Release images are not video: when a torrent has no video file, the benchmark measures its
+largest file as raw bytes (start-up and seeks read flat amounts; container needs do not apply)
+and the entry says so. `--file N` picks another file. A seek whose data does not arrive within
+120 seconds counts at 120 s and is shown as timed out in the seek column ("1 of 4 timed out"),
+instead of failing the whole row; the rest of that session's seeks are skipped.
+
+### The repository's benchmark list
+
+`crates/torrentplayer-bench/lists/benchmarks.txt` is a ready-made list of openly licensed films
+(Blender open movies, CC BY, from download.blender.org) and free-software images (Ubuntu and
+Debian release torrents), with the WebTorrent copies of the Blender films and a trackerless
+Sintel magnet link. Its local entries need `prepare-media.sh` first, which downloads the films
+(about 2.8 GB; `--4k` adds 6.7 GB) and builds the variants with FFmpeg (an MP4 with `moov` at
+the end, an MKV with the official Dolby 5.1 track) into `lists/media/`, which is git-ignored:
+
+```sh
+FFMPEG=/path/to/ffmpeg bash crates/torrentplayer-bench/lists/prepare-media.sh
+cargo bench-suite crates/torrentplayer-bench/lists/benchmarks.txt --quick
+cargo bench-suite crates/torrentplayer-bench/lists/benchmarks.txt --public --wireguard wg0.conf
+```
+
+The results go to `bench-results/<UTC timestamp>/` (git-ignored; `--out DIR` to choose):
+
+- `report.md`: a guide to reading it, then for each entry the media line (container, video and
+  audio codecs, duration, bitrate, size, where the index is, header size, keyframes) or the
+  torrent line (size, files, trackers, web seeds), how start-up and seeks read the file, any
+  warnings, a verdict, and a table with one row per engine and scenario: start-up and seek
+  latency (median / p95 in ms), throughput (median of each run's average download rate), peers
+  per run (live at the end / seen during the run), and stalls while watching.
+- `results.json`: every run, with each start-up read, seek target, keyframe, and byte count.
+
+The terminal shows the verdicts and a summary at the end, and the reports are rewritten after
+each entry, so an interrupted suite keeps what it finished. An entry that fails is reported and
+the suite continues; the exit code is non-zero if anything failed.
+
+### Reading the report
+
+The guide at the top of `report.md` says the same as this section.
+
+- **Start-up** is the time from pressing play until the player has the bytes it needs for the
+  first frame: the container header, wherever it is, and about a second of media. **Seek** is
+  the time from a seek until the data from the keyframe before the target through one second
+  past the target has arrived. Both are data-ready times at the stream server, not decoding or
+  the first frame on screen, which add a little on top.
+- **Targets** on a healthy swarm: median start-up under 3 s and median seek under 1.5 s. Each
+  entry's verdict counts the rows that meet both and names the slowest start-up and seek.
+- **Median and p95:** the median is the typical case, p95 nearly the worst. With 3 runs (12
+  seeks) p95 is close to the maximum, so one slow run moves it.
+- **Local scenarios** run on this machine and repeat well. The link speed is the viewer's
+  downlink, shared by all seeders: 2 MiB/s is a slow home connection, 8 a typical one, 25 a
+  fast one (a 1080p film needs about 1). Seeders hold the whole file; the round trip to each is
+  40 ms (nearby) or 120 ms (far away).
+- **Public swarms** are real peers on the internet and vary from run to run and day to day.
+  Rows are peers only unless marked _peers + web seeds_. _Peers per run_ is live at the end /
+  seen during the run; a handful (the verdict flags fewer than 5) means a thin swarm whose
+  result depends on a few peers.
+- **Comparing engines:** compare librqbit and the swarm engine within one scenario, not across
+  scenarios. With few runs, differences under about 15%, or with overlapping median-to-p95
+  ranges, are likely noise; rerun with `--runs 5` before drawing conclusions.
+- **Containers:** an MP4 with `moov` at the end needs a read at the end of the file before any
+  media, so it starts slower than the same file with `moov` first (remux with
+  `ffmpeg -i in.mp4 -c copy -movflags +faststart out.mp4`); a Matroska file reads its Cues
+  before the first seek when they come after the media. The line under each file says what
+  start-up and seeks read.
+- **Seeks of a few milliseconds** mean the data was already downloaded: each seek follows three
+  seconds of watching (`--watch`), and on a fast link a short file can be complete by then.
+  **Stalls** count the times playback ran out of data while watching.
+
 ## Tuning and regression checks
 
 `--queue-ms` overrides the swarm engine request window for an explicit comparison. Keep the

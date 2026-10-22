@@ -3,26 +3,44 @@
 //! `torrentplayer-bench`: measure streaming start-up and seek latency.
 //!
 //! ```text
-//! torrentplayer-bench local   [--size-mib 256] [--piece-kib 256] [--upload-mibps 8] [--rtt-ms 40]
-//!                     [--seeders 1 | --peers SPEC] [--tracker-interval SECS] [--inbound]
-//!                     [--runs 5] [OPTIONS]
+//! torrentplayer-bench local   [--size-mib 256 | --media FILE] [--piece-kib 256] [--upload-mibps 8]
+//!                     [--rtt-ms 40] [--seeders 1 | --peers SPEC] [--tracker-interval SECS]
+//!                     [--inbound] [--runs 5] [OPTIONS]
 //! torrentplayer-bench torrent <magnet | https URL | path.torrent>        [--runs 3] [OPTIONS]
 //! torrentplayer-bench limit   [--limit-mibps 2] [--then-mibps 1] [--change-after 10]
 //!                     [--measure-after 20] [--churn 8] [local swarm shape] [--runs 3] [OPTIONS]
 //! torrentplayer-bench seed    <media file> <output .torrent>
+//! torrentplayer-bench suite   <list file> [public | --public] [--web-seeds] [--quick]
+//!                     [--engines rqbit,swarm] [--links 2,8,25] [--seeders 1,4] [--rtt-ms 40]
+//!                     [--out DIR] [--runs 3] [--piece-kib 256] [--tracker-interval SECS]
+//!                     [OPTIONS]
 //!
 //! OPTIONS:
 //!   --file N             file index to play (default: largest video)
-//!   --seeks 0.1,0.5,...  seek positions as fractions of the file
-//!   --duration SECS      media duration, so the bitrate can be used for read-ahead
-//!   --startup-mib N      MiB a player needs at the head and at the tail to start (default 1)
-//!   --seek-mib N         MiB a player needs at a seek target to resume (default 1)
+//!   --seeks 0.1,0.5,...  seek positions as fractions of the file (of the duration with --media)
+//!   --duration SECS      media duration, so the bitrate can be used for read-ahead (with
+//!                        --media: the container's duration unless given)
+//!   --startup-mib N      MiB a player needs at the head and at the tail to start (default 1;
+//!                        with --media, given only to override the container-aware reads)
+//!   --seek-mib N         MiB a player needs at a seek target to resume (default 1; with
+//!                        --media, given only to override the container-aware reads)
 //!   --json PATH          write the full report as JSON
 //!   --max-startup-ms MS  exit with an error if the median start-up exceeds MS
 //!   --max-seek-ms MS     exit with an error if the median seek exceeds MS
 //!   --anchors N          anchor budget for prioritization; 0 = librqbit's built-in only
 //!   --no-dht             public swarms: use trackers only
 //!   --no-trackers        public swarms: use the DHT only (as for a trackerless magnet link)
+//!   --wireguard FILE     public swarms: run both engines through TorrentPlayer's built-in
+//!                        WireGuard tunnel with this `.conf` file, as the app's WireGuard mode
+//!                        (kill switch on; the run fails if the tunnel does not come up)
+//!   --socks5 HOST:PORT   public swarms: run both engines through this SOCKS5 proxy, as the
+//!                        app's SOCKS5 mode (names, trackers, and DHT through the proxy)
+//!   --socks5-user NAME   the proxy's username; the password is read from the environment
+//!                        variable TORRENTPLAYER_BENCH_SOCKS5_PASSWORD, never the command line.
+//!                        In both modes librqbit has no DHT of its own and connects through the
+//!                        network's bridge, as in the app, and plays magnet links only;
+//!                        one connection serves every run and entry (torrentplayer_bench::network);
+//!                        local media in `suite` runs directly
 //!   --dht-state DIR      keep the swarm engine's DHT routing tables in DIR between sessions,
 //!                        as the app does in its data folder (`swarm.json`); the first session
 //!                        without a saved state starts cold. librqbit keeps none, as in the app
@@ -83,22 +101,51 @@
 //! `seed` seeds a media file on `127.0.0.1` until stopped, writes its `.torrent`, and logs the
 //! seeder's address, for playing real media in a development build of the app (see
 //! `TORRENTPLAYER_DEV_AUTOPLAY` in docs/building.md).
+//!
+//! `local --media FILE` seeds a real media file instead of generated data, through the same
+//! link shaping, and reads what a player needs from its container (MP4, MOV, Matroska, `WebM`;
+//! see `torrentplayer_bench::needs`): the header wherever it is (`moov` at the end costs a read
+//! of the tail before the first frame) and, for a seek, the media from the keyframe before the
+//! target. Seek fractions are of the duration, which comes from the container. If the container
+//! cannot be parsed, the flat `--startup-mib`/`--seek-mib` reads are used and the report says
+//! so; giving either flag uses the flat reads for that part.
+//!
+//! `suite LIST` runs a matrix for every entry of a list file (see `torrentplayer_bench::suite`
+//! for the format) and writes `report.md` and `results.json` to `--out` (default
+//! `bench-results/<UTC timestamp>/`). Local media: both engines × `--links` (MiB/s, default
+//! 2,8,25) × `--seeders` (default 1,4) at `--rtt-ms` (default 40), plus 8 MiB/s with 4 seeders at
+//! 120 ms, 3 runs each. Torrents and magnet links: their public swarm, both engines, a 10 MiB/s
+//! download limit (`--download-mibps`), 3 runs, from peers only: web seeds (BEP 19) are off for
+//! the swarm engine, as librqbit never uses them, and `--web-seeds` adds a separate swarm row
+//! with them. The report lists each torrent's trackers and web seeds. These download from and
+//! upload to strangers, so they run only with `public` or `--public`. `--quick`: 1 run, and for
+//! local media only 2 MiB/s with 1 seeder and 25 MiB/s with 4 seeders. `--engines` picks
+//! engines; other options apply to every run. `report.md` starts with a guide to reading it and
+//! gives each entry a verdict against the targets.
 
 #![forbid(unsafe_code)]
 
 use std::io::Write as _;
 use std::num::NonZeroU32;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
 use torrentplayer_bench::limit::{LimitPlan, LimitReport, run_limit};
 use torrentplayer_bench::link::{ChokeCycle, Clock, Dialers, Link, PeerProfile};
+use torrentplayer_bench::media::MediaInfo;
+use torrentplayer_bench::network::SharedNetwork;
 use torrentplayer_bench::seeder::LocalSeeder;
+use torrentplayer_bench::suite::{
+    Entry, EntryResult, Scenario, ScenarioResult, Source, SuiteReport, TorrentInfo,
+    local_scenarios, parse_list, rqbit_not_used,
+};
 use torrentplayer_bench::tracker::LocalTracker;
 use torrentplayer_bench::webseed::{WebSeedServer, with_web_seed};
 use torrentplayer_bench::{BenchConfig, EngineKind, Report, Summary, run_once};
+use torrentplayer_net::{NetworkMode, Secret, Socks5Config, WireGuardConfig};
 use torrentplayer_torrent::TorrentSource;
 use tracing_subscriber::EnvFilter;
 
@@ -126,6 +173,8 @@ struct Shape {
     tracker_interval: Option<Duration>,
     web_seed: Option<PeerProfile>,
     inbound: bool,
+    /// Seed this media file instead of generated data.
+    media: Option<PathBuf>,
 }
 
 enum Mode {
@@ -134,18 +183,26 @@ enum Mode {
     Torrent(String),
 }
 
-fn parse_args() -> anyhow::Result<Args> {
-    let mut args = std::env::args().skip(1);
-    let mode = args
-        .next()
-        .context("expected `local`, `torrent`, or `limit`; see --help")?;
+/// Options that take no value.
+const FLAGS: &[&str] = &[
+    "--no-dht",
+    "--no-trackers",
+    "--no-web-seeds",
+    "--shared-cache",
+    "--inbound",
+    "--quick",
+    "--public",
+    "--web-seeds",
+];
+
+type Options = std::collections::HashMap<String, String>;
+
+/// Splits arguments into positional ones and `--name value` options ([`FLAGS`] take no value).
+fn tokenize(mut args: impl Iterator<Item = String>) -> anyhow::Result<(Vec<String>, Options)> {
     let mut positional = Vec::new();
-    let mut options = std::collections::HashMap::new();
+    let mut options = Options::new();
     while let Some(arg) = args.next() {
-        if matches!(
-            arg.as_str(),
-            "--no-dht" | "--no-trackers" | "--no-web-seeds" | "--shared-cache" | "--inbound"
-        ) {
+        if FLAGS.contains(&arg.as_str()) {
             options.insert(arg[2..].to_owned(), String::new());
         } else if let Some(name) = arg.strip_prefix("--") {
             let value = args
@@ -156,6 +213,15 @@ fn parse_args() -> anyhow::Result<Args> {
             positional.push(arg);
         }
     }
+    Ok((positional, options))
+}
+
+fn parse_args() -> anyhow::Result<Args> {
+    let mut args = std::env::args().skip(1);
+    let mode = args
+        .next()
+        .context("expected `local`, `torrent`, `limit`, `seed`, or `suite`; see --help")?;
+    let (mut positional, mut options) = tokenize(args)?;
     let mut take = |name: &str| options.remove(name);
 
     let (mode, default_runs) = match mode.as_str() {
@@ -188,6 +254,12 @@ fn parse_args() -> anyhow::Result<Args> {
         other => bail!("unknown mode {other:?}; expected `local`, `torrent`, or `limit`"),
     };
     let bench = bench_options(&mut take)?;
+    // A tunnel or proxy cannot reach the local seeders on 127.0.0.1, and the app never sends
+    // peer traffic there either.
+    anyhow::ensure!(
+        bench.network.is_none() || matches!(mode, Mode::Torrent(_)),
+        "--wireguard and --socks5 apply to public swarms: use them with `torrent` or `suite`"
+    );
     let engine = take("engine").map_or(Ok(EngineKind::Rqbit), |e| e.parse())?;
     let args = Args {
         mode,
@@ -234,6 +306,7 @@ fn shape(
             .map(|spec| parse_profile(&spec).map(|(p, _)| p))
             .transpose()?,
         inbound: take("inbound").is_some(),
+        media: take("media").map(PathBuf::from),
     })
 }
 
@@ -259,6 +332,66 @@ fn add_churn(peers: &mut [PeerProfile], period: Duration, total: Duration) {
             peer.offline.push((from, from + period / 4));
             from += period;
         }
+    }
+}
+
+/// Environment variable holding the SOCKS5 password, so it stays off the command line (and out
+/// of the suite report, which lists the options).
+const SOCKS5_PASSWORD_VAR: &str = "TORRENTPLAYER_BENCH_SOCKS5_PASSWORD";
+
+/// The protected network mode from `--wireguard FILE` or `--socks5 HOST:PORT` (with
+/// `--socks5-user`), configured as the app configures them; `None` connects directly.
+fn network_mode(
+    take: &mut dyn FnMut(&str) -> Option<String>,
+) -> anyhow::Result<Option<NetworkMode>> {
+    let wireguard = take("wireguard");
+    let socks5 = take("socks5");
+    let user = take("socks5-user");
+    match (wireguard, socks5) {
+        (Some(_), Some(_)) => bail!("choose one of --wireguard and --socks5"),
+        (Some(path), None) => {
+            anyhow::ensure!(user.is_none(), "--socks5-user needs --socks5");
+            let text = std::fs::read_to_string(&path).with_context(|| format!("reading {path}"))?;
+            let (config, notes) =
+                WireGuardConfig::parse(&text).context("the WireGuard configuration is invalid")?;
+            for note in notes {
+                tracing::warn!("{path}: {note}");
+            }
+            Ok(Some(NetworkMode::WireGuard(config)))
+        }
+        (None, Some(addr)) => {
+            let (host, port) = addr
+                .rsplit_once(':')
+                .context("--socks5 expects HOST:PORT")?;
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            anyhow::ensure!(!host.is_empty(), "--socks5 expects HOST:PORT");
+            let port = port.parse().context("--socks5 expects HOST:PORT")?;
+            Ok(Some(NetworkMode::Socks5(Socks5Config {
+                host: host.to_owned(),
+                port,
+                username: user,
+                password: std::env::var(SOCKS5_PASSWORD_VAR)
+                    .ok()
+                    .filter(|p| !p.is_empty())
+                    .map(Secret::new),
+                // The app's defaults: names, trackers, and DHT all through the proxy.
+                remote_dns: true,
+                proxy_trackers: true,
+                proxy_dht: true,
+            })))
+        }
+        (None, None) => {
+            anyhow::ensure!(user.is_none(), "--socks5-user needs --socks5");
+            Ok(None)
+        }
+    }
+}
+
+/// A protected mode for reports and logs, without secrets: `WireGuard via 198.51.100.1:51820`.
+fn describe_network(mode: &NetworkMode) -> String {
+    match mode.endpoint() {
+        Some(endpoint) => format!("{:?} via {endpoint}", mode.kind()),
+        None => format!("{:?}", mode.kind()),
     }
 }
 
@@ -363,15 +496,18 @@ fn bench_options(take: &mut dyn FnMut(&str) -> Option<String>) -> anyhow::Result
     bench.duration_secs = float(take("duration"))?;
     if let Some(mib) = float(take("startup-mib"))? {
         bench.startup_bytes = mib_to_bytes(mib);
+        bench.flat_startup = true;
     }
     if let Some(mib) = float(take("seek-mib"))? {
         bench.seek_bytes = mib_to_bytes(mib);
+        bench.flat_seeks = true;
     }
     if let Some(anchors) = take("anchors") {
         bench.prioritization.max_anchors = anchors.parse().context("--anchors expects a count")?;
     }
     bench.dht = take("no-dht").is_none();
     bench.trackers = take("no-trackers").is_none();
+    bench.network = network_mode(take)?;
     bench.dht_state_dir = take("dht-state").map(PathBuf::from);
     bench.web_seeds = take("no-web-seeds").is_none();
     bench.cold_seeks = take("shared-cache").is_none();
@@ -433,7 +569,7 @@ fn scheduler_options(
 }
 
 fn source_from(input: &str) -> anyhow::Result<TorrentSource> {
-    if input.contains(':') && !std::path::Path::new(input).exists() {
+    if input.contains(':') && !Path::new(input).exists() {
         Ok(TorrentSource::parse_link(input)?)
     } else {
         let bytes = std::fs::read(input).with_context(|| format!("reading {input}"))?;
@@ -444,7 +580,7 @@ fn source_from(input: &str) -> anyhow::Result<TorrentSource> {
 /// A running local swarm. Everything in it stops when it is dropped.
 struct LocalSwarm {
     _dir: tempfile::TempDir,
-    _seeder: LocalSeeder,
+    _seeder: Arc<LocalSeeder>,
     _tracker: Option<LocalTracker>,
     _server: Option<WebSeedServer>,
     _links: Vec<Link>,
@@ -456,9 +592,15 @@ struct LocalSwarm {
 
 impl LocalSwarm {
     /// Starts the seeder, tracker, web seed, and links for `shape`, and points `bench` at them.
+    /// `shared` seeds the torrent instead of a new seeder (it must list no tracker and have at
+    /// least as many sessions as `shape` has seeders).
     // A linear set-up of the swarm's parts; splitting it would scatter what each mode needs.
     #[allow(clippy::too_many_lines)]
-    async fn start(shape: &Shape, bench: &mut BenchConfig) -> anyhow::Result<Self> {
+    async fn start(
+        shape: &Shape,
+        bench: &mut BenchConfig,
+        shared: Option<Arc<LocalSeeder>>,
+    ) -> anyhow::Result<Self> {
         let Shape {
             size_mib,
             piece_kib,
@@ -468,6 +610,7 @@ impl LocalSwarm {
             tracker_interval,
             web_seed,
             inbound,
+            media,
         } = shape;
         anyhow::ensure!(
             !peers.is_empty() || web_seed.is_some(),
@@ -485,15 +628,38 @@ impl LocalSwarm {
         };
         // The seeder is unthrottled; the link emulator provides bandwidth and latency.
         let dir = tempfile::tempdir()?;
-        let seeder = LocalSeeder::start(
-            dir.path(),
-            usize::try_from(size_mib * MIB)?,
-            piece_kib * 1024,
-            None,
-            peers.len().max(1),
-            tracker.iter().map(|t| t.url.clone()).collect(),
-        )
-        .await?;
+        let trackers: Vec<String> = tracker.iter().map(|t| t.url.clone()).collect();
+        let seeder = match (shared, media) {
+            (Some(seeder), _) => {
+                anyhow::ensure!(
+                    trackers.is_empty() && seeder.addrs.len() >= peers.len(),
+                    "the shared seeder does not fit this swarm"
+                );
+                seeder
+            }
+            (None, Some(file)) => Arc::new(
+                LocalSeeder::seed(
+                    std::path::absolute(file)?,
+                    piece_kib * 1024,
+                    None,
+                    peers.len().max(1),
+                    trackers,
+                )
+                .await
+                .with_context(|| format!("seeding {}", file.display()))?,
+            ),
+            (None, None) => Arc::new(
+                LocalSeeder::start(
+                    dir.path(),
+                    usize::try_from(size_mib * MIB)?,
+                    piece_kib * 1024,
+                    None,
+                    peers.len().max(1),
+                    trackers,
+                )
+                .await?,
+            ),
+        };
         let mut profiles: Vec<(std::net::SocketAddr, PeerProfile)> = seeder
             .addrs
             .iter()
@@ -579,7 +745,16 @@ async fn run(args: &Args) -> anyhow::Result<Report> {
     let mut runs = Vec::new();
     match &args.mode {
         Mode::Local(shape) => {
-            let swarm = LocalSwarm::start(shape, &mut bench).await?;
+            if let Some(file) = &shape.media {
+                let info = MediaInfo::inspect(file).await?;
+                apply_media(&info, &mut bench);
+                let mut out = std::io::stdout().lock();
+                writeln!(out, "media: {}", info.summary())?;
+                for warning in &info.warnings {
+                    writeln!(out, "warning: {warning}")?;
+                }
+            }
+            let swarm = LocalSwarm::start(shape, &mut bench, None).await?;
             for i in 0..args.runs {
                 runs.push(
                     run_once(args.engine, || swarm.session(), &bench)
@@ -590,14 +765,30 @@ async fn run(args: &Args) -> anyhow::Result<Report> {
             }
         }
         Mode::Torrent(input) => {
-            for i in 0..args.runs {
-                runs.push(
-                    run_once(args.engine, || source_from(input), &bench)
-                        .await
-                        .with_context(|| format!("run {}", i + 1))?,
+            // One tunnel or proxy connection for every run, as the app keeps one.
+            if let Some(mode) = &bench.network {
+                tracing::info!(
+                    "network: {} (as the app's protected mode)",
+                    describe_network(mode)
                 );
-                progress(i + 1, args.runs);
+                bench.shared_network = Some(SharedNetwork::start(mode).await?);
             }
+            let outcome = async {
+                for i in 0..args.runs {
+                    runs.push(
+                        run_once(args.engine, || source_from(input), &bench)
+                            .await
+                            .with_context(|| format!("run {}", i + 1))?,
+                    );
+                    progress(i + 1, args.runs);
+                }
+                anyhow::Ok(())
+            }
+            .await;
+            if let Some(shared) = &bench.shared_network {
+                shared.shutdown();
+            }
+            outcome?;
         }
         Mode::Limit(..) => bail!("`limit` has its own report"),
     }
@@ -606,7 +797,7 @@ async fn run(args: &Args) -> anyhow::Result<Report> {
 
 async fn run_limits(args: &Args, shape: &Shape, plan: LimitPlan) -> anyhow::Result<LimitReport> {
     let mut bench = args.bench.clone();
-    let swarm = LocalSwarm::start(shape, &mut bench).await?;
+    let swarm = LocalSwarm::start(shape, &mut bench, None).await?;
     let mut runs = Vec::new();
     for i in 0..args.runs {
         runs.push(
@@ -785,7 +976,7 @@ fn print_limit_report(report: &LimitReport, plan: LimitPlan) -> std::io::Result<
 }
 
 /// `torrentplayer-bench seed <file> <torrent>`: seeds `file` until the process is stopped.
-fn seed(file: PathBuf, torrent: &std::path::Path) -> anyhow::Result<()> {
+fn seed(file: PathBuf, torrent: &Path) -> anyhow::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -801,6 +992,524 @@ fn seed(file: PathBuf, torrent: &std::path::Path) -> anyhow::Result<()> {
     })
 }
 
+/// Points `bench` at a media file's layout and, unless `--duration` was given, its duration.
+fn apply_media(info: &MediaInfo, bench: &mut BenchConfig) {
+    bench.layout.clone_from(&info.layout);
+    if bench.duration_secs.is_none() {
+        bench.duration_secs = info.duration_secs;
+    }
+}
+
+/// The download limit for public entries in `suite` unless `--download-mibps` is given.
+const PUBLIC_LIMIT_MIBPS: u32 = 10;
+
+/// `suite` options.
+struct SuiteArgs {
+    list: PathBuf,
+    public: bool,
+    out: PathBuf,
+    engines: Vec<EngineKind>,
+    scenarios: Vec<Scenario>,
+    piece_kib: u32,
+    tracker_interval: Option<Duration>,
+    runs: usize,
+    bench: BenchConfig,
+    options: Vec<String>,
+    /// Public entries: also run the swarm engine with the torrent's web seeds.
+    web_seeds: bool,
+}
+
+/// Parses a comma-separated list.
+fn numbers<T: std::str::FromStr>(v: Option<String>, name: &str) -> anyhow::Result<Option<Vec<T>>> {
+    v.map(|v| {
+        v.split(',')
+            .map(|n| n.trim().parse::<T>())
+            .collect::<Result<Vec<T>, _>>()
+            .map_err(|_| anyhow::anyhow!("--{name} expects comma-separated numbers"))
+    })
+    .transpose()
+}
+
+fn parse_suite(args: impl Iterator<Item = String>) -> anyhow::Result<SuiteArgs> {
+    let raw: Vec<String> = args.collect();
+    let (positional, mut options) = tokenize(raw.iter().cloned())?;
+    let mut take = |name: &str| options.remove(name);
+    let mut positional = positional.into_iter();
+    let list = positional
+        .next()
+        .context("usage: torrentplayer-bench suite <list file> [public] [options]")?;
+    let mut public = take("public").is_some();
+    for extra in positional {
+        anyhow::ensure!(extra == "public", "unexpected argument {extra:?}");
+        public = true;
+    }
+    let quick = take("quick").is_some();
+    let web_seeds = take("web-seeds").is_some();
+    let links = numbers::<u32>(take("links"), "links")?;
+    let seeders = numbers::<usize>(take("seeders"), "seeders")?;
+    let rtt = take("rtt-ms")
+        .map(|v| v.parse::<u64>())
+        .transpose()
+        .context("--rtt-ms expects milliseconds")?;
+    let custom = links.is_some() || seeders.is_some() || rtt.is_some();
+    let rtt_ms = rtt.unwrap_or(40);
+    let scenarios = if quick && !custom {
+        local_scenarios(&[], &[], rtt_ms, &[(2, 1, rtt_ms), (25, 4, rtt_ms)])
+    } else {
+        // The high-latency row only with the default matrix.
+        let extra: &[(u32, usize, u64)] = if quick || custom { &[] } else { &[(8, 4, 120)] };
+        local_scenarios(
+            &links.unwrap_or_else(|| vec![2, 8, 25]),
+            &seeders.unwrap_or_else(|| vec![1, 4]),
+            rtt_ms,
+            extra,
+        )
+    };
+    anyhow::ensure!(
+        scenarios
+            .iter()
+            .all(|s| s.link_mibps > Some(0) && s.seeders > Some(0)),
+        "--links and --seeders must be above zero"
+    );
+    let engines = match take("engines") {
+        Some(list) => list
+            .split(',')
+            .map(|e| e.trim().parse())
+            .collect::<anyhow::Result<Vec<EngineKind>>>()?,
+        None => vec![EngineKind::Rqbit, EngineKind::Swarm],
+    };
+    anyhow::ensure!(!engines.is_empty(), "--engines lists no engine");
+    let runs = usize::try_from(number(take("runs"), if quick { 1 } else { 3 })?)?.max(1);
+    let out = take("out").map_or_else(
+        || {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            Path::new("bench-results").join(torrentplayer_bench::suite::timestamp(now))
+        },
+        PathBuf::from,
+    );
+    let piece_kib = u32::try_from(number(take("piece-kib"), 256)?)?;
+    let tracker_interval =
+        float(take("tracker-interval"))?.map(|s| Duration::from_secs_f64(s.max(1.0)));
+    let bench = bench_options(&mut take)?;
+    if let Some(unknown) = options.keys().next() {
+        bail!("unknown option --{unknown} for suite");
+    }
+    Ok(SuiteArgs {
+        list: PathBuf::from(list),
+        public,
+        out,
+        engines,
+        scenarios,
+        piece_kib,
+        tracker_interval,
+        runs,
+        bench,
+        options: raw.into_iter().skip(1).collect(),
+        web_seeds,
+    })
+}
+
+/// `torrentplayer-bench suite <list>`: runs the matrix for every entry, writing the reports
+/// after each. `Ok(false)` if any entry or cell failed.
+fn suite(args: impl Iterator<Item = String>) -> anyhow::Result<bool> {
+    let mut args = parse_suite(args)?;
+    let text = std::fs::read_to_string(&args.list)
+        .with_context(|| format!("reading {}", args.list.display()))?;
+    let base = args
+        .list
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let entries = parse_list(&text, &base)?;
+    anyhow::ensure!(
+        !entries.is_empty(),
+        "{} lists no entries",
+        args.list.display()
+    );
+    let public = entries.iter().filter(|e| e.source.is_public()).count();
+    if public > 0 && args.public {
+        writeln!(
+            std::io::stdout(),
+            "NOTICE: {public} entr{} from public BitTorrent swarms: the benchmark downloads \
+             from and uploads to other people's computers, and your IP address is visible to \
+             them. Only list content you have the right to download and share, such as openly \
+             licensed films or free-software images.",
+            if public == 1 { "y plays" } else { "ies play" }
+        )?;
+    } else if public > 0 {
+        writeln!(
+            std::io::stdout(),
+            "{public} public-swarm entr{} will be skipped; add `public` or --public to run them \
+             (they download from and upload to a public swarm).",
+            if public == 1 { "y" } else { "ies" }
+        )?;
+    }
+    std::fs::create_dir_all(&args.out)
+        .with_context(|| format!("creating {}", args.out.display()))?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let mut report = SuiteReport {
+        started: torrentplayer_bench::suite::timestamp(now),
+        list: args.list.display().to_string(),
+        options: args.options.clone(),
+        network: args.bench.network.as_ref().map(describe_network),
+        runs: args.runs,
+        entries: Vec::new(),
+    };
+    let total = entries.len();
+    for (i, entry) in entries.into_iter().enumerate() {
+        tracing::info!("entry {}/{total}: {}", i + 1, entry.label);
+        let result = if entry.source.is_public() && !args.public {
+            EntryResult {
+                skipped: Some("a public swarm; run with `public` or --public".into()),
+                ..entry_result(entry)
+            }
+        } else if let Err(error) = runtime.block_on(share_network(&mut args, &entry.source)) {
+            EntryResult {
+                error: Some(format!("{error:#}")),
+                ..entry_result(entry)
+            }
+        } else {
+            runtime.block_on(run_entry(&args, entry))
+        };
+        if let Some(error) = &result.error {
+            tracing::error!("{}: {error}", result.entry.label);
+        }
+        report.entries.push(result);
+        write_suite(&args.out, &report)?;
+    }
+    if let Some(shared) = args.bench.shared_network.take() {
+        shared.shutdown();
+    }
+    let mut out = std::io::stdout().lock();
+    write!(
+        out,
+        "
+{}",
+        torrentplayer_bench::suite::render_summary(&report)
+    )?;
+    writeln!(
+        out,
+        "
+report: {}
+raw runs: {}",
+        args.out.join("report.md").display(),
+        args.out.join("results.json").display()
+    )?;
+    Ok(report
+        .entries
+        .iter()
+        .all(|e| e.error.is_none() && e.results.iter().all(|r| r.error.is_none())))
+}
+
+/// Starts the protected network the first time a public entry needs it; every later public
+/// entry shares it (a failed start is retried by the next public entry).
+async fn share_network(args: &mut SuiteArgs, source: &Source) -> anyhow::Result<()> {
+    if !source.is_public() || args.bench.shared_network.is_some() {
+        return Ok(());
+    }
+    if let Some(mode) = &args.bench.network {
+        let shared = SharedNetwork::start(mode)
+            .await
+            .context("the protected network did not come up")?;
+        args.bench.shared_network = Some(shared);
+    }
+    Ok(())
+}
+
+fn entry_result(entry: Entry) -> EntryResult {
+    EntryResult {
+        entry,
+        media: None,
+        torrent: None,
+        warnings: Vec::new(),
+        error: None,
+        skipped: None,
+        results: Vec::new(),
+    }
+}
+
+fn write_suite(out: &Path, report: &SuiteReport) -> anyhow::Result<()> {
+    std::fs::write(
+        out.join("report.md"),
+        torrentplayer_bench::suite::render_markdown(report),
+    )?;
+    std::fs::write(out.join("results.json"), serde_json::to_vec_pretty(report)?)?;
+    Ok(())
+}
+
+async fn run_entry(args: &SuiteArgs, entry: Entry) -> EntryResult {
+    let mut result = entry_result(entry);
+    let outcome = match result.entry.source.clone() {
+        Source::Media(path) => run_media(args, &path, &mut result).await,
+        source => run_public(args, &source, &mut result).await,
+    };
+    if let Err(error) = outcome {
+        result.error = Some(format!("{error:#}"));
+    }
+    result
+}
+
+/// Runs `runs` sessions with `engine`.
+async fn runs_of(
+    runs: usize,
+    engine: EngineKind,
+    mut source: impl FnMut() -> anyhow::Result<TorrentSource>,
+    bench: &BenchConfig,
+) -> anyhow::Result<Report> {
+    let mut out = Vec::new();
+    for i in 0..runs {
+        out.push(
+            run_once(engine, &mut source, bench)
+                .await
+                .with_context(|| format!("run {}", i + 1))?,
+        );
+        progress(i + 1, runs);
+    }
+    Ok(Report::new(out))
+}
+
+fn cell(engine: EngineKind, scenario: Scenario, outcome: anyhow::Result<Report>) -> ScenarioResult {
+    let (report, error) = match outcome {
+        Ok(report) => (Some(report), None),
+        Err(error) => {
+            tracing::error!("{engine}, {}: {error:#}", scenario.label());
+            (None, Some(format!("{error:#}")))
+        }
+    };
+    ScenarioResult {
+        engine: engine.to_string(),
+        scenario,
+        report,
+        error,
+        skipped: None,
+    }
+}
+
+/// A local media entry: every scenario with every engine, from one set of seeders.
+async fn run_media(args: &SuiteArgs, path: &Path, result: &mut EntryResult) -> anyhow::Result<()> {
+    let info = MediaInfo::inspect(path).await?;
+    let mut bench = args.bench.clone();
+    apply_media(&info, &mut bench);
+    result.warnings.extend(info.warnings.iter().cloned());
+    if bench.layout.is_some() && (bench.flat_startup || bench.flat_seeks) {
+        result.warnings.push(
+            "--startup-mib or --seek-mib given: that part uses flat reads instead of the container"
+                .into(),
+        );
+    }
+    tracing::info!("media: {}", info.summary());
+    result.media = Some(info);
+    // Hash the file once: the seeders serve every scenario (a tracker needs its own torrent).
+    let most = args
+        .scenarios
+        .iter()
+        .filter_map(|s| s.seeders)
+        .max()
+        .unwrap_or(1);
+    let shared = match args.tracker_interval {
+        None => Some(Arc::new(
+            LocalSeeder::seed(
+                std::path::absolute(path)?,
+                args.piece_kib * 1024,
+                None,
+                most,
+                Vec::new(),
+            )
+            .await
+            .with_context(|| format!("seeding {}", path.display()))?,
+        )),
+        Some(_) => None,
+    };
+    for &scenario in &args.scenarios {
+        let shape = Shape {
+            size_mib: 0,
+            piece_kib: args.piece_kib,
+            upload_mibps: scenario.link_mibps.unwrap_or(8),
+            rtt_ms: scenario.rtt_ms.unwrap_or(40),
+            peers: vec![PeerProfile::default(); scenario.seeders.unwrap_or(1)],
+            tracker_interval: args.tracker_interval,
+            web_seed: None,
+            inbound: false,
+            media: Some(path.to_path_buf()),
+        };
+        let mut cell_bench = bench.clone();
+        let swarm = match LocalSwarm::start(&shape, &mut cell_bench, shared.clone()).await {
+            Ok(swarm) => swarm,
+            Err(error) => {
+                let error = format!("{error:#}");
+                for &engine in &args.engines {
+                    result
+                        .results
+                        .push(cell(engine, scenario, Err(anyhow::anyhow!("{error}"))));
+                }
+                continue;
+            }
+        };
+        for &engine in &args.engines {
+            tracing::info!("{}: {engine}, {}", result.entry.label, scenario.label());
+            let outcome = runs_of(args.runs, engine, || swarm.session(), &cell_bench).await;
+            result.results.push(cell(engine, scenario, outcome));
+        }
+    }
+    Ok(())
+}
+
+/// Largest `.torrent` file downloaded.
+const MAX_TORRENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Downloads a `.torrent` file, once per entry, so every engine and session plays the same one.
+async fn fetch_torrent(url: &str) -> anyhow::Result<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("torrentplayer-bench/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()?;
+    let mut response = client.get(url).send().await?.error_for_status()?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(
+            body.len() + chunk.len() <= MAX_TORRENT_BYTES,
+            "the .torrent file is larger than 16 MiB"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// The `.torrent` file of a public entry (downloaded once for a link), and what it lists. A
+/// magnet link has no file until its metadata is fetched.
+async fn load_torrent(source: &Source) -> anyhow::Result<(Option<Vec<u8>>, TorrentInfo)> {
+    let torrent = match source {
+        Source::Url(url) => Some(
+            fetch_torrent(url)
+                .await
+                .with_context(|| format!("downloading {url}"))?,
+        ),
+        Source::TorrentFile(path) => {
+            Some(std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+        }
+        Source::Magnet(_) | Source::Media(_) => None,
+    };
+    let info = match &torrent {
+        Some(bytes) => {
+            let meta = torrentplayer_swarm::Metainfo::from_bytes(bytes)
+                .context("parsing the .torrent file")?;
+            TorrentInfo {
+                name: Some(meta.name.clone()),
+                size: Some(meta.total_len),
+                files: Some(meta.files.iter().filter(|f| !f.padding).count()),
+                trackers: meta.trackers.len(),
+                web_seeds: meta.web_seeds.len(),
+            }
+        }
+        None => TorrentInfo::from_magnet(&source.input()),
+    };
+    Ok((torrent, info))
+}
+
+/// A torrent or magnet entry: its public swarm with every engine from peers only, and with
+/// `--web-seeds` once more with the swarm engine using the torrent's web seeds.
+async fn run_public(
+    args: &SuiteArgs,
+    source: &Source,
+    result: &mut EntryResult,
+) -> anyhow::Result<()> {
+    let (torrent, info) = load_torrent(source).await?;
+    tracing::info!("torrent: {}", info.summary());
+    let has_web_seeds = info.web_seeds > 0;
+    result.torrent = Some(info);
+    let input = source.input();
+    let session = || match &torrent {
+        Some(bytes) => Ok(TorrentSource::from_file_bytes(bytes.clone())?),
+        None => source_from(&input),
+    };
+
+    let mut bench = args.bench.clone();
+    let limit = bench
+        .download_limit_bps
+        .and_then(|l| u32::try_from(u64::from(l.get()) / MIB).ok())
+        .unwrap_or(PUBLIC_LIMIT_MIBPS);
+    bench.download_limit_bps = bench
+        .download_limit_bps
+        .or(NonZeroU32::new(PUBLIC_LIMIT_MIBPS * 1024 * 1024));
+    let peers_only = Scenario {
+        link_mibps: None,
+        seeders: None,
+        rtt_ms: None,
+        download_mibps: Some(limit),
+        web_seeds: false,
+    };
+    let mut rows: Vec<(EngineKind, Scenario)> =
+        args.engines.iter().map(|&e| (e, peers_only)).collect();
+    let swarm = args.engines.contains(&EngineKind::Swarm);
+    if args.web_seeds {
+        if !swarm {
+            result
+                .warnings
+                .push("--web-seeds needs the swarm engine; librqbit does not use web seeds".into());
+        } else if !has_web_seeds {
+            result
+                .warnings
+                .push("--web-seeds: this torrent lists no web seeds".into());
+        } else if torrent.is_some() {
+            rows.push((
+                EngineKind::Swarm,
+                Scenario {
+                    web_seeds: true,
+                    ..peers_only
+                },
+            ));
+        }
+    } else if has_web_seeds {
+        result.warnings.push(
+            "this torrent lists HTTP web seeds. The rows use peers only (librqbit ignores web \
+             seeds; the swarm engine ran without them) so both engines face the same swarm; \
+             add --web-seeds for a swarm row that uses them"
+                .into(),
+        );
+    }
+    let protected = bench.network.is_some();
+    for (engine, scenario) in rows {
+        if engine == EngineKind::Rqbit
+            && let Some(reason) = rqbit_not_used(protected, source)
+        {
+            result.results.push(ScenarioResult {
+                engine: engine.to_string(),
+                scenario,
+                report: None,
+                error: None,
+                skipped: Some(reason.to_owned()),
+            });
+            continue;
+        }
+        tracing::info!("{}: {engine}, {}", result.entry.label, scenario.label());
+        let mut cell_bench = bench.clone();
+        cell_bench.web_seeds = scenario.web_seeds;
+        let outcome = runs_of(args.runs, engine, &session, &cell_bench).await;
+        result.results.push(cell(engine, scenario, outcome));
+    }
+    if result
+        .results
+        .iter()
+        .flat_map(|r| r.report.iter().flat_map(|report| &report.runs))
+        .any(|run| run.raw_bytes)
+    {
+        result.warnings.push(
+            "no video file: measured the largest file as raw bytes (container needs not \
+             applicable)"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn main() -> ExitCode {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt()
@@ -809,12 +1518,23 @@ fn main() -> ExitCode {
         .try_init();
 
     let mut positional = std::env::args().skip(1);
-    if positional.next().as_deref() == Some("seed") {
+    let mode = positional.next();
+    if mode.as_deref() == Some("suite") {
+        return match suite(positional) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(error) => {
+                tracing::error!("{error:#}");
+                ExitCode::from(2)
+            }
+        };
+    }
+    if mode.as_deref() == Some("seed") {
         let (Some(file), Some(torrent)) = (positional.next(), positional.next()) else {
             tracing::error!("usage: torrentplayer-bench seed <media file> <output .torrent>");
             return ExitCode::from(2);
         };
-        return match seed(file.into(), std::path::Path::new(&torrent)) {
+        return match seed(file.into(), Path::new(&torrent)) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
                 tracing::error!("{error:#}");
@@ -863,6 +1583,64 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn mode(options: &[(&str, &str)]) -> anyhow::Result<Option<NetworkMode>> {
+        let mut options: Options = options
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        network_mode(&mut |name| options.remove(name))
+    }
+
+    #[test]
+    fn socks5_options() {
+        let Some(NetworkMode::Socks5(c)) = mode(&[("socks5", "proxy.example:1080")]).unwrap()
+        else {
+            panic!("not SOCKS5");
+        };
+        assert_eq!((c.host.as_str(), c.port), ("proxy.example", 1080));
+        assert!(c.remote_dns && c.proxy_trackers && c.proxy_dht);
+        assert_eq!(c.username, None);
+        let Some(NetworkMode::Socks5(c)) =
+            mode(&[("socks5", "[2001:db8::1]:9050"), ("socks5-user", "me")]).unwrap()
+        else {
+            panic!("not SOCKS5");
+        };
+        assert_eq!((c.host.as_str(), c.port), ("2001:db8::1", 9050));
+        assert_eq!(c.username.as_deref(), Some("me"));
+        assert!(mode(&[("socks5", "no-port")]).is_err());
+        assert!(mode(&[("socks5", ":1080")]).is_err());
+        assert!(
+            mode(&[("socks5-user", "me")]).is_err(),
+            "a user without a proxy"
+        );
+        assert!(mode(&[]).unwrap().is_none(), "direct by default");
+    }
+
+    #[test]
+    fn wireguard_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf = dir.path().join("wg0.conf");
+        // Example keys from the `wg(8)` manual.
+        std::fs::write(
+            &conf,
+            "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\n\
+             Address = 10.0.0.2/32\n[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\n\
+             AllowedIPs = 0.0.0.0/0\nEndpoint = 198.51.100.1:51820\n",
+        )
+        .unwrap();
+        let path = conf.display().to_string();
+        let parsed = mode(&[("wireguard", &path)]).unwrap().unwrap();
+        assert!(matches!(parsed, NetworkMode::WireGuard(_)));
+        let described = describe_network(&parsed);
+        assert_eq!(described, "WireGuard via 198.51.100.1:51820");
+        assert!(!described.contains("yAnz"), "no private key in reports");
+        assert!(mode(&[("wireguard", "missing.conf")]).is_err());
+        assert!(
+            mode(&[("wireguard", &path), ("socks5", "p:1")]).is_err(),
+            "one mode at a time"
+        );
+    }
 
     #[test]
     fn churn_staggers_outages() {
