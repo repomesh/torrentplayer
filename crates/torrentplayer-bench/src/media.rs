@@ -7,13 +7,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use torrentplayer_media::{Container, MediaLayout, probe_layout, probe_tracks};
 
 const MIB: f64 = 1024.0 * 1024.0;
 
 /// A local media file as the benchmark sees it.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaInfo {
     /// File size in bytes.
     pub size: u64,
