@@ -142,10 +142,15 @@ fn unquote(s: &str) -> &str {
 /// its info hash (shortened). `None` if the source gives none.
 fn default_label(source: &Source) -> Option<String> {
     let label = match source {
-        Source::Media(p) | Source::TorrentFile(p) => p.file_name().map_or_else(
-            || p.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        ),
+        // Split on both separators: a list written on Windows gets the same labels on any OS.
+        Source::Media(p) | Source::TorrentFile(p) => {
+            let path = p.to_string_lossy();
+            path.trim_end_matches(['/', '\\'])
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|n| !n.is_empty())
+                .map_or_else(|| path.clone().into_owned(), str::to_owned)
+        }
         Source::Url(url) => url
             .split(['?', '#'])
             .next()
