@@ -4,3 +4,10 @@ TS_RS_EXPORT_DIR = { value = "ui/src/lib/bindings", relative = true }
 # IPC payloads are JSON, so 64-bit integers arrive as JavaScript numbers, not `bigint`.
 # Byte counts stay far below 2^53.
 TS_RS_LARGE_INT = "number"
+
+[alias]
+# Benchmark a list of media files, torrents, and magnet links: `cargo bench-suite my-files.txt`
+# (see "Benchmark your own files" in docs/performance.md).
+bench-suite = "run -p torrentplayer-bench --release -- suite"
+# Benchmark one local media file on a local swarm: `cargo bench-file path/to/video.mkv`.
+bench-file = "run -p torrentplayer-bench --release -- local --media"

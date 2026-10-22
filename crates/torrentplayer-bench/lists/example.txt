@@ -1,0 +1,23 @@
+# Example list for `cargo bench-suite` (see "Benchmark your own files" in docs/performance.md).
+#
+# One entry per line: a local media file, a .torrent file, an https:// link to a .torrent
+# file, or a magnet link. The whole line is the entry, so paths with spaces need no quotes.
+# Add " | label" to name it in the report. Relative paths are relative to this file.
+# Lines starting with # are comments.
+
+# Local media files (MP4, MOV, MKV, WebM) are seeded on 127.0.0.1 and never leave this
+# machine. Replace the placeholder with your own files:
+# D:\Videos\My Lecture 01.mkv | lecture 1 (MKV)
+# /home/me/videos/talk.mp4 | conference talk
+
+# Public swarms run only with `cargo bench-suite LIST public`: they download from and upload
+# to other people. Use only content you have the right to download and share. These are
+# Blender open movies (Creative Commons Attribution) served by WebTorrent:
+# https://webtorrent.io/torrents/sintel.torrent | Sintel
+# https://webtorrent.io/torrents/big-buck-bunny.torrent | Big Buck Bunny
+# https://webtorrent.io/torrents/tears-of-steel.torrent | Tears of Steel
+# https://webtorrent.io/torrents/cosmos-laundromat.torrent | Cosmos Laundromat
+
+# Linux distributions publish .torrent files for their release images (not video, but a
+# large, well-seeded swarm). Copy a current link from https://ubuntu.com/download/alternative-downloads
+# or https://fedoraproject.org/workstation/download (look for "torrent").

@@ -17,6 +17,7 @@ node_modules/
 # Coverage and benchmark output
 lcov.info
 *.profraw
+/bench-results/
 
 # OS and editor files
 .DS_Store

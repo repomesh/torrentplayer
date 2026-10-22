@@ -6,15 +6,18 @@
 //! player through the real loopback stream server:
 //!
 //! 1. **Start-up:** request the file's head and tail at the same time (players need container
-//!    metadata from both ends) and time until both have arrived.
+//!    metadata from both ends) and time until both have arrived. With the file's container
+//!    layout ([`BenchConfig::layout`], for real media), read what a player reads instead: the
+//!    header wherever it is, then the first media (see [`needs`]).
 //! 2. **Seeks:** for each seek position, report the new playhead to the playback session and
-//!    request data there, timing until it has arrived.
+//!    request data there (with a layout, from the keyframe before the target), timing until it
+//!    has arrived.
 //!
 //! These are *data-ready* latencies: the time until a player has the bytes it needs. Decoder
 //! start-up is measured separately in the app's debug overlay. See `docs/performance.md`.
 //!
 //! [`limit`] measures something else: how closely an engine holds a download limit that
-//! changes mid-transfer.
+//! changes mid-transfer. [`suite`] runs a matrix over a list of files and writes a report.
 
 #![forbid(unsafe_code)]
 
@@ -22,7 +25,10 @@ mod engines;
 pub mod http;
 pub mod limit;
 pub mod link;
+pub mod media;
+pub mod needs;
 pub mod seeder;
+pub mod suite;
 pub mod tracker;
 pub mod webseed;
 
@@ -30,15 +36,18 @@ pub use engines::EngineKind;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use serde::Serialize;
+use torrentplayer_media::MediaLayout;
 use torrentplayer_stream::{ServerConfig, StreamServer};
 use torrentplayer_torrent::TorrentSource;
 
 use crate::engines::{BenchEngine, BenchFile, Playhead};
-use crate::http::{Player, Target, timed_range};
+use crate::http::{Player, Target, Timing, timed_range};
+use crate::needs::Step;
 
 /// What to measure.
 // Independent switches for the swarm under test.
@@ -55,6 +64,14 @@ pub struct BenchConfig {
     pub seek_bytes: u64,
     /// Media duration in seconds, if known, so the byte rate can be derived.
     pub duration_secs: Option<f64>,
+    /// The played file's container layout (`local --media`): start-up and seeks then read
+    /// what a player reads (see [`needs`]) instead of [`BenchConfig::startup_bytes`] and
+    /// [`BenchConfig::seek_bytes`].
+    pub layout: Option<Arc<MediaLayout>>,
+    /// With a layout, start up with the flat [`BenchConfig::startup_bytes`] anyway.
+    pub flat_startup: bool,
+    /// With a layout, seek with the flat [`BenchConfig::seek_bytes`] anyway.
+    pub flat_seeks: bool,
     /// Give up on a single measurement after this long.
     pub timeout: Duration,
     /// How long to "watch" after start-up and after each seek, so every seek happens in
@@ -110,6 +127,9 @@ impl Default for BenchConfig {
             startup_bytes: 1024 * 1024,
             seek_bytes: 1024 * 1024,
             duration_secs: None,
+            layout: None,
+            flat_startup: false,
+            flat_seeks: false,
             timeout: Duration::from_secs(120),
             watch: Duration::from_secs(3),
             peers: Vec::new(),
@@ -137,8 +157,14 @@ impl Default for BenchConfig {
 pub struct SeekResult {
     /// Seek target as a fraction of the file.
     pub fraction: f64,
-    /// Seek target in bytes.
+    /// Seek target in bytes: the keyframe's offset with a layout.
     pub offset: u64,
+    /// With a layout: the target time, in milliseconds.
+    pub target_ms: Option<u64>,
+    /// With a layout: the keyframe decoding starts from, in milliseconds.
+    pub keyframe_ms: Option<u64>,
+    /// Bytes requested for the seek, including an index read first.
+    pub bytes: u64,
     /// Until the first byte at the target arrived.
     pub first_byte_ms: f64,
     /// Until [`BenchConfig::seek_bytes`] at the target arrived.
@@ -168,8 +194,13 @@ pub struct RunResult {
     pub dht_state_loaded: Option<bool>,
     /// From pressing play until the first byte of the file arrived.
     pub first_byte_ms: f64,
-    /// From pressing play until the head and tail were both available.
+    /// From pressing play until the head and tail were both available (or, with a layout,
+    /// every start-up read).
     pub startup_ms: f64,
+    /// The start-up reads: with a layout, in order; otherwise the head and tail, at once.
+    pub startup_reads: Vec<Step>,
+    /// Whether start-up and seeks followed the container layout.
+    pub container_aware: bool,
     /// Seek measurements, in order.
     pub seeks: Vec<SeekResult>,
     /// Connected peers when play was pressed.
@@ -335,35 +366,76 @@ async fn run_in(
     .await;
     let peers_at_play = engine.stats()?.peers_live;
 
-    // Start-up: the user presses play. The player reads from the start while the tail (the
-    // container index) is fetched alongside, as players do for MP4 files with `moov` at the end.
+    // Start-up: the user presses play. With a layout, the player reads the container header
+    // and then the first media, one after another. Otherwise it reads from the start while the
+    // tail (the container index) is fetched alongside, as for MP4 files with `moov` at the end.
+    let layout = config.layout.as_deref();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let duration_ms = config
+        .duration_secs
+        .filter(|d| *d > 0.0)
+        .map(|d| (d * 1000.0) as u64)
+        .or_else(|| layout.and_then(|l| l.duration_ms));
     let play = Instant::now();
     let playhead = engine.play(&entry, config, byte_rate).await?;
     playhead.update(0);
-    let head_len = config.startup_bytes.min(len);
-    let tail_len = config.startup_bytes.min(len);
     let requested = play.elapsed();
-    let (mut player, head_ready) = Player::start(target.clone(), 0, head_len, pace);
-    let (head, tail) = sampling_first_peer(&engine, started, &mut first_peer_ms, async {
-        tokio::join!(
-            tokio::time::timeout(config.timeout, head_ready),
-            timed_range(&target, len - tail_len, tail_len, config.timeout),
+    let startup_plan = layout
+        .filter(|_| !config.flat_startup)
+        .map(|l| needs::startup_steps(l, len, byte_rate));
+    let container_aware = startup_plan.is_some();
+    let (mut player, first_byte, startup_reads) = if let Some(steps) = startup_plan {
+        let (player, timing) = sampling_first_peer(
+            &engine,
+            started,
+            &mut first_peer_ms,
+            read_steps(&target, &steps, pace, config.timeout),
         )
-    })
-    .await;
-    let head = head
-        .context("start-up (head) timed out")?
-        .context("player stopped")?
-        .context("start-up (head)")?;
-    tail.context("start-up (tail)")?;
+        .await
+        .context("start-up")?;
+        (player, timing.first_byte, steps)
+    } else {
+        let head_len = config.startup_bytes.min(len);
+        let tail_len = config.startup_bytes.min(len);
+        let (player, head_ready) = Player::start(target.clone(), 0, head_len, pace);
+        let (head, tail) = sampling_first_peer(&engine, started, &mut first_peer_ms, async {
+            tokio::join!(
+                tokio::time::timeout(config.timeout, head_ready),
+                timed_range(&target, len - tail_len, tail_len, config.timeout),
+            )
+        })
+        .await;
+        let head = head
+            .context("start-up (head) timed out")?
+            .context("player stopped")?
+            .context("start-up (head)")?;
+        tail.context("start-up (tail)")?;
+        let reads = vec![
+            Step {
+                start: 0,
+                len: head_len,
+            },
+            Step {
+                start: len - tail_len,
+                len: tail_len,
+            },
+        ];
+        (player, head.first_byte, reads)
+    };
     let startup_ms = ms(play.elapsed());
-    let first_byte_ms = ms(requested + head.first_byte);
+    let first_byte_ms = ms(requested + first_byte);
+    // The player plays on from its last read.
+    let playing = startup_reads[if container_aware {
+        startup_reads.len() - 1
+    } else {
+        0
+    }];
     let mut watched = vec![
         watch(
             &*playhead,
             &player,
-            0,
-            head_len,
+            playing.start,
+            playing.len,
             byte_rate,
             len,
             config.watch,
@@ -371,31 +443,47 @@ async fn run_in(
         .await,
     ];
 
-    // Seeks: the player drops its connection and reopens at the target, as `<video>` does.
+    // Seeks: the player drops its connection and reopens at the target, as `<video>` does;
+    // with a layout, at the keyframe before it, after reading the index if it has not yet.
     let mut seeks = Vec::new();
+    let mut index_read = false;
     for &fraction in &config.seeks {
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss
-        )]
-        let offset = ((fraction.clamp(0.0, 1.0) * len as f64) as u64)
-            .min(len.saturating_sub(config.seek_bytes));
-        let seek_len = config.seek_bytes.min(len - offset);
+        let seek_plan = layout
+            .filter(|_| !config.flat_seeks)
+            .zip(duration_ms)
+            .and_then(|(l, d)| needs::seek_plan(l, len, byte_rate, d, fraction, index_read));
+        let (steps, target_ms, keyframe_ms) = if let Some(p) = seek_plan {
+            (p.steps, Some(p.target_ms), Some(p.keyframe.time_ms))
+        } else {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let offset = ((fraction.clamp(0.0, 1.0) * len as f64) as u64)
+                .min(len.saturating_sub(config.seek_bytes));
+            let step = Step {
+                start: offset,
+                len: config.seek_bytes.min(len - offset),
+            };
+            (vec![step], None, None)
+        };
+        let resume = *steps.last().context("no seek reads")?;
         let seek = Instant::now();
         drop(player);
-        playhead.update(offset);
+        playhead.update(resume.start);
         let requested = seek.elapsed();
-        let (next, ready) = Player::start(target.clone(), offset, seek_len, pace);
-        player = next;
-        let timing = tokio::time::timeout(config.timeout, ready)
+        let (next, timing) = read_steps(&target, &steps, pace, config.timeout)
             .await
-            .with_context(|| format!("seek to {fraction} timed out"))?
-            .context("player stopped")?
             .with_context(|| format!("seek to {fraction}"))?;
+        player = next;
+        index_read |= target_ms.is_some();
         seeks.push(SeekResult {
             fraction,
-            offset,
+            offset: resume.start,
+            target_ms,
+            keyframe_ms,
+            bytes: steps.iter().map(|s| s.len).sum(),
             first_byte_ms: ms(requested + timing.first_byte),
             ready_ms: ms(requested + timing.complete),
         });
@@ -403,8 +491,8 @@ async fn run_in(
             watch(
                 &*playhead,
                 &player,
-                offset,
-                seek_len,
+                resume.start,
+                resume.len,
                 byte_rate,
                 len,
                 config.watch,
@@ -434,6 +522,8 @@ async fn run_in(
         dht_state_loaded,
         first_byte_ms,
         startup_ms,
+        startup_reads,
+        container_aware,
         seeks,
         peers_at_play,
         peers_live: stats.peers_live,
@@ -454,6 +544,40 @@ async fn run_in(
         watch_ms,
         byte_rate,
     })
+}
+
+/// Reads `steps` one after another, as a player parses one structure before it knows where
+/// the next is; the last through a [`Player`] that keeps reading. The timing runs from the
+/// start of the first read to the end of the last.
+async fn read_steps(
+    target: &Target,
+    steps: &[Step],
+    pace: u64,
+    timeout: Duration,
+) -> anyhow::Result<(Player, Timing)> {
+    let began = Instant::now();
+    let (last, before) = steps.split_last().context("nothing to read")?;
+    let mut first_byte = None;
+    for step in before {
+        let at = began.elapsed();
+        let timing = timed_range(target, step.start, step.len, timeout)
+            .await
+            .with_context(|| format!("reading {} bytes at {}", step.len, step.start))?;
+        first_byte.get_or_insert(at + timing.first_byte);
+    }
+    let at = began.elapsed();
+    let (player, ready) = Player::start(target.clone(), last.start, last.len, pace);
+    let timing = tokio::time::timeout(timeout, ready)
+        .await
+        .context("timed out")?
+        .context("player stopped")??;
+    Ok((
+        player,
+        Timing {
+            first_byte: first_byte.unwrap_or(at + timing.first_byte),
+            complete: began.elapsed(),
+        },
+    ))
 }
 
 /// The file to play: `index`, or else the largest video.

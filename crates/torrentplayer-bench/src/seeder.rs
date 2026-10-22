@@ -11,13 +11,16 @@ use anyhow::Context as _;
 use bytes::Bytes;
 use librqbit::limits::LimitsConfig;
 use librqbit::spawn_utils::BlockingSpawner;
+use librqbit::storage::{
+    BoxStorageFactory, StorageFactory, StorageFactoryExt as _, TorrentStorage,
+};
 use librqbit::{
-    AddTorrent, AddTorrentOptions, CreateTorrentOptions, ListenerOptions, Session, SessionOptions,
-    create_torrent,
+    AddTorrent, AddTorrentOptions, CreateTorrentOptions, ListenerOptions, ManagedTorrentShared,
+    Session, SessionOptions, TorrentMetadata, create_torrent,
 };
 use tokio::io::AsyncWriteExt as _;
 
-/// librqbit sessions seeding one generated file on `127.0.0.1`.
+/// librqbit sessions seeding one file on `127.0.0.1`, which they open read-only.
 pub struct LocalSeeder {
     _sessions: Vec<Arc<Session>>,
     /// Addresses leechers should connect to, one per seeding session.
@@ -115,6 +118,7 @@ impl LocalSeeder {
                     AddTorrent::from_bytes(torrent.clone()),
                     Some(AddTorrentOptions {
                         overwrite: true,
+                        storage_factory: Some(ReadOnly { path: file.clone() }.boxed()),
                         output_folder: Some(dir.to_string_lossy().into_owned()),
                         ..AddTorrentOptions::default()
                     }),
@@ -137,6 +141,108 @@ impl LocalSeeder {
             file,
         })
     }
+}
+
+/// Storage for a single-file torrent that opens the file read-only. librqbit's own storage
+/// opens it read-write and sets its length, which would touch a user's media file.
+#[derive(Clone)]
+struct ReadOnly {
+    path: PathBuf,
+}
+
+impl StorageFactory for ReadOnly {
+    type Storage = ReadOnlyFile;
+
+    fn create(
+        &self,
+        _shared: &ManagedTorrentShared,
+        metadata: &TorrentMetadata,
+    ) -> anyhow::Result<ReadOnlyFile> {
+        let [info] = metadata.file_infos.as_slice() else {
+            anyhow::bail!("the seeder serves single-file torrents only");
+        };
+        let file = std::fs::File::open(&self.path)
+            .with_context(|| format!("opening {} to seed", self.path.display()))?;
+        anyhow::ensure!(
+            file.metadata()?.len() == info.len,
+            "{} changed size since the torrent was created",
+            self.path.display()
+        );
+        Ok(ReadOnlyFile {
+            file: Arc::new(file),
+            len: info.len,
+        })
+    }
+
+    fn clone_box(&self) -> BoxStorageFactory {
+        self.clone().boxed()
+    }
+}
+
+/// The seeded file, opened read-only.
+#[derive(Clone)]
+struct ReadOnlyFile {
+    file: Arc<std::fs::File>,
+    len: u64,
+}
+
+impl TorrentStorage for ReadOnlyFile {
+    fn init(
+        &mut self,
+        _shared: &ManagedTorrentShared,
+        _metadata: &TorrentMetadata,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn pread_exact(&self, file_id: usize, offset: u64, buf: &mut [u8]) -> anyhow::Result<()> {
+        anyhow::ensure!(file_id == 0, "no file {file_id}");
+        read_at(&self.file, offset, buf)?;
+        Ok(())
+    }
+
+    fn pwrite_all(&self, _file_id: usize, _offset: u64, _buf: &[u8]) -> anyhow::Result<()> {
+        anyhow::bail!("the seeded file is read-only")
+    }
+
+    fn remove_file(&self, _file_id: usize, _filename: &Path) -> anyhow::Result<()> {
+        // Never delete the user's file.
+        Ok(())
+    }
+
+    fn remove_directory_if_empty(&self, _path: &Path) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn ensure_file_length(&self, _file_id: usize, length: u64) -> anyhow::Result<()> {
+        anyhow::ensure!(length == self.len, "the seeded file has another length");
+        Ok(())
+    }
+
+    fn take(&self) -> anyhow::Result<Box<dyn TorrentStorage>> {
+        Ok(Box::new(self.clone()))
+    }
+}
+
+/// Fills `buf` from `offset` without moving a shared cursor.
+#[cfg(unix)]
+fn read_at(file: &std::fs::File, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+}
+
+/// Fills `buf` from `offset` with positioned reads.
+#[cfg(windows)]
+fn read_at(file: &std::fs::File, mut offset: u64, mut buf: &mut [u8]) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        match std::os::windows::fs::FileExt::seek_read(file, buf, offset)? {
+            0 => return Err(std::io::ErrorKind::UnexpectedEof.into()),
+            n => {
+                buf = &mut buf[n..];
+                offset += n as u64;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Deterministic bytes with a bounded working buffer, including multi-gigabyte fixtures.
@@ -177,5 +283,29 @@ mod tests {
             ]
         );
         assert_eq!(&bytes[1024 * 1024..], &[25, 159, 39, 181, 192, 176, 189]);
+    }
+
+    #[tokio::test]
+    async fn seeds_a_read_only_file_without_touching_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.mp4");
+        generate(&path, 3 * 256 * 1024 + 5).await.unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&path, permissions.clone()).unwrap();
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let seeder = LocalSeeder::seed(path.clone(), 256 * 1024, None, 2, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(seeder.addrs.len(), 2);
+        drop(seeder);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        // So the temporary folder can be removed on Windows; the file is the test's own.
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        std::fs::set_permissions(&path, permissions).unwrap();
     }
 }
