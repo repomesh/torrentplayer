@@ -27,6 +27,7 @@ pub mod limit;
 pub mod link;
 pub mod media;
 pub mod needs;
+pub mod network;
 pub mod seeder;
 pub mod suite;
 pub mod tracker;
@@ -103,6 +104,9 @@ pub struct BenchConfig {
     /// Run both engines in this protected network mode (the app's WireGuard or SOCKS5 mode,
     /// verified and with its kill switch) instead of connecting directly. `None`: direct.
     pub network: Option<torrentplayer_net::NetworkMode>,
+    /// The started [`BenchConfig::network`], shared by every engine and run (start it once
+    /// with [`network::SharedNetwork::start`]). Required with a protected mode.
+    pub shared_network: Option<network::SharedNetwork>,
     /// Cap the download rate (bytes per second), to model a home connection and limit usage.
     pub download_limit_bps: Option<std::num::NonZeroU32>,
     /// Maximum connected peers.
@@ -145,6 +149,7 @@ impl Default for BenchConfig {
             dht_state_dir: None,
             incoming: false,
             network: None,
+            shared_network: None,
             download_limit_bps: None,
             peer_limit: None,
             max_connecting: None,
@@ -173,6 +178,8 @@ pub struct SeekResult {
     pub first_byte_ms: f64,
     /// Until [`BenchConfig::seek_bytes`] at the target arrived.
     pub ready_ms: f64,
+    /// The data did not arrive within the timeout; [`SeekResult::ready_ms`] is the timeout.
+    pub timed_out: bool,
 }
 
 /// One complete run.
@@ -205,6 +212,8 @@ pub struct RunResult {
     pub startup_reads: Vec<Step>,
     /// Whether start-up and seeks followed the container layout.
     pub container_aware: bool,
+    /// The torrent has no video file, so its largest file was measured as raw bytes.
+    pub raw_bytes: bool,
     /// Seek measurements, in order.
     pub seeks: Vec<SeekResult>,
     /// Connected peers when play was pressed.
@@ -338,7 +347,7 @@ async fn run_in(
     let (name, files) = engine.add(source, config.peers.clone()).await?;
     let metadata_ms = ms(started.elapsed());
 
-    let entry = pick_file(&files, config.file)?;
+    let (entry, raw_bytes) = pick_file(&files, config.file)?;
     let len = entry.len;
 
     let server = StreamServer::start(ServerConfig::default()).await?;
@@ -388,7 +397,7 @@ async fn run_in(
         .filter(|_| !config.flat_startup)
         .map(|l| needs::startup_steps(l, len, byte_rate));
     let container_aware = startup_plan.is_some();
-    let (mut player, first_byte, startup_reads) = if let Some(steps) = startup_plan {
+    let (player, first_byte, startup_reads) = if let Some(steps) = startup_plan {
         let (player, timing) = sampling_first_peer(
             &engine,
             started,
@@ -446,6 +455,7 @@ async fn run_in(
         )
         .await,
     ];
+    let mut player = Some(player);
 
     // Seeks: the player drops its connection and reopens at the target, as `<video>` does;
     // with a layout, at the keyframe before it, after reading the index if it has not yet.
@@ -474,27 +484,51 @@ async fn run_in(
         };
         let resume = *steps.last().context("no seek reads")?;
         let seek = Instant::now();
-        drop(player);
+        drop(player.take());
         playhead.update(resume.start);
         let requested = seek.elapsed();
-        let (next, timing) = read_steps(&target, &steps, pace, config.timeout)
-            .await
-            .with_context(|| format!("seek to {fraction}"))?;
-        player = next;
+        let bytes = steps.iter().map(|s| s.len).sum();
+        let read = tokio::time::timeout(
+            config.timeout,
+            read_steps(&target, &steps, pace, config.timeout),
+        )
+        .await;
+        let (next, timing) = match read {
+            Ok(Ok(read)) => read,
+            // A seek that never completes is a result, not a broken run: it counts at the
+            // timeout, and the session's remaining seeks are skipped (the player is gone).
+            Err(_) => {
+                tracing::warn!("seek to {fraction} timed out");
+                seeks.push(SeekResult {
+                    fraction,
+                    offset: resume.start,
+                    target_ms,
+                    keyframe_ms,
+                    bytes,
+                    first_byte_ms: ms(config.timeout),
+                    ready_ms: ms(config.timeout),
+                    timed_out: true,
+                });
+                break;
+            }
+            Ok(Err(error)) => return Err(error.context(format!("seek to {fraction}"))),
+        };
         index_read |= target_ms.is_some();
         seeks.push(SeekResult {
             fraction,
             offset: resume.start,
             target_ms,
             keyframe_ms,
-            bytes: steps.iter().map(|s| s.len).sum(),
+            bytes,
             first_byte_ms: ms(requested + timing.first_byte),
             ready_ms: ms(requested + timing.complete),
+            timed_out: false,
         });
+        let playing = player.insert(next);
         watched.push(
             watch(
                 &*playhead,
-                &player,
+                playing,
                 resume.start,
                 resume.len,
                 byte_rate,
@@ -528,6 +562,7 @@ async fn run_in(
         startup_ms,
         startup_reads,
         container_aware,
+        raw_bytes,
         seeks,
         peers_at_play,
         peers_live: stats.peers_live,
@@ -584,20 +619,25 @@ async fn read_steps(
     ))
 }
 
-/// The file to play: `index`, or else the largest video.
-fn pick_file(files: &[BenchFile], index: Option<usize>) -> anyhow::Result<BenchFile> {
-    Ok(match index {
-        Some(index) => files
+/// The file to play: `index`, or else the largest video, or else (a torrent without video,
+/// such as a Linux image) the largest file. The flag says whether that last fallback was used:
+/// the file is then measured as raw bytes, without container needs.
+fn pick_file(files: &[BenchFile], index: Option<usize>) -> anyhow::Result<(BenchFile, bool)> {
+    if let Some(index) = index {
+        let file = files
             .iter()
             .find(|f| f.index == index)
-            .context("no file with that index")?,
-        None => files
-            .iter()
-            .filter(|f| f.video)
-            .max_by_key(|f| f.len)
-            .context("the torrent has no video files")?,
+            .context("no file with that index")?;
+        return Ok((file.clone(), false));
     }
-    .clone())
+    if let Some(video) = files.iter().filter(|f| f.video).max_by_key(|f| f.len) {
+        return Ok((video.clone(), false));
+    }
+    let largest = files
+        .iter()
+        .max_by_key(|f| f.len)
+        .context("the torrent has no files")?;
+    Ok((largest.clone(), true))
 }
 
 /// Runs `work` while checking every 20 ms for the engine's first connected peer, and records
@@ -794,5 +834,30 @@ mod tests {
         assert!((s.p95_ms - 5.0).abs() < f64::EPSILON);
         assert!((s.max_ms - 5.0).abs() < f64::EPSILON);
         assert!(Summary::of(&[]).is_none());
+    }
+
+    fn file(index: usize, len: u64, video: bool) -> BenchFile {
+        BenchFile {
+            index,
+            path: format!("f{index}"),
+            len,
+            video,
+        }
+    }
+
+    #[test]
+    fn picks_the_largest_video_else_the_largest_file() {
+        let files = [file(0, 10, false), file(1, 5, true), file(2, 7, true)];
+        let (picked, raw) = pick_file(&files, None).unwrap();
+        assert_eq!((picked.index, raw), (2, false));
+        // A Linux image: no video, so the largest file as raw bytes.
+        let iso = [file(0, 3, false), file(1, 9, false)];
+        let (picked, raw) = pick_file(&iso, None).unwrap();
+        assert_eq!((picked.index, raw), (1, true));
+        // `--file N` still wins.
+        let (picked, raw) = pick_file(&iso, Some(0)).unwrap();
+        assert_eq!((picked.index, raw), (0, false));
+        assert!(pick_file(&iso, Some(7)).is_err());
+        assert!(pick_file(&[], None).is_err());
     }
 }

@@ -17,7 +17,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   amount, using the container's duration. Public swarms run only with `--public`, from peers
   only (`--web-seeds` adds a swarm-engine row with the torrent's web seeds). The report starts
   with a guide to reading it and gives each entry a verdict against the start-up and seek
-  targets.
+  targets. `--wireguard FILE` and `--socks5 HOST:PORT` run the public entries through the app's
+  protected network modes, over one tunnel or proxy connection for the whole run. A
+  ready-made list of openly licensed films and Linux images is in
+  `crates/torrentplayer-bench/lists/benchmarks.txt`, with `prepare-media.sh` for its local files.
+
+### Fixed
+
+- In the WireGuard and SOCKS5 modes, a magnet link that finds no peers now says what to check in
+  that mode (the tunnel's handshake, or the proxy's UDP support) instead of always blaming the
+  proxy, and the message for `.torrent` files in these modes no longer has stray spaces.
 
 ## [0.3.0] - 2026-10-21
 

@@ -19,7 +19,7 @@ use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, ConnectionOptions, DhtSessionConfig,
     ListenerOptions, ManagedTorrent, Session, SessionOptions, TorrentStatsState,
 };
-use torrentplayer_net::Network;
+use torrentplayer_net::{ModeKind, Network};
 use torrentplayer_prioritize::{FileSpan, PieceGeometry};
 use torrentplayer_stream::{MediaReader, MediaSource};
 use tracing::{debug, info, warn};
@@ -103,11 +103,39 @@ impl EngineConfig {
 }
 
 /// Metadata fetched by [`Engine::resolve`].
-pub(crate) struct Resolved {
+#[derive(Debug, Clone)]
+pub struct Resolved {
     /// The `.torrent` file, with the magnet link's trackers.
-    pub(crate) torrent_bytes: bytes::Bytes,
+    pub torrent_bytes: bytes::Bytes,
     /// Peers found while fetching the metadata.
-    pub(crate) seen_peers: Vec<SocketAddr>,
+    pub seen_peers: Vec<SocketAddr>,
+}
+
+/// Why a protected session refuses `.torrent` files and links (see `Engine::session_source`).
+const PROTECTED_TORRENT_FILE: &str = "While a VPN or proxy mode is on, .torrent files open in \
+     TorrentPlayer's engine only. Set the torrent engine to Automatic.";
+
+/// Why a magnet link cannot be resolved in a protected mode: no peers were found through the
+/// DHT and UDP trackers of the mode, and the link lists no HTTP tracker. The hint names what
+/// usually causes it in each mode.
+fn no_magnet_peers(mode: ModeKind) -> &'static str {
+    match mode {
+        ModeKind::WireGuard => {
+            "No peers were found for this magnet link through the WireGuard tunnel, and it lists \
+             no HTTP tracker. Check that the tunnel is connected (its server completed a recent \
+             handshake); the DHT and UDP trackers run inside it. Or try a .torrent file or a \
+             link with an HTTP tracker."
+        }
+        ModeKind::Socks5 => {
+            "No peers were found for this magnet link through the SOCKS5 proxy, and it lists no \
+             HTTP tracker. The proxy may not support UDP (UDP ASSOCIATE), which the DHT and UDP \
+             trackers need; try a .torrent file or a link with an HTTP tracker."
+        }
+        ModeKind::Direct => {
+            "No peers or HTTP trackers were found for this magnet link; try a .torrent file or a \
+             link with an HTTP tracker."
+        }
+    }
 }
 
 /// Errors from the torrent engine.
@@ -369,9 +397,7 @@ impl Engine {
             TorrentSource::Magnet(link) => {
                 Ok(AddTorrent::from_url(self.session_magnet(link, has_peers)?))
             }
-            _ if self.inner.protected => Err(EngineError::Unsupported(
-                "While a VPN or proxy mode is on, .torrent files open in TorrentPlayer's engine only.                  Set the torrent engine to Automatic.",
-            )),
+            _ if self.inner.protected => Err(EngineError::Unsupported(PROTECTED_TORRENT_FILE)),
             TorrentSource::Url(url) => Ok(AddTorrent::from_bytes(
                 fetch_torrent_file(&self.inner.http, &url).await?,
             )),
@@ -398,9 +424,9 @@ impl Engine {
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
         if !has_peers && !pairs.iter().any(|(key, _)| key == "tr") {
-            return Err(EngineError::Unsupported(
-                "No peers or usable HTTP trackers were found through the selected network. The proxy may not support UDP; try another tracker or a .torrent file.",
-            ));
+            return Err(EngineError::Unsupported(no_magnet_peers(
+                network.status().mode,
+            )));
         }
         url.query_pairs_mut().clear().extend_pairs(pairs);
         Ok(url.into())
@@ -506,7 +532,7 @@ impl Engine {
     /// # Errors
     ///
     /// As for [`Engine::add`].
-    pub(crate) async fn resolve(
+    pub async fn resolve(
         &self,
         source: TorrentSource,
         peers: Vec<SocketAddr>,
@@ -842,5 +868,21 @@ impl MediaSource for TorrentMedia {
                 .map_err(io::Error::other)?;
             Ok(Box::new(stream) as Box<dyn MediaReader>)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn magnet_hints_name_what_fails_in_each_mode() {
+        let wireguard = no_magnet_peers(ModeKind::WireGuard);
+        assert!(wireguard.contains("WireGuard tunnel") && wireguard.contains("handshake"));
+        assert!(!wireguard.contains("UDP ASSOCIATE"));
+        let socks5 = no_magnet_peers(ModeKind::Socks5);
+        assert!(socks5.contains("UDP ASSOCIATE"));
+        assert!(!socks5.contains("WireGuard"));
+        assert!(!PROTECTED_TORRENT_FILE.contains("  "), "no stray spaces");
     }
 }

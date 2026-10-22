@@ -86,7 +86,11 @@ pub fn parse_list(text: &str, base: &Path) -> anyhow::Result<Vec<Entry>> {
         // Paths, URLs, and magnet links never contain " | ".
         let (value, label) = match line.rsplit_once(" | ") {
             Some((value, label)) => (value.trim(), Some(label.trim())),
-            None => (line, None),
+            // An empty label: the line was trimmed after the separator.
+            None => match line.strip_suffix(" |") {
+                Some(value) => (value.trim(), None),
+                None => (line, None),
+            },
         };
         let value = unquote(value);
         if value.is_empty() {
@@ -112,7 +116,9 @@ pub fn parse_list(text: &str, base: &Path) -> anyhow::Result<Vec<Entry>> {
         };
         let label = label
             .filter(|l| !l.is_empty())
-            .map_or_else(|| default_label(&source), str::to_owned);
+            .map(str::to_owned)
+            .or_else(|| default_label(&source))
+            .unwrap_or_else(|| format!("line {}", i + 1));
         entries.push(Entry {
             line: i + 1,
             label,
@@ -132,9 +138,10 @@ fn unquote(s: &str) -> &str {
     s
 }
 
-/// A label from the source: the file name, the last URL segment, or a magnet link's `dn`.
-fn default_label(source: &Source) -> String {
-    match source {
+/// A label from the source: the file name, the last URL segment, or a magnet link's `dn`, else
+/// its info hash (shortened). `None` if the source gives none.
+fn default_label(source: &Source) -> Option<String> {
+    let label = match source {
         Source::Media(p) | Source::TorrentFile(p) => p.file_name().map_or_else(
             || p.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
@@ -146,14 +153,25 @@ fn default_label(source: &Source) -> String {
             .filter(|s| !s.is_empty())
             .unwrap_or(url)
             .to_owned(),
-        Source::Magnet(link) => link
-            .split(['?', '&'])
-            .find_map(|p| p.strip_prefix("dn="))
-            .map_or_else(
-                || link.chars().take(60).collect(),
-                |name| percent_decode(&name.replace('+', " ")),
-            ),
-    }
+        Source::Magnet(link) => {
+            let param = |key: &str| {
+                link.split(['?', '&'])
+                    .find_map(|p| p.strip_prefix(key))
+                    .map(|v| percent_decode(&v.replace('+', " ")).trim().to_owned())
+                    .filter(|v| !v.is_empty())
+            };
+            param("dn=")
+                .or_else(|| {
+                    param("xt=").map(|xt| {
+                        let hash = xt.rsplit(':').next().unwrap_or(&xt);
+                        format!("magnet {}", hash.chars().take(12).collect::<String>())
+                    })
+                })
+                .unwrap_or_default()
+        }
+    };
+    let label = label.trim();
+    (!label.is_empty()).then(|| label.to_owned())
 }
 
 /// Decodes `%XX` escapes (invalid ones stay as they are).
@@ -323,6 +341,8 @@ pub struct ScenarioResult {
     pub report: Option<Report>,
     /// Why it failed.
     pub error: Option<String>,
+    /// Why it was not run (an engine the app does not use for this source in this mode).
+    pub skipped: Option<String>,
 }
 
 /// Everything measured for one list entry.
@@ -406,6 +426,40 @@ fn ms(summary: Option<Summary>) -> String {
     summary.map_or_else(
         || "-".into(),
         |s| format!("{:.0} / {:.0}", s.median_ms, s.p95_ms),
+    )
+}
+
+/// Error text on one line, without the table's column separator.
+fn one_line(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('|', "/")
+}
+
+/// The seek column: median / p95, and how many seeks hit the timeout (counted at the timeout).
+fn seek_cell(report: &Report) -> String {
+    let seeks = report.runs.iter().flat_map(|r| &r.seeks);
+    let timed_out = seeks.clone().filter(|s| s.timed_out).count();
+    if timed_out == 0 {
+        return ms(report.seek);
+    }
+    format!(
+        "{} ({timed_out} of {} timed out)",
+        ms(report.seek),
+        seeks.count()
+    )
+}
+
+/// Why the app would not use librqbit for `source` in this network mode, if it would not: in
+/// its WireGuard and SOCKS5 modes, librqbit only fetches magnet links' metadata, and `.torrent`
+/// files and links open in TorrentPlayer's engine (`torrentplayer_torrent::Engine` refuses
+/// them in a protected session).
+#[must_use]
+pub fn rqbit_not_used(protected: bool, source: &Source) -> Option<&'static str> {
+    (protected && !matches!(source, Source::Magnet(_))).then_some(
+        "not used in this network mode (the app plays .torrent files and links on its own \
+         engine there)",
     )
 }
 
@@ -495,7 +549,7 @@ pub fn verdict(results: &[ScenarioResult]) -> Option<String> {
         "**Verdict:** meets the targets (median start-up < 3 s, median seek < 1.5 s) in {meets} of {} rows",
         ran.len()
     );
-    let failed = results.len() - ran.len();
+    let failed = results.iter().filter(|r| r.error.is_some()).count();
     if failed > 0 {
         let _ = write!(out, "; {failed} more failed");
     }
@@ -529,13 +583,17 @@ fn table(out: &mut String, results: &[ScenarioResult]) {
     out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
     for r in results {
         let scenario = r.scenario.label();
+        if let Some(reason) = &r.skipped {
+            let _ = writeln!(out, "| {} | {scenario} | {reason} | | | | |", r.engine);
+            continue;
+        }
         let Some(report) = &r.report else {
             let error = r.error.as_deref().unwrap_or("did not run");
             let _ = writeln!(
                 out,
                 "| {} | {scenario} | failed: {} | | | | |",
                 r.engine,
-                error.replace('|', "/")
+                one_line(error)
             );
             continue;
         };
@@ -554,7 +612,7 @@ fn table(out: &mut String, results: &[ScenarioResult]) {
             "| {} | {scenario} | {} | {} | {rate} | {} | {stalls} ({stalled_secs:.1} s) |",
             r.engine,
             ms(report.startup),
-            ms(report.seek),
+            seek_cell(report),
             peers.join(", "),
         );
     }
@@ -651,7 +709,8 @@ pub fn render_summary(suite: &SuiteReport) -> String {
                     ms(report.startup),
                     ms(report.seek)
                 ),
-                (None, error) => format!("failed: {}", error.as_deref().unwrap_or("?")),
+                (None, _) if r.skipped.is_some() => r.skipped.clone().unwrap_or_default(),
+                (None, error) => format!("failed: {}", one_line(error.as_deref().unwrap_or("?"))),
             };
             let _ = writeln!(out, "  {:<6} {:<45} {line}", r.engine, r.scenario.label());
         }
@@ -824,6 +883,7 @@ mod tests {
             startup_ms,
             startup_reads: Vec::new(),
             container_aware: true,
+            raw_bytes: false,
             seeks: vec![crate::SeekResult {
                 fraction: 0.5,
                 offset: 0,
@@ -832,6 +892,7 @@ mod tests {
                 bytes: 0,
                 first_byte_ms: 0.0,
                 ready_ms: seek_ms,
+                timed_out: false,
             }],
             peers_at_play: 0,
             peers_live: peers_seen,
@@ -855,6 +916,7 @@ mod tests {
             scenario,
             report: Some(Report::new(runs)),
             error: None,
+            skipped: None,
         }
     }
 
@@ -878,6 +940,7 @@ mod tests {
                 scenario: public,
                 report: None,
                 error: Some("timed out".into()),
+                skipped: None,
             },
         ];
         let verdict = verdict(&results).unwrap();
@@ -938,5 +1001,104 @@ mod tests {
         assert!(md.find("How to read").unwrap() < md.find("## a.mp4").unwrap());
         assert!(md.contains("meets the targets"));
         assert!(md.contains("| 4 / 4, 3 / 3 |"), "{md}");
+    }
+
+    #[test]
+    fn labels_never_end_up_empty() {
+        let labels = |text: &str| -> Vec<String> {
+            parse_list(text, Path::new("."))
+                .unwrap()
+                .into_iter()
+                .map(|e| e.label)
+                .collect()
+        };
+        assert_eq!(
+            labels(
+                "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=\n\
+                 magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10 |  \n\
+                 magnet:?dn=+&tr=x\n\
+                 magnet:?xt=urn:btih:abc&dn=Big%20Buck | \n"
+            ),
+            [
+                "magnet 08ada5a7a618",
+                "magnet 08ada5a7a618",
+                "line 3",
+                "Big Buck"
+            ]
+        );
+    }
+
+    #[test]
+    fn protected_modes_leave_torrent_files_to_the_swarm_engine() {
+        let file = Source::TorrentFile("a.torrent".into());
+        let url = Source::Url("https://example.org/a.torrent".into());
+        let magnet = Source::Magnet("magnet:?xt=urn:btih:abc".into());
+        assert!(rqbit_not_used(true, &file).is_some());
+        assert!(rqbit_not_used(true, &url).is_some());
+        assert!(rqbit_not_used(true, &magnet).is_none(), "as in the app");
+        assert!(
+            rqbit_not_used(false, &file).is_none(),
+            "direct: both engines"
+        );
+    }
+
+    #[test]
+    fn skipped_rows_and_timed_out_seeks_are_reported_not_failed() {
+        let public = Scenario {
+            link_mibps: None,
+            seeders: None,
+            rtt_ms: None,
+            download_mibps: Some(10),
+            web_seeds: false,
+        };
+        let mut slow = run(900.0, 120_000.0, 30);
+        slow.seeks[0].timed_out = true;
+        let results = vec![
+            ScenarioResult {
+                engine: "rqbit".into(),
+                scenario: public,
+                report: None,
+                error: None,
+                skipped: rqbit_not_used(true, &Source::Url("https://x/a.torrent".into()))
+                    .map(str::to_owned),
+            },
+            row("swarm", public, vec![run(900.0, 400.0, 30), slow]),
+        ];
+        let verdict = verdict(&results).unwrap();
+        assert!(verdict.contains("of 1 rows."), "{verdict}");
+        let mut md = String::new();
+        table(&mut md, &results);
+        assert!(
+            md.contains(
+                "| rqbit | public swarm, peers only, 10 MiB/s limit | not used in this network mode"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("(1 of 2 timed out)"), "{md}");
+        assert!(one_line("a.        b | c\n d") == "a. b / c d");
+    }
+
+    #[test]
+    fn the_repository_benchmark_list_parses() {
+        let base = Path::new("lists");
+        let entries = parse_list(include_str!("../lists/benchmarks.txt"), base).unwrap();
+        assert_eq!(entries.len(), 12);
+        let media = entries
+            .iter()
+            .filter(|e| matches!(e.source, Source::Media(_)))
+            .count();
+        assert_eq!(media, 4);
+        assert!(entries.iter().all(|e| !e.label.is_empty()));
+        assert_eq!(
+            entries[0].source,
+            Source::Media(base.join("media/bbb_sunflower_2160p_60fps_normal.mp4"))
+        );
+        assert!(matches!(entries.last().unwrap().source, Source::Magnet(_)));
+        // The example list is all comments.
+        assert!(
+            parse_list(include_str!("../lists/example.txt"), base)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

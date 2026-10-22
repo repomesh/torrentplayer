@@ -38,7 +38,9 @@
 //!   --socks5-user NAME   the proxy's username; the password is read from the environment
 //!                        variable TORRENTPLAYER_BENCH_SOCKS5_PASSWORD, never the command line.
 //!                        In both modes librqbit has no DHT of its own and connects through the
-//!                        network's bridge, as in the app; local media in `suite` runs directly
+//!                        network's bridge, as in the app, and plays magnet links only;
+//!                        one connection serves every run and entry (torrentplayer_bench::network);
+//!                        local media in `suite` runs directly
 //!   --dht-state DIR      keep the swarm engine's DHT routing tables in DIR between sessions,
 //!                        as the app does in its data folder (`swarm.json`); the first session
 //!                        without a saved state starts cold. librqbit keeps none, as in the app
@@ -134,10 +136,11 @@ use anyhow::{Context as _, bail};
 use torrentplayer_bench::limit::{LimitPlan, LimitReport, run_limit};
 use torrentplayer_bench::link::{ChokeCycle, Clock, Dialers, Link, PeerProfile};
 use torrentplayer_bench::media::MediaInfo;
+use torrentplayer_bench::network::SharedNetwork;
 use torrentplayer_bench::seeder::LocalSeeder;
 use torrentplayer_bench::suite::{
     Entry, EntryResult, Scenario, ScenarioResult, Source, SuiteReport, TorrentInfo,
-    local_scenarios, parse_list,
+    local_scenarios, parse_list, rqbit_not_used,
 };
 use torrentplayer_bench::tracker::LocalTracker;
 use torrentplayer_bench::webseed::{WebSeedServer, with_web_seed};
@@ -762,20 +765,30 @@ async fn run(args: &Args) -> anyhow::Result<Report> {
             }
         }
         Mode::Torrent(input) => {
+            // One tunnel or proxy connection for every run, as the app keeps one.
             if let Some(mode) = &bench.network {
                 tracing::info!(
                     "network: {} (as the app's protected mode)",
                     describe_network(mode)
                 );
+                bench.shared_network = Some(SharedNetwork::start(mode).await?);
             }
-            for i in 0..args.runs {
-                runs.push(
-                    run_once(args.engine, || source_from(input), &bench)
-                        .await
-                        .with_context(|| format!("run {}", i + 1))?,
-                );
-                progress(i + 1, args.runs);
+            let outcome = async {
+                for i in 0..args.runs {
+                    runs.push(
+                        run_once(args.engine, || source_from(input), &bench)
+                            .await
+                            .with_context(|| format!("run {}", i + 1))?,
+                    );
+                    progress(i + 1, args.runs);
+                }
+                anyhow::Ok(())
             }
+            .await;
+            if let Some(shared) = &bench.shared_network {
+                shared.shutdown();
+            }
+            outcome?;
         }
         Mode::Limit(..) => bail!("`limit` has its own report"),
     }
@@ -1101,7 +1114,7 @@ fn parse_suite(args: impl Iterator<Item = String>) -> anyhow::Result<SuiteArgs> 
 /// `torrentplayer-bench suite <list>`: runs the matrix for every entry, writing the reports
 /// after each. `Ok(false)` if any entry or cell failed.
 fn suite(args: impl Iterator<Item = String>) -> anyhow::Result<bool> {
-    let args = parse_suite(args)?;
+    let mut args = parse_suite(args)?;
     let text = std::fs::read_to_string(&args.list)
         .with_context(|| format!("reading {}", args.list.display()))?;
     let base = args
@@ -1157,6 +1170,11 @@ fn suite(args: impl Iterator<Item = String>) -> anyhow::Result<bool> {
                 skipped: Some("a public swarm; run with `public` or --public".into()),
                 ..entry_result(entry)
             }
+        } else if let Err(error) = runtime.block_on(share_network(&mut args, &entry.source)) {
+            EntryResult {
+                error: Some(format!("{error:#}")),
+                ..entry_result(entry)
+            }
         } else {
             runtime.block_on(run_entry(&args, entry))
         };
@@ -1165,6 +1183,9 @@ fn suite(args: impl Iterator<Item = String>) -> anyhow::Result<bool> {
         }
         report.entries.push(result);
         write_suite(&args.out, &report)?;
+    }
+    if let Some(shared) = args.bench.shared_network.take() {
+        shared.shutdown();
     }
     let mut out = std::io::stdout().lock();
     write!(
@@ -1185,6 +1206,21 @@ raw runs: {}",
         .entries
         .iter()
         .all(|e| e.error.is_none() && e.results.iter().all(|r| r.error.is_none())))
+}
+
+/// Starts the protected network the first time a public entry needs it; every later public
+/// entry shares it (a failed start is retried by the next public entry).
+async fn share_network(args: &mut SuiteArgs, source: &Source) -> anyhow::Result<()> {
+    if !source.is_public() || args.bench.shared_network.is_some() {
+        return Ok(());
+    }
+    if let Some(mode) = &args.bench.network {
+        let shared = SharedNetwork::start(mode)
+            .await
+            .context("the protected network did not come up")?;
+        args.bench.shared_network = Some(shared);
+    }
+    Ok(())
 }
 
 fn entry_result(entry: Entry) -> EntryResult {
@@ -1252,6 +1288,7 @@ fn cell(engine: EngineKind, scenario: Scenario, outcome: anyhow::Result<Report>)
         scenario,
         report,
         error,
+        skipped: None,
     }
 }
 
@@ -1346,13 +1383,9 @@ async fn fetch_torrent(url: &str) -> anyhow::Result<Vec<u8>> {
     Ok(body)
 }
 
-/// A torrent or magnet entry: its public swarm with every engine from peers only, and with
-/// `--web-seeds` once more with the swarm engine using the torrent's web seeds.
-async fn run_public(
-    args: &SuiteArgs,
-    source: &Source,
-    result: &mut EntryResult,
-) -> anyhow::Result<()> {
+/// The `.torrent` file of a public entry (downloaded once for a link), and what it lists. A
+/// magnet link has no file until its metadata is fetched.
+async fn load_torrent(source: &Source) -> anyhow::Result<(Option<Vec<u8>>, TorrentInfo)> {
     let torrent = match source {
         Source::Url(url) => Some(
             fetch_torrent(url)
@@ -1378,6 +1411,17 @@ async fn run_public(
         }
         None => TorrentInfo::from_magnet(&source.input()),
     };
+    Ok((torrent, info))
+}
+
+/// A torrent or magnet entry: its public swarm with every engine from peers only, and with
+/// `--web-seeds` once more with the swarm engine using the torrent's web seeds.
+async fn run_public(
+    args: &SuiteArgs,
+    source: &Source,
+    result: &mut EntryResult,
+) -> anyhow::Result<()> {
+    let (torrent, info) = load_torrent(source).await?;
     tracing::info!("torrent: {}", info.summary());
     let has_web_seeds = info.web_seeds > 0;
     result.torrent = Some(info);
@@ -1431,14 +1475,18 @@ async fn run_public(
                 .into(),
         );
     }
-    if swarm && torrent.is_none() {
-        result.warnings.push(
-            "the swarm engine plays .torrent files only, so this magnet link ran with rqbit only"
-                .into(),
-        );
-    }
+    let protected = bench.network.is_some();
     for (engine, scenario) in rows {
-        if engine == EngineKind::Swarm && torrent.is_none() {
+        if engine == EngineKind::Rqbit
+            && let Some(reason) = rqbit_not_used(protected, source)
+        {
+            result.results.push(ScenarioResult {
+                engine: engine.to_string(),
+                scenario,
+                report: None,
+                error: None,
+                skipped: Some(reason.to_owned()),
+            });
             continue;
         }
         tracing::info!("{}: {engine}, {}", result.entry.label, scenario.label());
@@ -1446,6 +1494,18 @@ async fn run_public(
         cell_bench.web_seeds = scenario.web_seeds;
         let outcome = runs_of(args.runs, engine, &session, &cell_bench).await;
         result.results.push(cell(engine, scenario, outcome));
+    }
+    if result
+        .results
+        .iter()
+        .flat_map(|r| r.report.iter().flat_map(|report| &report.runs))
+        .any(|run| run.raw_bytes)
+    {
+        result.warnings.push(
+            "no video file: measured the largest file as raw bytes (container needs not \
+             applicable)"
+                .into(),
+        );
     }
     Ok(())
 }

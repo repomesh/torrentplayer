@@ -34,11 +34,11 @@ pub mod thumbnail;
 
 pub use backend::{
     BackendKind, ENGINE_ENV_VAR, EngineChoice, Playback, StreamEngine, StreamEngineConfig,
-    SwarmPlayback, Thumbnail,
+    SwarmPlayback, Thumbnail, protected_magnet_peers,
 };
 pub use engine::{
-    Engine, EngineConfig, EngineError, FileEntry, MAX_FILES, TorrentId, TorrentInfo, TorrentMedia,
-    TorrentState, TorrentStats,
+    Engine, EngineConfig, EngineError, FileEntry, MAX_FILES, Resolved, TorrentId, TorrentInfo,
+    TorrentMedia, TorrentState, TorrentStats,
 };
 pub use media::{FileKind, mime_type};
 pub use playback::{PlaybackInput, PlaybackSession, PlaybackStatus, PlayheadPosition};

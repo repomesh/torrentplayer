@@ -188,17 +188,25 @@ cargo bench-suite my-files.txt --public --wireguard wg0.conf
   `TORRENTPLAYER_BENCH_SOCKS5_PASSWORD`, never the command line) uses the app's SOCKS5 mode
   with its defaults: host names, trackers, and DHT through the proxy.
 
-Each engine gets its own network manager, verified before the run starts: a tunnel or proxy that
-does not let traffic through within 30 seconds fails the run with the network's reason instead
-of being measured as a slow swarm. The kill switch stays on, so nothing leaves outside the
-tunnel or proxy. As in the app, librqbit then has no DHT, listener, or UDP of its own and reaches
-peers through the network's loopback bridge, so it finds fewer peers than torrentplayer-swarm,
-whose DHT and UDP trackers use the tunnel or the proxy's UDP relay. The app also hands
-librqbit peers it found through scoped DHT and UDP trackers; the bench does not, so for librqbit
-magnet links this is a lower bound. Local media (`local`, and local entries of `suite`) always
-runs directly: a tunnel cannot reach seeders on `127.0.0.1`. The suite report names the mode
-and endpoint (never keys or passwords). The app's former bind-to-adapter VPN mode no longer
-exists; to measure a VPN app, connect it system-wide and run without these options.
+One network manager serves the whole benchmark, as the app keeps one tunnel: `torrent` starts
+it once for all runs, and `suite` once for all public entries. It must let traffic through
+within 30 seconds or the benchmark stops with the network's reason instead of measuring a slow
+swarm. Starting a tunnel per run reconnected to the VPN server every few seconds, and some
+servers then stop completing handshakes. If the tunnel or proxy drops later, the manager
+reconnects by itself: each run first waits up to 90 seconds for traffic to flow again, and an
+entry that cannot start reports "tunnel down". The kill switch stays on, so nothing leaves
+outside the tunnel or proxy.
+
+The engines run as the app runs them in these modes. librqbit has no DHT, listener, or UDP of
+its own and reaches peers through the network's loopback bridge; it only takes magnet links
+(the app opens `.torrent` files and links on its own engine there), so the suite shows those
+librqbit rows as "not used in this network mode". For a magnet link, both engines first get
+peers from the mode's own DHT and UDP trackers (inside the tunnel, or through the proxy's UDP
+relay), and the swarm engine has librqbit fetch the metadata only, as the app does. Local
+media (`local`, and local entries of `suite`) always runs directly: a tunnel cannot reach
+seeders on `127.0.0.1`. The suite report names the mode and endpoint (never keys or
+passwords). The app's former bind-to-adapter VPN mode no longer exists; to measure a VPN app,
+connect it system-wide and run without these options.
 
 ## Benchmark your own files
 
@@ -273,8 +281,29 @@ a web server and the engine comparison would be unfair. The suite downloads a li
 once per entry, reports its trackers and web seeds on the "Torrent" line, and runs the swarm
 engine without web seeds. `--web-seeds` adds a separate swarm row, labelled _peers + web
 seeds_, that uses them. For a peers-only baseline, prefer torrents without web seeds, such as
-the Ubuntu release images (the 24.04.3 server image lists none). The swarm engine opens only
-`.torrent` files, so magnet links run with librqbit only.
+the Ubuntu release images (the 24.04.3 server image lists none). Magnet links run on both
+engines: librqbit fetches the metadata for the swarm engine, as in the app.
+
+Release images are not video: when a torrent has no video file, the benchmark measures its
+largest file as raw bytes (start-up and seeks read flat amounts; container needs do not apply)
+and the entry says so. `--file N` picks another file. A seek whose data does not arrive within
+120 seconds counts at 120 s and is shown as timed out in the seek column ("1 of 4 timed out"),
+instead of failing the whole row; the rest of that session's seeks are skipped.
+
+### The repository's benchmark list
+
+`crates/torrentplayer-bench/lists/benchmarks.txt` is a ready-made list of openly licensed films
+(Blender open movies, CC BY, from download.blender.org) and free-software images (Ubuntu and
+Debian release torrents), with the WebTorrent copies of the Blender films and a trackerless
+Sintel magnet link. Its local entries need `prepare-media.sh` first, which downloads the films
+(about 2.8 GB; `--4k` adds 6.7 GB) and builds the variants with FFmpeg (an MP4 with `moov` at
+the end, an MKV with the official Dolby 5.1 track) into `lists/media/`, which is git-ignored:
+
+```sh
+FFMPEG=/path/to/ffmpeg bash crates/torrentplayer-bench/lists/prepare-media.sh
+cargo bench-suite crates/torrentplayer-bench/lists/benchmarks.txt --quick
+cargo bench-suite crates/torrentplayer-bench/lists/benchmarks.txt --public --wireguard wg0.conf
+```
 
 The results go to `bench-results/<UTC timestamp>/` (git-ignored; `--out DIR` to choose):
 

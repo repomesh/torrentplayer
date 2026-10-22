@@ -18,6 +18,7 @@ node_modules/
 lcov.info
 *.profraw
 /bench-results/
+/crates/torrentplayer-bench/lists/media/
 
 # OS and editor files
 .DS_Store

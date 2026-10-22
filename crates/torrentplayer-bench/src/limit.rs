@@ -136,7 +136,7 @@ pub async fn run_limit(
     };
     let mut engine = BenchEngine::start(kind, dir.path().to_path_buf(), &config).await?;
     let (_, files) = engine.add(source, config.peers.clone()).await?;
-    let entry = pick_file(&files, config.file)?;
+    let (entry, _) = pick_file(&files, config.file)?;
     let byte_rate = config.prioritization.fallback_byte_rate.max(1);
     let playhead = engine.play(&entry, &config, byte_rate).await?;
     playhead.update(0);
