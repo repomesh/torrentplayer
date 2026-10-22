@@ -84,7 +84,16 @@ pub struct NetworkOptions {
     pub ip_check_v4_url: String,
     /// Where it asks for the public IPv6 address (see [`IP_CHECK_V6_URL`]); `None` skips it.
     pub ip_check_v6_url: Option<String>,
+    /// How long traffic sent into a WireGuard tunnel may go unanswered before the server counts
+    /// as not responding and the kill switch engages. A tunnel that has heard nothing for half
+    /// of this is probed. See [`WIREGUARD_REPLY_TIMEOUT`].
+    pub wireguard_reply_timeout: Duration,
 }
+
+/// The default [`NetworkOptions::wireguard_reply_timeout`]: WireGuard's `KEEPALIVE_TIMEOUT`
+/// (10 s, within which a peer that received data answers, if only with a keepalive) plus two
+/// `REKEY_TIMEOUT`s (5 s each, for a handshake retried while the session is renewed).
+pub const WIREGUARD_REPLY_TIMEOUT: Duration = Duration::from_secs(20);
 
 impl Default for NetworkOptions {
     fn default() -> Self {
@@ -95,6 +104,7 @@ impl Default for NetworkOptions {
             connect_timeout: Duration::from_secs(15),
             ip_check_v4_url: IP_CHECK_V4_URL.to_owned(),
             ip_check_v6_url: Some(IP_CHECK_V6_URL.to_owned()),
+            wireguard_reply_timeout: WIREGUARD_REPLY_TIMEOUT,
         }
     }
 }
@@ -1203,15 +1213,20 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
                         st.tunnel = Some(tunnel.clone());
                         tunnel
                     };
-                    tunnel.healthy(timeout).await
+                    tunnel
+                        .healthy(timeout, net.options.wireguard_reply_timeout)
+                        .await
                 };
+                // Mostly a handshake that did not complete in time: one reason for both, so a
+                // tunnel that stays down keeps one state instead of logging each alternation.
                 Some(
-                    tokio::time::timeout(timeout, check).await.unwrap_or(Err(
-                        NetError::InterfaceUnavailable(
-                            "the WireGuard server is not responding; check the endpoint and keys"
-                                .into(),
-                        ),
-                    )),
+                    tokio::time::timeout(timeout, check)
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(NetError::InterfaceUnavailable(
+                                crate::tunnel::NO_HANDSHAKE.into(),
+                            ))
+                        }),
                 )
             }
         };

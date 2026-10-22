@@ -24,6 +24,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- A WireGuard tunnel whose server stops answering is no longer shown as Connected. The tunnel
+  now counts as connected only while its server completes handshakes and answers traffic within
+  20 seconds (an idle tunnel is probed with a tiny DNS query inside it); otherwise the kill
+  switch pauses traffic with the reason ("the WireGuard server is not answering tunnel traffic"
+  or "has not completed a recent handshake"), and traffic resumes by itself when the server
+  answers again. Benchmarks over WireGuard now report such a tunnel as down.
 - In the WireGuard and SOCKS5 modes, a magnet link that finds no peers now says what to check in
   that mode (the tunnel's handshake, or the proxy's UDP support) instead of always blaming the
   proxy, and the message for `.torrent` files in these modes no longer has stray spaces.

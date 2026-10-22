@@ -88,6 +88,22 @@ pub struct UdpOptions {
     pub send_buffer_size: usize,
 }
 
+/// Added for TorrentPlayer. Whether the peers are answering, from the interface's own packet
+/// timestamps (see [`Interface::liveness`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Liveness {
+    /// Age of the latest completed handshake, or None without a current session.
+    pub handshake_age: Option<Duration>,
+    /// Time since an authenticated transport packet (data or keepalive) last arrived from a
+    /// peer, or None if none ever did.
+    pub received_age: Option<Duration>,
+    /// How long traffic sent to a peer has waited for any authenticated transport packet in
+    /// return, or None when nothing is waiting. A WireGuard peer that receives data answers
+    /// within its keepalive timeout (10 s), with data or an empty keepalive.
+    pub unanswered: Option<Duration>,
+}
+
 /// A trait for types that can be converted into an [`Interface`]
 pub trait ToInterface {
     fn to_interface(self) -> impl Future<Output = Result<Interface, io::Error>>;
@@ -120,6 +136,7 @@ enum Message {
         result: oneshot::Sender<bool>,
     },
     HandshakeAge(oneshot::Sender<Option<Duration>>),
+    Liveness(oneshot::Sender<Liveness>),
     Handshake,
     Close,
 }
@@ -149,6 +166,16 @@ impl Interface {
         let (tx, rx) = oneshot::channel();
         self.tx
             .send(Message::HandshakeAge(tx))
+            .map_err(|_| Self::error())?;
+        rx.await.map_err(|_| Self::error())
+    }
+
+    /// Added for TorrentPlayer. Handshake and transport packet timing for the active peers
+    /// (the most recent handshake and reply, the longest unanswered wait).
+    pub async fn liveness(&self) -> io::Result<Liveness> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Message::Liveness(tx))
             .map_err(|_| Self::error())?;
         rx.await.map_err(|_| Self::error())
     }
@@ -332,6 +359,9 @@ impl Interface {
                     Select::Message(Message::Handshake) => tunnel.initiate().await,
                     Select::Message(Message::HandshakeAge(result)) => {
                         result.send(tunnel.handshake_age()).ok();
+                    }
+                    Select::Message(Message::Liveness(result)) => {
+                        result.send(tunnel.liveness()).ok();
                     }
                     Select::Message(Message::Close) => {
                         close = Close::Requested;

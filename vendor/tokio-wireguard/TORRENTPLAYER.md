@@ -7,3 +7,9 @@ Additional fixes cover TCP handshake readiness (avoid treating SYN as closed), l
 Incoming packets and handshake timers take priority over immediate stack polls, so busy TCP
 connections cannot starve acknowledgements or concurrent DNS replies. A regression test closes
 old connections and exchanges data on sixteen new connections with concurrent tunneled DNS.
+
+Liveness reporting (`src/interface.rs`, `src/interface/tunnel.rs`, marked "Added for
+TorrentPlayer"): `Interface::liveness` reports the handshake age, the time since the last
+authenticated transport packet (data or keepalive) from the peer, and how long traffic sent to
+the peer has gone unanswered. torrentplayer-net uses it to treat a tunnel whose server completes
+handshakes but answers no traffic, or answers nothing at all, as not connected.

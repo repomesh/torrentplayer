@@ -51,7 +51,7 @@ pub use incoming::{
 pub use mode::{ModeKind, NetworkMode, Socks5Config};
 pub use network::{
     ConnectionState, EventLevel, IP_CHECK_V4_URL, IP_CHECK_V6_URL, Lease, NetEvent, Network,
-    NetworkConfig, NetworkOptions, NetworkStatus, Policy, PublicIp,
+    NetworkConfig, NetworkOptions, NetworkStatus, Policy, PublicIp, WIREGUARD_REPLY_TIMEOUT,
 };
 pub use secret::Secret;
 pub use wireguard::{WireGuardConfig, WireGuardError, WireGuardSummary};
