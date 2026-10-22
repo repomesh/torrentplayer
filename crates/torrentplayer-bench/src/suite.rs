@@ -188,6 +188,9 @@ pub struct Scenario {
     pub rtt_ms: Option<u64>,
     /// Public swarm: the download limit (MiB/s).
     pub download_mibps: Option<u32>,
+    /// Public swarm: the swarm engine also used the torrent's HTTP web seeds (BEP 19); otherwise
+    /// peers only.
+    pub web_seeds: bool,
 }
 
 impl Scenario {
@@ -200,8 +203,8 @@ impl Scenario {
                 format!("{link} MiB/s, {seeders} seeder{s}, {rtt} ms")
             }
             _ => match self.download_mibps {
-                Some(limit) => format!("public swarm, {limit} MiB/s limit"),
-                None => "public swarm".to_owned(),
+                Some(limit) => format!("public swarm, {}, {limit} MiB/s limit", self.source()),
+                None => format!("public swarm, {}", self.source()),
             },
         }
     }
@@ -220,6 +223,7 @@ pub fn local_scenarios(
         seeders: Some(seeders),
         rtt_ms: Some(rtt),
         download_mibps: None,
+        web_seeds: false,
     };
     let mut out: Vec<Scenario> = links
         .iter()
@@ -232,6 +236,80 @@ pub fn local_scenarios(
         }
     }
     out
+}
+
+impl Scenario {
+    fn source(&self) -> &'static str {
+        if self.web_seeds {
+            "peers + web seeds"
+        } else {
+            "peers only"
+        }
+    }
+
+    /// Whether this is a public-swarm cell.
+    #[must_use]
+    pub fn is_public(&self) -> bool {
+        self.link_mibps.is_none()
+    }
+}
+
+/// What a torrent says about itself, for public entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct TorrentInfo {
+    /// The torrent's name (a magnet link's `dn`).
+    pub name: Option<String>,
+    /// Total size in bytes (unknown for magnet links).
+    pub size: Option<u64>,
+    /// Number of files (unknown for magnet links).
+    pub files: Option<usize>,
+    /// Trackers listed.
+    pub trackers: usize,
+    /// HTTP web seeds listed (BEP 19 `url-list`, or a magnet link's `ws=`).
+    pub web_seeds: usize,
+}
+
+impl TorrentInfo {
+    /// What a magnet link lists.
+    #[must_use]
+    pub fn from_magnet(link: &str) -> Self {
+        let params: Vec<&str> = link
+            .split_once('?')
+            .map_or("", |(_, q)| q)
+            .split('&')
+            .collect();
+        let count = |key: &str| params.iter().filter(|p| p.starts_with(key)).count();
+        Self {
+            name: params
+                .iter()
+                .find_map(|p| p.strip_prefix("dn="))
+                .map(|n| percent_decode(&n.replace('+', " "))),
+            size: None,
+            files: None,
+            trackers: count("tr="),
+            web_seeds: count("ws="),
+        }
+    }
+
+    /// One line for reports.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let mut parts = vec![self.name.clone().unwrap_or_else(|| "unnamed".into())];
+        match (self.size, self.files) {
+            (Some(size), Some(files)) => {
+                let s = if files == 1 { "" } else { "s" };
+                parts.push(format!("{} in {files} file{s}", bytes(size)));
+            }
+            _ => parts.push("size unknown before the metadata arrives".into()),
+        }
+        parts.push(format!("{} trackers", self.trackers));
+        parts.push(match self.web_seeds {
+            0 => "no web seeds (peers only)".to_owned(),
+            1 => "1 HTTP web seed".to_owned(),
+            n => format!("{n} HTTP web seeds"),
+        });
+        parts.join(", ")
+    }
 }
 
 /// One engine in one scenario.
@@ -254,6 +332,8 @@ pub struct EntryResult {
     pub entry: Entry,
     /// Local media: container, codecs, duration, and layout.
     pub media: Option<MediaInfo>,
+    /// Public entries: what the torrent lists (trackers, web seeds).
+    pub torrent: Option<TorrentInfo>,
     /// Notes for the reader (container not parsed, flat needs, ...).
     pub warnings: Vec<String>,
     /// Why the entry did not run at all.
@@ -278,6 +358,46 @@ pub struct SuiteReport {
     /// One per list entry.
     pub entries: Vec<EntryResult>,
 }
+
+/// Median start-up target on a healthy swarm, in milliseconds (docs/performance.md).
+pub const STARTUP_TARGET_MS: f64 = 3000.0;
+/// Median seek target on a healthy swarm, in milliseconds.
+pub const SEEK_TARGET_MS: f64 = 1500.0;
+/// A public swarm where an engine saw fewer peers than this is called thin.
+pub const THIN_SWARM_PEERS: u32 = 5;
+
+/// The generated guide at the top of `report.md` (mirrored in docs/performance.md).
+const GUIDE: &str = "\
+## How to read this report
+
+- **Start-up** is the time from pressing play until the player has the bytes it needs for the \
+first frame: the container header, wherever it is, and about a second of media. **Seek** is the \
+time from a seek until the data from the keyframe before the target through one second past the \
+target has arrived. Both are data-ready times at the stream server, not decoding or the first \
+frame on screen, which add a little on top.
+- **Targets** on a healthy swarm: median start-up under 3 s and median seek under 1.5 s. Each \
+entry's verdict counts the rows that meet both.
+- **Median and p95:** the median is the typical case, p95 nearly the worst. With 3 runs (12 \
+seeks) p95 is close to the maximum, so one slow run moves it.
+- **Local scenarios** run on this machine and repeat well. The link speed is the viewer's \
+downlink in MiB/s, shared by all seeders: 2 is a slow home connection, 8 a typical one, 25 a \
+fast one (a 1080p film needs about 1). Seeders hold the whole file; the round trip to each is \
+40 ms (nearby) or 120 ms (far away).
+- **Public swarms** are real peers on the internet and vary from run to run and day to day. \
+Rows are peers only unless marked *peers + web seeds*: the torrent's HTTP servers, which only \
+the swarm engine uses, so those rows partly measure a web server. *Peers per run* is live at the \
+end / seen during the run; a handful means a thin swarm, whose result depends on a few peers.
+- **Comparing engines:** compare rqbit and swarm within one scenario, not across scenarios. With \
+few runs, differences under about 15%, or with overlapping median-to-p95 ranges, are likely \
+noise; rerun with `--runs 5` before drawing conclusions.
+- **Containers:** an MP4 with `moov` at the end needs a read at the end of the file before any \
+media, so it starts slower than the same file with `moov` first (faststart); a Matroska file \
+reads its Cues before the first seek when they come after the media. The line under each file \
+says what start-up and seeks read.
+- **Seeks of a few milliseconds** mean the data was already downloaded (a short file on a fast \
+link). **Throughput** is the median of each run's average download rate. **Stalls** count the \
+times playback ran out of data in the 3 s watched after start-up and after each seek.
+";
 
 fn ms(summary: Option<Summary>) -> String {
     summary.map_or_else(
@@ -335,10 +455,73 @@ fn needs_line(run: &RunResult) -> String {
     }
 }
 
+/// Whether a row meets both targets (by median).
+fn meets_targets(report: &Report) -> bool {
+    report
+        .startup
+        .is_some_and(|s| s.median_ms < STARTUP_TARGET_MS)
+        && report.seek.is_none_or(|s| s.median_ms < SEEK_TARGET_MS)
+}
+
+/// The most peers an engine saw in any run of a row.
+fn most_peers_seen(report: &Report) -> u32 {
+    report.runs.iter().map(|r| r.peers_seen).max().unwrap_or(0)
+}
+
+/// One sentence per entry: how many rows meet the targets, the slowest rows, and thin swarms.
+#[must_use]
+pub fn verdict(results: &[ScenarioResult]) -> Option<String> {
+    let ran: Vec<(&ScenarioResult, &Report)> = results
+        .iter()
+        .filter_map(|r| r.report.as_ref().map(|report| (r, report)))
+        .collect();
+    if ran.is_empty() {
+        return None;
+    }
+    let meets = ran
+        .iter()
+        .filter(|(_, report)| meets_targets(report))
+        .count();
+    let row = |r: &ScenarioResult| format!("{}, {}", r.engine, r.scenario.label());
+    let slowest = |pick: fn(&Report) -> Option<Summary>| {
+        ran.iter()
+            .filter_map(|(r, report)| pick(report).map(|s| (s.median_ms, *r)))
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+    };
+    let mut out = format!(
+        "**Verdict:** meets the targets (median start-up < 3 s, median seek < 1.5 s) in {meets} of {} rows",
+        ran.len()
+    );
+    let failed = results.len() - ran.len();
+    if failed > 0 {
+        let _ = write!(out, "; {failed} more failed");
+    }
+    out.push('.');
+    if let Some((ms, r)) = slowest(|report| report.startup) {
+        let _ = write!(out, " Slowest start-up: {} ({:.1} s).", row(r), ms / 1000.0);
+    }
+    if let Some((ms, r)) = slowest(|report| report.seek) {
+        let _ = write!(out, " Slowest seek: {} ({:.1} s).", row(r), ms / 1000.0);
+    }
+    let thin: Vec<String> = ran
+        .iter()
+        .filter(|(r, report)| r.scenario.is_public() && most_peers_seen(report) < THIN_SWARM_PEERS)
+        .map(|(r, report)| format!("{} saw at most {}", r.engine, most_peers_seen(report)))
+        .collect();
+    if !thin.is_empty() {
+        let _ = write!(
+            out,
+            " Thin swarm ({} peers): these numbers depend on a few peers and vary between runs.",
+            thin.join(", ")
+        );
+    }
+    Some(out)
+}
+
 /// One table row per engine and scenario.
 fn table(out: &mut String, results: &[ScenarioResult]) {
     out.push_str(
-        "| Engine | Scenario | Start-up ms (median / p95) | Seek ms (median / p95) | Throughput MiB/s | Peers (live / seen) | Stalls |\n",
+        "| Engine | Scenario | Start-up ms (median / p95) | Seek ms (median / p95) | Throughput MiB/s | Peers per run (live / seen) | Stalls |\n",
     );
     out.push_str("| --- | --- | --- | --- | --- | --- | --- |\n");
     for r in results {
@@ -356,17 +539,20 @@ fn table(out: &mut String, results: &[ScenarioResult]) {
         let rates: Vec<u64> = report.runs.iter().map(|r| r.avg_download_bps).collect();
         #[allow(clippy::cast_precision_loss)]
         let rate = median(&rates).map_or_else(|| "-".into(), |b| format!("{:.2}", b as f64 / MIB));
-        let live: Vec<u32> = report.runs.iter().map(|r| r.peers_live).collect();
-        let seen = report.runs.iter().map(|r| r.peers_seen).max().unwrap_or(0);
+        let peers: Vec<String> = report
+            .runs
+            .iter()
+            .map(|r| format!("{} / {}", r.peers_live, r.peers_seen))
+            .collect();
         let stalls: u32 = report.runs.iter().map(|r| r.stalls).sum();
         let stalled_secs: f64 = report.runs.iter().map(|r| r.stall_ms).sum::<f64>() / 1000.0;
         let _ = writeln!(
             out,
-            "| {} | {scenario} | {} | {} | {rate} | {} / {seen} | {stalls} ({stalled_secs:.1} s) |",
+            "| {} | {scenario} | {} | {} | {rate} | {} | {stalls} ({stalled_secs:.1} s) |",
             r.engine,
             ms(report.startup),
             ms(report.seek),
-            median(&live).unwrap_or(0),
+            peers.join(", "),
         );
     }
 }
@@ -388,12 +574,7 @@ pub fn render_markdown(suite: &SuiteReport) -> String {
             suite.options.join(" ")
         }
     );
-    out.push_str(
-        "Times are data-ready latencies (see docs/performance.md): start-up from pressing play \
-         until the player has what it needs for the first frame; seeks from the seek until the \
-         data from the keyframe through the target (plus one second) has arrived. Throughput is \
-         the median of each run's average download rate.\n",
-    );
+    out.push_str(GUIDE);
     for e in &suite.entries {
         let _ = writeln!(out, "\n## {}\n", e.entry.label);
         let _ = writeln!(
@@ -404,6 +585,9 @@ pub fn render_markdown(suite: &SuiteReport) -> String {
         );
         if let Some(media) = &e.media {
             let _ = writeln!(out, "Media: {}.\n", media.summary());
+        }
+        if let Some(torrent) = &e.torrent {
+            let _ = writeln!(out, "Torrent: {}.\n", torrent.summary());
         }
         if let Some(run) = e
             .results
@@ -424,12 +608,15 @@ pub fn render_markdown(suite: &SuiteReport) -> String {
             let _ = writeln!(out, "Error: {error}");
             continue;
         }
+        if let Some(verdict) = verdict(&e.results) {
+            let _ = writeln!(out, "{verdict}\n");
+        }
         table(&mut out, &e.results);
     }
     out
 }
 
-/// A plain-text summary for the terminal: one line per engine and scenario.
+/// A plain-text summary for the terminal: the verdict and one line per engine and scenario.
 #[must_use]
 pub fn render_summary(suite: &SuiteReport) -> String {
     let mut out = String::new();
@@ -443,6 +630,9 @@ pub fn render_summary(suite: &SuiteReport) -> String {
             let _ = writeln!(out, "  error: {error}");
             continue;
         }
+        if let Some(verdict) = verdict(&e.results) {
+            let _ = writeln!(out, "  {}", verdict.replace("**", ""));
+        }
         for r in &e.results {
             let line = match (&r.report, &r.error) {
                 (Some(report), _) => format!(
@@ -452,7 +642,7 @@ pub fn render_summary(suite: &SuiteReport) -> String {
                 ),
                 (None, error) => format!("failed: {}", error.as_deref().unwrap_or("?")),
             };
-            let _ = writeln!(out, "  {:<6} {:<32} {line}", r.engine, r.scenario.label());
+            let _ = writeln!(out, "  {:<6} {:<45} {line}", r.engine, r.scenario.label());
         }
     }
     out
@@ -595,5 +785,146 @@ mod tests {
             timestamp(std::time::Duration::from_secs(1_709_164_800)),
             "20240229-000000"
         );
+    }
+
+    #[test]
+    fn reads_web_seeds_and_trackers_from_magnet_links() {
+        let info = TorrentInfo::from_magnet(
+            "magnet:?xt=urn:btih:08ada5a7a6183aae1e09d831df6748d566095a10&dn=Sintel&tr=udp%3A%2F%2Fa&tr=wss%3A%2F%2Fb&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F",
+        );
+        assert_eq!(info.name.as_deref(), Some("Sintel"));
+        assert_eq!((info.trackers, info.web_seeds), (2, 1));
+        assert!(info.summary().contains("1 HTTP web seed"));
+        let bare = TorrentInfo::from_magnet("magnet:?xt=urn:btih:08ada5a7");
+        assert_eq!((bare.trackers, bare.web_seeds), (0, 0));
+        assert!(bare.summary().contains("no web seeds (peers only)"));
+    }
+
+    fn run(startup_ms: f64, seek_ms: f64, peers_seen: u32) -> RunResult {
+        RunResult {
+            engine: "rqbit".into(),
+            torrent: String::new(),
+            file: String::new(),
+            file_bytes: 0,
+            metadata_ms: 0.0,
+            first_peer_ms: None,
+            dht_state_loaded: None,
+            first_byte_ms: 0.0,
+            startup_ms,
+            startup_reads: Vec::new(),
+            container_aware: true,
+            seeks: vec![crate::SeekResult {
+                fraction: 0.5,
+                offset: 0,
+                target_ms: None,
+                keyframe_ms: None,
+                bytes: 0,
+                first_byte_ms: 0.0,
+                ready_ms: seek_ms,
+            }],
+            peers_at_play: 0,
+            peers_live: peers_seen,
+            peers_seen,
+            download_bps: 0,
+            avg_download_bps: 0,
+            wasted_bytes: None,
+            duplicate_requests: None,
+            byte_rate: 0,
+            buffer_secs: Vec::new(),
+            min_buffer_secs: None,
+            stalls: 0,
+            stall_ms: 0.0,
+            watch_ms: 0.0,
+        }
+    }
+
+    fn row(engine: &str, scenario: Scenario, runs: Vec<RunResult>) -> ScenarioResult {
+        ScenarioResult {
+            engine: engine.into(),
+            scenario,
+            report: Some(Report::new(runs)),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn verdicts_count_rows_within_the_targets_and_flag_thin_swarms() {
+        let local = local_scenarios(&[2, 25], &[1], 40, &[]);
+        let public = Scenario {
+            link_mibps: None,
+            seeders: None,
+            rtt_ms: None,
+            download_mibps: Some(10),
+            web_seeds: false,
+        };
+        let results = vec![
+            row("rqbit", local[0], vec![run(4000.0, 900.0, 1)]),
+            row("swarm", local[1], vec![run(700.0, 2000.0, 1)]),
+            row("swarm", local[1], vec![run(700.0, 300.0, 1)]),
+            row("rqbit", public, vec![run(1500.0, 800.0, 3)]),
+            ScenarioResult {
+                engine: "swarm".into(),
+                scenario: public,
+                report: None,
+                error: Some("timed out".into()),
+            },
+        ];
+        let verdict = verdict(&results).unwrap();
+        assert!(
+            verdict.contains("in 2 of 4 rows; 1 more failed"),
+            "{verdict}"
+        );
+        assert!(
+            verdict.contains("Slowest start-up: rqbit, 2 MiB/s, 1 seeder, 40 ms (4.0 s)"),
+            "{verdict}"
+        );
+        assert!(
+            verdict.contains("Slowest seek: swarm, 25 MiB/s"),
+            "{verdict}"
+        );
+        assert!(
+            verdict.contains("Thin swarm (rqbit saw at most 3 peers)"),
+            "{verdict}"
+        );
+        assert!(super::verdict(&[]).is_none());
+        assert_eq!(public.label(), "public swarm, peers only, 10 MiB/s limit");
+        assert_eq!(
+            Scenario {
+                web_seeds: true,
+                ..public
+            }
+            .label(),
+            "public swarm, peers + web seeds, 10 MiB/s limit"
+        );
+    }
+
+    #[test]
+    fn reports_start_with_the_guide_and_give_peers_per_run() {
+        let entry = parse_list("a.mp4", Path::new(".")).unwrap().remove(0);
+        let cell = local_scenarios(&[8], &[4], 40, &[])[0];
+        let suite = SuiteReport {
+            started: "20261022-000000".into(),
+            list: "list.txt".into(),
+            options: Vec::new(),
+            runs: 2,
+            entries: vec![EntryResult {
+                entry,
+                media: None,
+                torrent: None,
+                warnings: Vec::new(),
+                error: None,
+                skipped: None,
+                results: vec![row(
+                    "swarm",
+                    cell,
+                    vec![run(500.0, 400.0, 4), run(600.0, 500.0, 3)],
+                )],
+            }],
+        };
+        let md = render_markdown(&suite);
+        assert!(md.contains("## How to read this report"));
+        assert!(md.find("How to read").unwrap() < md.find("## a.mp4").unwrap());
+        assert!(md.contains("meets the targets"));
+        assert!(md.contains("| 4 / 4, 3 / 3 |"), "{md}");
     }
 }

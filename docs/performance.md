@@ -178,7 +178,8 @@ link emulator as the generated fixture, so nothing leaves the machine.
 ```sh
 cargo bench-suite my-files.txt --quick     # 1 run, 2 scenarios: a few minutes per file
 cargo bench-suite my-files.txt             # the full matrix: about 20 minutes per file
-cargo bench-suite my-files.txt public      # also run the torrents and magnet links
+cargo bench-suite my-files.txt public      # also run the torrents and magnet links (peers only)
+cargo bench-suite my-files.txt public --web-seeds   # plus a swarm-engine row with web seeds
 cargo bench-file "D:\Videos\My Lecture.mkv" --upload-mibps 4 --seeders 2   # one file, one scenario
 ```
 
@@ -234,23 +235,62 @@ command includes `public` or `--public`, and prints a notice before it starts. O
 content you have the right to download and share; this project uses openly licensed films
 (such as the Blender open movies) and free-software images for public runs.
 
+Public rows use peers only. Many torrents also list HTTP web seeds (BEP 19 `url-list`, or `ws=`
+in a magnet link): the WebTorrent copies of the Blender films each list one. The swarm engine
+can download from them and librqbit cannot, so with web seeds a public row would partly measure
+a web server and the engine comparison would be unfair. The suite downloads a linked `.torrent`
+once per entry, reports its trackers and web seeds on the "Torrent" line, and runs the swarm
+engine without web seeds. `--web-seeds` adds a separate swarm row, labelled _peers + web
+seeds_, that uses them. For a peers-only baseline, prefer torrents without web seeds, such as
+the Ubuntu release images (the 24.04.3 server image lists none). The swarm engine opens only
+`.torrent` files, so magnet links run with librqbit only.
+
 The results go to `bench-results/<UTC timestamp>/` (git-ignored; `--out DIR` to choose):
 
-- `report.md`: for each entry, the media line (container, video and audio codecs, duration,
-  bitrate, size, where the index is, header size, keyframes), how start-up and seeks read it,
-  any warnings, and a table with one row per engine and scenario: start-up and seek latency
-  (median / p95 in ms, data-ready as defined above), throughput (median of each run's average
-  download rate), peers (live at the end / most seen), and stalls while watching.
+- `report.md`: a guide to reading it, then for each entry the media line (container, video and
+  audio codecs, duration, bitrate, size, where the index is, header size, keyframes) or the
+  torrent line (size, files, trackers, web seeds), how start-up and seeks read the file, any
+  warnings, a verdict, and a table with one row per engine and scenario: start-up and seek
+  latency (median / p95 in ms), throughput (median of each run's average download rate), peers
+  per run (live at the end / seen during the run), and stalls while watching.
 - `results.json`: every run, with each start-up read, seek target, keyframe, and byte count.
 
-Compare engines within a row and scenarios down the table. A file whose start-up is much slower
-than its seeks on slow links is likely paying for `moov` at the end (remux it with
-`ffmpeg -i in.mp4 -c copy -movflags +faststart out.mp4`). Each seek follows three seconds of
-watching (`--watch`); on a fast link a short file can be fully downloaded by then, and its
-seeks show a few milliseconds. The terminal shows a summary at the
-end, and the reports are rewritten after each entry, so an interrupted suite keeps what it
-finished. An entry that fails is reported and the suite continues; the exit code is non-zero
-if anything failed.
+The terminal shows the verdicts and a summary at the end, and the reports are rewritten after
+each entry, so an interrupted suite keeps what it finished. An entry that fails is reported and
+the suite continues; the exit code is non-zero if anything failed.
+
+### Reading the report
+
+The guide at the top of `report.md` says the same as this section.
+
+- **Start-up** is the time from pressing play until the player has the bytes it needs for the
+  first frame: the container header, wherever it is, and about a second of media. **Seek** is
+  the time from a seek until the data from the keyframe before the target through one second
+  past the target has arrived. Both are data-ready times at the stream server, not decoding or
+  the first frame on screen, which add a little on top.
+- **Targets** on a healthy swarm: median start-up under 3 s and median seek under 1.5 s. Each
+  entry's verdict counts the rows that meet both and names the slowest start-up and seek.
+- **Median and p95:** the median is the typical case, p95 nearly the worst. With 3 runs (12
+  seeks) p95 is close to the maximum, so one slow run moves it.
+- **Local scenarios** run on this machine and repeat well. The link speed is the viewer's
+  downlink, shared by all seeders: 2 MiB/s is a slow home connection, 8 a typical one, 25 a
+  fast one (a 1080p film needs about 1). Seeders hold the whole file; the round trip to each is
+  40 ms (nearby) or 120 ms (far away).
+- **Public swarms** are real peers on the internet and vary from run to run and day to day.
+  Rows are peers only unless marked _peers + web seeds_. _Peers per run_ is live at the end /
+  seen during the run; a handful (the verdict flags fewer than 5) means a thin swarm whose
+  result depends on a few peers.
+- **Comparing engines:** compare librqbit and the swarm engine within one scenario, not across
+  scenarios. With few runs, differences under about 15%, or with overlapping median-to-p95
+  ranges, are likely noise; rerun with `--runs 5` before drawing conclusions.
+- **Containers:** an MP4 with `moov` at the end needs a read at the end of the file before any
+  media, so it starts slower than the same file with `moov` first (remux with
+  `ffmpeg -i in.mp4 -c copy -movflags +faststart out.mp4`); a Matroska file reads its Cues
+  before the first seek when they come after the media. The line under each file says what
+  start-up and seeks read.
+- **Seeks of a few milliseconds** mean the data was already downloaded: each seek follows three
+  seconds of watching (`--watch`), and on a fast link a short file can be complete by then.
+  **Stalls** count the times playback ran out of data while watching.
 
 ## Tuning and regression checks
 

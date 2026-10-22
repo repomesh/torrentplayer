@@ -14,7 +14,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `docs/performance.md`). `torrentplayer-bench local --media FILE` (`cargo bench-file`) seeds a
   real file on a local swarm and requests what a player needs from its container (MP4 `moov`
   wherever it is, Matroska header and `Cues`, the keyframe before each seek) instead of a flat
-  amount, using the container's duration. Public swarms run only with `--public`.
+  amount, using the container's duration. Public swarms run only with `--public`, from peers
+  only (`--web-seeds` adds a swarm-engine row with the torrent's web seeds). The report starts
+  with a guide to reading it and gives each entry a verdict against the start-up and seek
+  targets.
 
 ## [0.3.0] - 2026-10-21
 

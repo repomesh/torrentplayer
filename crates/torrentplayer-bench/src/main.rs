@@ -10,9 +10,10 @@
 //! torrentplayer-bench limit   [--limit-mibps 2] [--then-mibps 1] [--change-after 10]
 //!                     [--measure-after 20] [--churn 8] [local swarm shape] [--runs 3] [OPTIONS]
 //! torrentplayer-bench seed    <media file> <output .torrent>
-//! torrentplayer-bench suite   <list file> [public | --public] [--quick] [--out DIR]
+//! torrentplayer-bench suite   <list file> [public | --public] [--web-seeds] [--quick]
 //!                     [--engines rqbit,swarm] [--links 2,8,25] [--seeders 1,4] [--rtt-ms 40]
-//!                     [--runs 3] [--piece-kib 256] [--tracker-interval SECS] [OPTIONS]
+//!                     [--out DIR] [--runs 3] [--piece-kib 256] [--tracker-interval SECS]
+//!                     [OPTIONS]
 //!
 //! OPTIONS:
 //!   --file N             file index to play (default: largest video)
@@ -103,10 +104,13 @@
 //! `bench-results/<UTC timestamp>/`). Local media: both engines × `--links` (MiB/s, default
 //! 2,8,25) × `--seeders` (default 1,4) at `--rtt-ms` (default 40), plus 8 MiB/s with 4 seeders at
 //! 120 ms, 3 runs each. Torrents and magnet links: their public swarm, both engines, a 10 MiB/s
-//! download limit (`--download-mibps`), 3 runs; these download from and upload to strangers,
-//! so they run only with `public` or `--public`. `--quick`: 1 run, and for local media only
-//! 2 MiB/s with 1 seeder and 25 MiB/s with 4 seeders. `--engines` picks engines; other options
-//! apply to every run.
+//! download limit (`--download-mibps`), 3 runs, from peers only: web seeds (BEP 19) are off for
+//! the swarm engine, as librqbit never uses them, and `--web-seeds` adds a separate swarm row
+//! with them. The report lists each torrent's trackers and web seeds. These download from and
+//! upload to strangers, so they run only with `public` or `--public`. `--quick`: 1 run, and for
+//! local media only 2 MiB/s with 1 seeder and 25 MiB/s with 4 seeders. `--engines` picks
+//! engines; other options apply to every run. `report.md` starts with a guide to reading it and
+//! gives each entry a verdict against the targets.
 
 #![forbid(unsafe_code)]
 
@@ -123,7 +127,8 @@ use torrentplayer_bench::link::{ChokeCycle, Clock, Dialers, Link, PeerProfile};
 use torrentplayer_bench::media::MediaInfo;
 use torrentplayer_bench::seeder::LocalSeeder;
 use torrentplayer_bench::suite::{
-    Entry, EntryResult, Scenario, ScenarioResult, Source, SuiteReport, local_scenarios, parse_list,
+    Entry, EntryResult, Scenario, ScenarioResult, Source, SuiteReport, TorrentInfo,
+    local_scenarios, parse_list,
 };
 use torrentplayer_bench::tracker::LocalTracker;
 use torrentplayer_bench::webseed::{WebSeedServer, with_web_seed};
@@ -174,6 +179,7 @@ const FLAGS: &[&str] = &[
     "--inbound",
     "--quick",
     "--public",
+    "--web-seeds",
 ];
 
 type Options = std::collections::HashMap<String, String>;
@@ -913,6 +919,8 @@ struct SuiteArgs {
     runs: usize,
     bench: BenchConfig,
     options: Vec<String>,
+    /// Public entries: also run the swarm engine with the torrent's web seeds.
+    web_seeds: bool,
 }
 
 /// Parses a comma-separated list.
@@ -940,6 +948,7 @@ fn parse_suite(args: impl Iterator<Item = String>) -> anyhow::Result<SuiteArgs> 
         public = true;
     }
     let quick = take("quick").is_some();
+    let web_seeds = take("web-seeds").is_some();
     let links = numbers::<u32>(take("links"), "links")?;
     let seeders = numbers::<usize>(take("seeders"), "seeders")?;
     let rtt = take("rtt-ms")
@@ -1002,6 +1011,7 @@ fn parse_suite(args: impl Iterator<Item = String>) -> anyhow::Result<SuiteArgs> 
         runs,
         bench,
         options: raw.into_iter().skip(1).collect(),
+        web_seeds,
     })
 }
 
@@ -1026,11 +1036,11 @@ fn suite(args: impl Iterator<Item = String>) -> anyhow::Result<bool> {
     if public > 0 && args.public {
         writeln!(
             std::io::stdout(),
-            "NOTICE: {public} entr{} play from public BitTorrent swarms. The benchmark downloads \
+            "NOTICE: {public} entr{} from public BitTorrent swarms: the benchmark downloads \
              from and uploads to other people's computers, and your IP address is visible to \
              them. Only list content you have the right to download and share, such as openly \
              licensed films or free-software images.",
-            if public == 1 { "y" } else { "ies" }
+            if public == 1 { "y plays" } else { "ies play" }
         )?;
     } else if public > 0 {
         writeln!(
@@ -1097,6 +1107,7 @@ fn entry_result(entry: Entry) -> EntryResult {
     EntryResult {
         entry,
         media: None,
+        torrent: None,
         warnings: Vec::new(),
         error: None,
         skipped: None,
@@ -1117,10 +1128,7 @@ async fn run_entry(args: &SuiteArgs, entry: Entry) -> EntryResult {
     let mut result = entry_result(entry);
     let outcome = match result.entry.source.clone() {
         Source::Media(path) => run_media(args, &path, &mut result).await,
-        source => {
-            run_public(args, &source.input(), &mut result).await;
-            Ok(())
-        }
+        source => run_public(args, &source, &mut result).await,
     };
     if let Err(error) = outcome {
         result.error = Some(format!("{error:#}"));
@@ -1232,8 +1240,69 @@ async fn run_media(args: &SuiteArgs, path: &Path, result: &mut EntryResult) -> a
     Ok(())
 }
 
-/// A torrent or magnet entry: its public swarm with every engine.
-async fn run_public(args: &SuiteArgs, input: &str, result: &mut EntryResult) {
+/// Largest `.torrent` file downloaded.
+const MAX_TORRENT_BYTES: usize = 16 * 1024 * 1024;
+
+/// Downloads a `.torrent` file, once per entry, so every engine and session plays the same one.
+async fn fetch_torrent(url: &str) -> anyhow::Result<Vec<u8>> {
+    let client = reqwest::Client::builder()
+        .user_agent(concat!("torrentplayer-bench/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(60))
+        .build()?;
+    let mut response = client.get(url).send().await?.error_for_status()?;
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        anyhow::ensure!(
+            body.len() + chunk.len() <= MAX_TORRENT_BYTES,
+            "the .torrent file is larger than 16 MiB"
+        );
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
+
+/// A torrent or magnet entry: its public swarm with every engine from peers only, and with
+/// `--web-seeds` once more with the swarm engine using the torrent's web seeds.
+async fn run_public(
+    args: &SuiteArgs,
+    source: &Source,
+    result: &mut EntryResult,
+) -> anyhow::Result<()> {
+    let torrent = match source {
+        Source::Url(url) => Some(
+            fetch_torrent(url)
+                .await
+                .with_context(|| format!("downloading {url}"))?,
+        ),
+        Source::TorrentFile(path) => {
+            Some(std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)
+        }
+        Source::Magnet(_) | Source::Media(_) => None,
+    };
+    let info = match &torrent {
+        Some(bytes) => {
+            let meta = torrentplayer_swarm::Metainfo::from_bytes(bytes)
+                .context("parsing the .torrent file")?;
+            TorrentInfo {
+                name: Some(meta.name.clone()),
+                size: Some(meta.total_len),
+                files: Some(meta.files.iter().filter(|f| !f.padding).count()),
+                trackers: meta.trackers.len(),
+                web_seeds: meta.web_seeds.len(),
+            }
+        }
+        None => TorrentInfo::from_magnet(&source.input()),
+    };
+    tracing::info!("torrent: {}", info.summary());
+    let has_web_seeds = info.web_seeds > 0;
+    result.torrent = Some(info);
+    let input = source.input();
+    let session = || match &torrent {
+        Some(bytes) => Ok(TorrentSource::from_file_bytes(bytes.clone())?),
+        None => source_from(&input),
+    };
+
     let mut bench = args.bench.clone();
     let limit = bench
         .download_limit_bps
@@ -1242,17 +1311,59 @@ async fn run_public(args: &SuiteArgs, input: &str, result: &mut EntryResult) {
     bench.download_limit_bps = bench
         .download_limit_bps
         .or(NonZeroU32::new(PUBLIC_LIMIT_MIBPS * 1024 * 1024));
-    let scenario = Scenario {
+    let peers_only = Scenario {
         link_mibps: None,
         seeders: None,
         rtt_ms: None,
         download_mibps: Some(limit),
+        web_seeds: false,
     };
-    for &engine in &args.engines {
+    let mut rows: Vec<(EngineKind, Scenario)> =
+        args.engines.iter().map(|&e| (e, peers_only)).collect();
+    let swarm = args.engines.contains(&EngineKind::Swarm);
+    if args.web_seeds {
+        if !swarm {
+            result
+                .warnings
+                .push("--web-seeds needs the swarm engine; librqbit does not use web seeds".into());
+        } else if !has_web_seeds {
+            result
+                .warnings
+                .push("--web-seeds: this torrent lists no web seeds".into());
+        } else if torrent.is_some() {
+            rows.push((
+                EngineKind::Swarm,
+                Scenario {
+                    web_seeds: true,
+                    ..peers_only
+                },
+            ));
+        }
+    } else if has_web_seeds {
+        result.warnings.push(
+            "this torrent lists HTTP web seeds. The rows use peers only (librqbit ignores web \
+             seeds; the swarm engine ran without them) so both engines face the same swarm; \
+             add --web-seeds for a swarm row that uses them"
+                .into(),
+        );
+    }
+    if swarm && torrent.is_none() {
+        result.warnings.push(
+            "the swarm engine plays .torrent files only, so this magnet link ran with rqbit only"
+                .into(),
+        );
+    }
+    for (engine, scenario) in rows {
+        if engine == EngineKind::Swarm && torrent.is_none() {
+            continue;
+        }
         tracing::info!("{}: {engine}, {}", result.entry.label, scenario.label());
-        let outcome = runs_of(args.runs, engine, || source_from(input), &bench).await;
+        let mut cell_bench = bench.clone();
+        cell_bench.web_seeds = scenario.web_seeds;
+        let outcome = runs_of(args.runs, engine, &session, &cell_bench).await;
         result.results.push(cell(engine, scenario, outcome));
     }
+    Ok(())
 }
 
 fn main() -> ExitCode {
