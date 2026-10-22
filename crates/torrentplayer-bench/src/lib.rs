@@ -41,7 +41,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use torrentplayer_media::MediaLayout;
 use torrentplayer_stream::{ServerConfig, StreamServer};
 use torrentplayer_torrent::TorrentSource;
@@ -162,7 +162,7 @@ impl Default for BenchConfig {
 }
 
 /// One seek measurement.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SeekResult {
     /// Seek target as a fraction of the file.
     pub fraction: f64,
@@ -179,11 +179,12 @@ pub struct SeekResult {
     /// Until [`BenchConfig::seek_bytes`] at the target arrived.
     pub ready_ms: f64,
     /// The data did not arrive within the timeout; [`SeekResult::ready_ms`] is the timeout.
+    #[serde(default)]
     pub timed_out: bool,
 }
 
 /// One complete run.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunResult {
     /// Engine measured.
     pub engine: String,
@@ -213,6 +214,7 @@ pub struct RunResult {
     /// Whether start-up and seeks followed the container layout.
     pub container_aware: bool,
     /// The torrent has no video file, so its largest file was measured as raw bytes.
+    #[serde(default)]
     pub raw_bytes: bool,
     /// Seek measurements, in order.
     pub seeks: Vec<SeekResult>,
@@ -740,7 +742,7 @@ async fn watch(
 }
 
 /// Median and 95th percentile of a set of measurements.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Summary {
     /// Number of samples.
     pub samples: usize,
@@ -781,7 +783,7 @@ impl Summary {
 }
 
 /// All runs plus their summaries.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Report {
     /// Individual runs.
     pub runs: Vec<RunResult>,

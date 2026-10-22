@@ -16,7 +16,7 @@
 
 use std::ops::Range;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use torrentplayer_media::{MediaLayout, SeekPoint};
 
 /// Seconds of media a player buffers before it shows a frame.
@@ -25,7 +25,7 @@ pub const READY_SECS: f64 = 1.0;
 pub const MERGE_GAP: u64 = 64 * 1024;
 
 /// One read: `len` bytes at `start`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
     /// First byte.
     pub start: u64,

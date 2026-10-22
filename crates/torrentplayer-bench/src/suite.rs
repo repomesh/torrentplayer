@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::media::MediaInfo;
 use crate::{Report, RunResult, Summary};
@@ -29,7 +29,7 @@ use crate::{Report, RunResult, Summary};
 const MIB: f64 = 1024.0 * 1024.0;
 
 /// Where an entry's media comes from.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "source", rename_all = "snake_case")]
 pub enum Source {
     /// A local media file, seeded on `127.0.0.1` (`local --media`).
@@ -60,7 +60,7 @@ impl Source {
 }
 
 /// One line of a list.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     /// Line number in the list (1-based).
     pub line: usize,
@@ -201,7 +201,7 @@ fn percent_decode(s: &str) -> String {
 }
 
 /// One cell of the matrix.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Scenario {
     /// Local swarm: the viewer's downlink (MiB/s), shared by the seeders.
     pub link_mibps: Option<u32>,
@@ -278,7 +278,7 @@ impl Scenario {
 }
 
 /// What a torrent says about itself, for public entries.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TorrentInfo {
     /// The torrent's name (a magnet link's `dn`).
     pub name: Option<String>,
@@ -336,7 +336,7 @@ impl TorrentInfo {
 }
 
 /// One engine in one scenario.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioResult {
     /// Engine measured.
     pub engine: String,
@@ -351,7 +351,7 @@ pub struct ScenarioResult {
 }
 
 /// Everything measured for one list entry.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntryResult {
     /// The list entry.
     pub entry: Entry,
@@ -370,7 +370,7 @@ pub struct EntryResult {
 }
 
 /// The whole suite, as written to `results.json`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SuiteReport {
     /// When the suite started (UTC).
     pub started: String,
@@ -385,6 +385,10 @@ pub struct SuiteReport {
     pub runs: usize,
     /// One per list entry.
     pub entries: Vec<EntryResult>,
+    /// The summary table, one row per entry, engine, and scenario (see [`summary_rows`]).
+    /// Filled in when the results are written.
+    #[serde(default)]
+    pub summary: Vec<SummaryRow>,
 }
 
 /// Median start-up target on a healthy swarm, in milliseconds (docs/performance.md).
@@ -405,6 +409,10 @@ target has arrived. Both are data-ready times at the stream server, not decoding
 frame on screen, which add a little on top.
 - **Targets** on a healthy swarm: median start-up under 3 s and median seek under 1.5 s. Each \
 entry's verdict counts the rows that meet both.
+- **Summary:** the table below puts every entry, engine, and scenario in one place, in list \
+order: medians within the targets in bold and ✓ when both are, failed rows and skipped or \
+missing entries with a short reason (the entry's section has the full text), and engine rows \
+the app would not use in the network mode left out, with a note saying which.
 - **Median and p95:** the median is the typical case, p95 nearly the worst. With 3 runs (12 \
 seeks) p95 is close to the maximum, so one slow run moves it.
 - **Local scenarios** run on this machine and repeat well. The link speed is the viewer's \
@@ -623,6 +631,275 @@ fn table(out: &mut String, results: &[ScenarioResult]) {
     }
 }
 
+/// One row of the summary table at the top of `report.md` (and `summary` in `results.json`):
+/// an entry with one engine in one scenario, or the whole entry when it did not run.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SummaryRow {
+    /// The entry's label.
+    pub entry: String,
+    /// The anchor of the entry's section in `report.md` (without `#`).
+    pub anchor: String,
+    /// Engine; `None` for an entry that did not run.
+    pub engine: Option<String>,
+    /// The scenario, compact (`8 MiB/s · 4 seeders · 40 ms`, `public · peers only · 10 MiB/s
+    /// cap`); `None` for an entry that did not run.
+    pub scenario: Option<String>,
+    /// Median start-up, seconds.
+    pub startup_s: Option<f64>,
+    /// Median seek, seconds.
+    pub seek_median_s: Option<f64>,
+    /// 95th-percentile seek, seconds.
+    pub seek_p95_s: Option<f64>,
+    /// Median of the runs' average download rates, MiB/s.
+    pub throughput_mibps: Option<f64>,
+    /// Median connected peers at the end of a run.
+    pub peers_live: Option<u32>,
+    /// Most peers seen in a run.
+    pub peers_seen: Option<u32>,
+    /// Both medians within the targets (start-up < 3 s, seek < 1.5 s); `None` without data.
+    pub meets_targets: Option<bool>,
+    /// Why the row has no data: the engine failed.
+    pub failed: Option<String>,
+    /// Why the row has no data: the entry did not run (skipped, file missing, ...).
+    pub skipped: Option<String>,
+}
+
+/// Longest reason shown in a summary row; the entry's section has the full text.
+const SUMMARY_REASON_CHARS: usize = 80;
+
+impl Scenario {
+    /// A compact description for the summary table.
+    #[must_use]
+    pub fn short(&self) -> String {
+        if let (Some(link), Some(seeders), Some(rtt)) = (self.link_mibps, self.seeders, self.rtt_ms)
+        {
+            let s = if seeders == 1 { "" } else { "s" };
+            return format!("{link} MiB/s · {seeders} seeder{s} · {rtt} ms");
+        }
+        let source = if self.web_seeds {
+            "+ web seeds"
+        } else {
+            "peers only"
+        };
+        match self.download_mibps {
+            Some(limit) => format!("public · {source} · {limit} MiB/s cap"),
+            None => format!("public · {source}"),
+        }
+    }
+}
+
+/// The anchor GitHub and most Markdown renderers give a heading: lowercase, letters, digits,
+/// `-` and `_` kept, spaces as `-`, everything else dropped.
+#[must_use]
+pub fn heading_anchor(heading: &str) -> String {
+    heading
+        .trim()
+        .chars()
+        .filter_map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                Some(c.to_lowercase().collect::<String>())
+            } else if c == ' ' {
+                Some("-".to_owned())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The anchors of the entry sections: a repeated heading gets `-1`, `-2`, ... as renderers do.
+/// "How to read this report" and "Summary" come first.
+fn entry_anchors(suite: &SuiteReport) -> Vec<String> {
+    let mut used: std::collections::HashMap<String, usize> = ["how-to-read-this-report", "summary"]
+        .into_iter()
+        .map(|a| (a.to_owned(), 1))
+        .collect();
+    suite
+        .entries
+        .iter()
+        .map(|e| {
+            let base = heading_anchor(&e.entry.label);
+            let n = used.entry(base.clone()).or_insert(0);
+            let anchor = if *n == 0 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            };
+            *n += 1;
+            anchor
+        })
+        .collect()
+}
+
+/// `text` on one line, cut to [`SUMMARY_REASON_CHARS`] with an ellipsis.
+fn short_reason(text: &str) -> String {
+    let line = one_line(text);
+    if line.chars().count() <= SUMMARY_REASON_CHARS {
+        return line;
+    }
+    let cut: String = line.chars().take(SUMMARY_REASON_CHARS - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn secs(ms: f64) -> f64 {
+    ms / 1000.0
+}
+
+/// The summary rows: every entry in list order, then engine, then scenario. Rows the app would
+/// not run (see [`rqbit_not_used`]) are left out; a note under the table says so.
+#[must_use]
+pub fn summary_rows(suite: &SuiteReport) -> Vec<SummaryRow> {
+    let mut rows = Vec::new();
+    for (e, anchor) in suite.entries.iter().zip(entry_anchors(suite)) {
+        let empty = SummaryRow {
+            entry: e.entry.label.clone(),
+            anchor,
+            engine: None,
+            scenario: None,
+            startup_s: None,
+            seek_median_s: None,
+            seek_p95_s: None,
+            throughput_mibps: None,
+            peers_live: None,
+            peers_seen: None,
+            meets_targets: None,
+            failed: None,
+            skipped: None,
+        };
+        if let Some(reason) = e.skipped.as_deref().or(e.error.as_deref()) {
+            rows.push(SummaryRow {
+                skipped: Some(short_reason(reason)),
+                ..empty
+            });
+            continue;
+        }
+        let mut results: Vec<&ScenarioResult> =
+            e.results.iter().filter(|r| r.skipped.is_none()).collect();
+        // Stable: scenarios keep their order within an engine.
+        results.sort_by(|a, b| a.engine.cmp(&b.engine));
+        for r in results {
+            let mut row = SummaryRow {
+                engine: Some(r.engine.clone()),
+                scenario: Some(r.scenario.short()),
+                ..empty.clone()
+            };
+            match &r.report {
+                Some(report) => {
+                    let rates: Vec<u64> = report.runs.iter().map(|r| r.avg_download_bps).collect();
+                    let live: Vec<u32> = report.runs.iter().map(|r| r.peers_live).collect();
+                    row.startup_s = report.startup.map(|s| secs(s.median_ms));
+                    row.seek_median_s = report.seek.map(|s| secs(s.median_ms));
+                    row.seek_p95_s = report.seek.map(|s| secs(s.p95_ms));
+                    #[allow(clippy::cast_precision_loss)]
+                    {
+                        row.throughput_mibps = median(&rates).map(|b| b as f64 / MIB);
+                    }
+                    row.peers_live = median(&live);
+                    row.peers_seen = Some(most_peers_seen(report));
+                    row.meets_targets = Some(meets_targets(report));
+                }
+                None => {
+                    row.failed = Some(short_reason(r.error.as_deref().unwrap_or("did not run")));
+                }
+            }
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+/// A line under the summary naming the engine rows left out, and why; `None` if none were.
+fn omitted_note(suite: &SuiteReport) -> Option<String> {
+    let mut omitted: Vec<(String, String, usize)> = Vec::new();
+    for r in suite.entries.iter().flat_map(|e| &e.results) {
+        let Some(reason) = &r.skipped else { continue };
+        match omitted
+            .iter_mut()
+            .find(|(engine, why, _)| *engine == r.engine && why == reason)
+        {
+            Some((_, _, n)) => *n += 1,
+            None => omitted.push((r.engine.clone(), reason.clone(), 1)),
+        }
+    }
+    if omitted.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = omitted
+        .into_iter()
+        .map(|(engine, reason, n)| {
+            let s = if n == 1 { "" } else { "s" };
+            format!("{n} {engine} row{s}: {reason}")
+        })
+        .collect();
+    Some(format!("Not shown: {}.", parts.join("; ")))
+}
+
+/// Seconds for the summary: `4.1 s`.
+fn s(value: f64) -> String {
+    format!("{value:.1} s")
+}
+
+/// The Markdown summary section: one table for the whole run.
+fn summary_section(out: &mut String, suite: &SuiteReport, rows: &[SummaryRow]) {
+    out.push_str(
+        "\n## Summary\n\nEvery entry at a glance. Medians within the targets are in bold; \
+         *Targets* is ✓ when both are. Details, warnings, and full errors are in each entry's \
+         section.\n\n",
+    );
+    out.push_str(
+        "| Entry | Engine | Scenario | Start-up | Seek median / p95 | Throughput | Peers live / seen | Targets |\n",
+    );
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    for row in rows {
+        let entry = format!("[{}](#{})", row.entry.replace('|', "/"), row.anchor);
+        if let Some(reason) = &row.skipped {
+            let _ = writeln!(out, "| {entry} | | | skipped: {reason} | | | | |");
+            continue;
+        }
+        let engine = row.engine.as_deref().unwrap_or_default();
+        let scenario = row.scenario.as_deref().unwrap_or_default();
+        if let Some(reason) = &row.failed {
+            let _ = writeln!(
+                out,
+                "| {entry} | {engine} | {scenario} | failed: {reason} | | | | ✗ |"
+            );
+            continue;
+        }
+        let bold = |text: String, met: bool| if met { format!("**{text}**") } else { text };
+        let startup = row.startup_s.map_or_else(
+            || "-".to_owned(),
+            |v| bold(s(v), v * 1000.0 < STARTUP_TARGET_MS),
+        );
+        let seek = match (row.seek_median_s, row.seek_p95_s) {
+            (Some(median), Some(p95)) => format!(
+                "{} / {p95:.1} s",
+                bold(format!("{median:.1}"), median * 1000.0 < SEEK_TARGET_MS)
+            ),
+            _ => "-".to_owned(),
+        };
+        let throughput = row
+            .throughput_mibps
+            .map_or_else(|| "-".to_owned(), |v| format!("{v:.1} MiB/s"));
+        let peers = match (row.peers_live, row.peers_seen) {
+            (Some(live), Some(most)) => format!("{live} / {most}"),
+            _ => "-".to_owned(),
+        };
+        let targets = match row.meets_targets {
+            Some(true) => "✓",
+            Some(false) => "✗",
+            None => "",
+        };
+        let _ = writeln!(
+            out,
+            "| {entry} | {engine} | {scenario} | {startup} | {seek} | {throughput} | {peers} | {targets} |"
+        );
+    }
+    if let Some(note) = omitted_note(suite) {
+        let _ = writeln!(out, "\n{note}");
+    }
+}
+
 /// The Markdown report.
 #[must_use]
 pub fn render_markdown(suite: &SuiteReport) -> String {
@@ -649,6 +926,7 @@ pub fn render_markdown(suite: &SuiteReport) -> String {
         );
     }
     out.push_str(GUIDE);
+    summary_section(&mut out, suite, &summary_rows(suite));
     for e in &suite.entries {
         let _ = writeln!(out, "\n## {}\n", e.entry.label);
         let _ = writeln!(
@@ -690,35 +968,64 @@ pub fn render_markdown(suite: &SuiteReport) -> String {
     out
 }
 
-/// A plain-text summary for the terminal: the verdict and one line per engine and scenario.
+/// A plain-text summary for the terminal: the summary table (verdicts are in `report.md`).
 #[must_use]
 pub fn render_summary(suite: &SuiteReport) -> String {
-    let mut out = String::new();
-    for e in &suite.entries {
-        let _ = writeln!(out, "{}", e.entry.label);
-        if let Some(skipped) = &e.skipped {
-            let _ = writeln!(out, "  skipped: {skipped}");
-            continue;
+    let rows = summary_rows(suite);
+    let cut = |text: &str, n: usize| -> String {
+        if text.chars().count() <= n {
+            text.to_owned()
+        } else {
+            format!("{}…", text.chars().take(n - 1).collect::<String>())
         }
-        if let Some(error) = &e.error {
-            let _ = writeln!(out, "  error: {error}");
-            continue;
-        }
-        if let Some(verdict) = verdict(&e.results) {
-            let _ = writeln!(out, "  {}", verdict.replace("**", ""));
-        }
-        for r in &e.results {
-            let line = match (&r.report, &r.error) {
-                (Some(report), _) => format!(
-                    "start-up {} ms, seek {} ms (median / p95)",
-                    ms(report.startup),
-                    ms(report.seek)
-                ),
-                (None, _) if r.skipped.is_some() => r.skipped.clone().unwrap_or_default(),
-                (None, error) => format!("failed: {}", one_line(error.as_deref().unwrap_or("?"))),
+    };
+    let mut out = format!(
+        "{:<32} {:<6} {:<34} {:>8} {:>14} {:>10} {:>11} {}\n",
+        "entry", "engine", "scenario", "start-up", "seek med / p95", "MiB/s", "peers", "targets"
+    );
+    for row in &rows {
+        let entry = cut(&row.entry, 32);
+        if let Some(reason) = row.skipped.as_ref().or(row.failed.as_ref()) {
+            let what = if row.skipped.is_some() {
+                "skipped"
+            } else {
+                "failed"
             };
-            let _ = writeln!(out, "  {:<6} {:<45} {line}", r.engine, r.scenario.label());
+            let _ = writeln!(
+                out,
+                "{entry:<32} {:<6} {:<34} {what}: {reason}",
+                row.engine.as_deref().unwrap_or_default(),
+                cut(row.scenario.as_deref().unwrap_or_default(), 34),
+            );
+            continue;
         }
+        let num = |v: Option<f64>, unit: &str| {
+            v.map_or_else(|| "-".to_owned(), |v| format!("{v:.1}{unit}"))
+        };
+        let seek = match (row.seek_median_s, row.seek_p95_s) {
+            (Some(m), Some(p)) => format!("{m:.1} / {p:.1} s"),
+            _ => "-".to_owned(),
+        };
+        let peers = match (row.peers_live, row.peers_seen) {
+            (Some(l), Some(s)) => format!("{l} / {s}"),
+            _ => "-".to_owned(),
+        };
+        let _ = writeln!(
+            out,
+            "{entry:<32} {:<6} {:<34} {:>8} {seek:>14} {:>10} {peers:>11} {}",
+            row.engine.as_deref().unwrap_or_default(),
+            cut(row.scenario.as_deref().unwrap_or_default(), 34),
+            num(row.startup_s, " s"),
+            num(row.throughput_mibps, ""),
+            match row.meets_targets {
+                Some(true) => "yes",
+                Some(false) => "no",
+                None => "",
+            },
+        );
+    }
+    if let Some(note) = omitted_note(suite) {
+        let _ = writeln!(out, "{note}");
     }
     out
 }
@@ -987,6 +1294,7 @@ mod tests {
             options: Vec::new(),
             network: None,
             runs: 2,
+            summary: Vec::new(),
             entries: vec![EntryResult {
                 entry,
                 media: None,
@@ -1105,5 +1413,171 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    fn suite_of(entries: Vec<EntryResult>) -> SuiteReport {
+        SuiteReport {
+            started: "20261022-000000".into(),
+            list: "list.txt".into(),
+            options: Vec::new(),
+            network: None,
+            runs: 1,
+            entries,
+            summary: Vec::new(),
+        }
+    }
+
+    fn entry_of(line: &str, results: Vec<ScenarioResult>) -> EntryResult {
+        EntryResult {
+            entry: parse_list(line, Path::new(".")).unwrap().remove(0),
+            media: None,
+            torrent: None,
+            warnings: Vec::new(),
+            error: None,
+            skipped: None,
+            results,
+        }
+    }
+
+    fn public() -> Scenario {
+        Scenario {
+            link_mibps: None,
+            seeders: None,
+            rtt_ms: None,
+            download_mibps: Some(10),
+            web_seeds: false,
+        }
+    }
+
+    #[test]
+    fn summary_covers_data_failed_omitted_and_skipped_rows() {
+        let local = local_scenarios(&[8], &[4], 40, &[])[0];
+        let failure = "run 1: start-up (head) timed out: deadline has elapsed ".repeat(4);
+        let suite = suite_of(vec![
+            entry_of(
+                "clip.mp4 | Clip (MP4)",
+                vec![
+                    row("swarm", local, vec![run(2999.0, 1499.0, 4)]),
+                    row("rqbit", local, vec![run(3000.0, 400.0, 4)]),
+                ],
+            ),
+            entry_of(
+                "https://example.org/a.torrent | Clip (MP4)",
+                vec![
+                    ScenarioResult {
+                        engine: "rqbit".into(),
+                        scenario: public(),
+                        report: None,
+                        error: None,
+                        skipped: Some("not used in this network mode".into()),
+                    },
+                    ScenarioResult {
+                        engine: "swarm".into(),
+                        scenario: public(),
+                        report: None,
+                        error: Some(failure.clone()),
+                        skipped: None,
+                    },
+                ],
+            ),
+            EntryResult {
+                error: Some("opening media/missing.mkv: not found".into()),
+                ..entry_of("media/missing.mkv", Vec::new())
+            },
+            EntryResult {
+                skipped: Some("a public swarm; run with `public` or --public".into()),
+                ..entry_of("magnet:?xt=urn:btih:abc&dn=Sintel", Vec::new())
+            },
+        ]);
+        let rows = summary_rows(&suite);
+        // Rows in list order, then engine: rqbit before swarm.
+        let shape: Vec<(&str, Option<&str>)> = rows
+            .iter()
+            .map(|r| (r.entry.as_str(), r.engine.as_deref()))
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                ("Clip (MP4)", Some("rqbit")),
+                ("Clip (MP4)", Some("swarm")),
+                ("Clip (MP4)", Some("swarm")),
+                ("missing.mkv", None),
+                ("Sintel", None),
+            ]
+        );
+        // The thresholds are strict: 3.0 s start-up misses, 2.999 s and 1.499 s meet.
+        assert_eq!(rows[0].meets_targets, Some(false));
+        assert_eq!(rows[1].meets_targets, Some(true));
+        assert_eq!(
+            rows[1].scenario.as_deref(),
+            Some("8 MiB/s · 4 seeders · 40 ms")
+        );
+        // A repeated heading gets a numbered anchor, as renderers give it.
+        assert_eq!(rows[0].anchor, "clip-mp4");
+        assert_eq!(rows[2].anchor, "clip-mp4-1");
+        let failed = rows[2].failed.as_deref().unwrap();
+        assert_eq!(failed.chars().count(), SUMMARY_REASON_CHARS);
+        assert!(failed.ends_with('…'));
+        assert!(rows[3].skipped.as_deref().unwrap().starts_with("opening"));
+
+        let md = render_markdown(&suite);
+        let summary = &md[md.find("## Summary").unwrap()..md.find("## Clip (MP4)").unwrap()];
+        assert!(md.find("## How to read this report").unwrap() < md.find("## Summary").unwrap());
+        assert!(summary.contains(
+            "| [Clip (MP4)](#clip-mp4) | rqbit | 8 MiB/s · 4 seeders · 40 ms | 3.0 s | **0.4** / 0.4 s | 0.0 MiB/s | 4 / 4 | ✗ |"
+        ), "{summary}");
+        assert!(summary.contains(
+            "| [Clip (MP4)](#clip-mp4) | swarm | 8 MiB/s · 4 seeders · 40 ms | **3.0 s** | **1.5** / 1.5 s |"
+        ), "{summary}");
+        assert!(summary.contains("| [Clip (MP4)](#clip-mp4-1) | swarm | public · peers only · 10 MiB/s cap | failed: run 1: start-up"), "{summary}");
+        assert!(
+            summary.contains(
+                "| [missing.mkv](#missingmkv) | | | skipped: opening media/missing.mkv: not found |"
+            ),
+            "{summary}"
+        );
+        assert!(
+            summary.contains("Not shown: 1 rqbit row: not used in this network mode."),
+            "{summary}"
+        );
+        assert!(!summary.contains("rqbit | public"), "omitted rows stay out");
+        // The full error stays in the entry's section.
+        assert!(md.contains(failure.trim()));
+
+        let terminal = render_summary(&suite);
+        assert!(terminal.contains("skipped: a public swarm"), "{terminal}");
+        assert!(terminal.contains("Not shown: 1 rqbit row"), "{terminal}");
+    }
+
+    #[test]
+    fn anchors_follow_heading_rules() {
+        assert_eq!(
+            heading_anchor("Debian 13.7 DVD (3.99 GB, 2 web seeds)"),
+            "debian-137-dvd-399-gb-2-web-seeds"
+        );
+        assert_eq!(
+            heading_anchor("Big Buck Bunny 4K, index at the end (worst-case start-up)"),
+            "big-buck-bunny-4k-index-at-the-end-worst-case-start-up"
+        );
+        assert_eq!(
+            heading_anchor("Tears_of Steel · Ünïcode"),
+            "tears_of-steel--ünïcode"
+        );
+        assert_eq!(s(4.06), "4.1 s");
+        assert_eq!(s(0.749), "0.7 s");
+    }
+
+    #[test]
+    fn results_round_trip_to_the_same_report() {
+        let local = local_scenarios(&[2], &[1], 40, &[])[0];
+        let mut suite = suite_of(vec![entry_of(
+            "a.mp4",
+            vec![row("swarm", local, vec![run(800.0, 600.0, 1)])],
+        )]);
+        suite.summary = summary_rows(&suite);
+        let json = serde_json::to_string(&suite).unwrap();
+        let back: SuiteReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.summary, suite.summary);
+        assert_eq!(render_markdown(&back), render_markdown(&suite));
     }
 }

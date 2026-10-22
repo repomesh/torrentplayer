@@ -21,6 +21,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   protected network modes, over one tunnel or proxy connection for the whole run. A
   ready-made list of openly licensed films and Linux images is in
   `crates/torrentplayer-bench/lists/benchmarks.txt`, with `prepare-media.sh` for its local files.
+- The benchmark suite's `report.md` opens with a summary table of the whole run (every entry,
+  engine, and scenario, with the targets met marked), also printed at the end and saved as
+  `summary` in `results.json`. `torrentplayer-bench render <results.json>` rewrites a saved
+  run's report in the current layout.
 
 ### Fixed
 
