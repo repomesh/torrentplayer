@@ -50,7 +50,8 @@ impl SharedNetwork {
     ///
     /// Fails if the manager cannot start or the tunnel or proxy does not come up.
     pub async fn start(mode: &NetworkMode) -> anyhow::Result<Self> {
-        STARTS.fetch_add(1, Ordering::Relaxed);
+        let n = STARTS.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::info!("starting the protected network (start {n} in this process)");
         let config = NetworkConfig {
             mode: mode.clone(),
             ..NetworkConfig::default()
