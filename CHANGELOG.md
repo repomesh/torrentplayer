@@ -21,9 +21,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   protected network modes, over one tunnel or proxy connection for the whole run. A
   ready-made list of openly licensed films and Linux images is in
   `crates/torrentplayer-bench/lists/benchmarks.txt`, with `prepare-media.sh` for its local files.
+- The benchmark suite's `report.md` opens with a summary table of the whole run (every entry,
+  engine, and scenario, with the targets met marked), also printed at the end and saved as
+  `summary` in `results.json`. `torrentplayer-bench render <results.json>` rewrites a saved
+  run's report in the current layout.
 
 ### Fixed
 
+- A WireGuard tunnel whose server stops answering is no longer shown as Connected. The tunnel
+  now counts as connected only while its server completes handshakes and answers traffic within
+  20 seconds (an idle tunnel is probed with a tiny DNS query inside it); otherwise the kill
+  switch pauses traffic with the reason ("the WireGuard server is not answering tunnel traffic"
+  or "has not completed a recent handshake"), and traffic resumes by itself when the server
+  answers again. Benchmarks over WireGuard now report such a tunnel as down.
 - In the WireGuard and SOCKS5 modes, a magnet link that finds no peers now says what to check in
   that mode (the tunnel's handshake, or the proxy's UDP support) instead of always blaming the
   proxy, and the message for `.torrent` files in these modes no longer has stray spaces.

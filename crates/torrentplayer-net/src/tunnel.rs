@@ -14,6 +14,15 @@ use zeroize::Zeroizing;
 
 use crate::{NetError, WireGuardConfig};
 
+/// WireGuard's `REJECT_AFTER_TIME`: a session older than this is unusable.
+const REJECT_AFTER_TIME: Duration = Duration::from_secs(180);
+/// Why a tunnel without a current session is not connected.
+pub(crate) const NO_HANDSHAKE: &str =
+    "the WireGuard server has not completed a recent handshake; check the endpoint and keys";
+/// Why a tunnel whose server stopped answering traffic is not connected.
+const NOT_ANSWERING: &str =
+    "the WireGuard server is not answering tunnel traffic; check the endpoint and keys";
+
 #[derive(Clone, Debug)]
 pub(crate) struct Tunnel(Arc<Session>);
 
@@ -187,12 +196,62 @@ impl Tunnel {
         Ok(crate::DatagramSocket::wireguard(socket))
     }
 
-    pub(crate) async fn healthy(&self, timeout: Duration) -> Result<(), NetError> {
+    /// Whether the server is answering (see `docs/network.md`, "WireGuard health"):
+    ///
+    /// - Traffic sent into the tunnel must get an authenticated packet back within
+    ///   `reply_timeout`. A WireGuard peer that receives data answers within `KEEPALIVE_TIMEOUT`
+    ///   (10 s), with data or an empty keepalive, so silence means the server is not answering,
+    ///   even if it still completes handshakes.
+    /// - Without a current session (none yet, or none for `REJECT_AFTER_TIME`), a handshake must
+    ///   complete within `timeout`.
+    /// - A tunnel that has heard nothing for half of `reply_timeout` is probed with a tiny DNS
+    ///   query, which the server must answer: WireGuard is silent while idle.
+    pub(crate) async fn healthy(
+        &self,
+        timeout: Duration,
+        reply_timeout: Duration,
+    ) -> Result<(), NetError> {
+        let liveness = self.0.interface.liveness().await?;
+        let session = liveness
+            .handshake_age
+            .is_some_and(|age| age < REJECT_AFTER_TIME);
+        if liveness
+            .unanswered
+            .is_some_and(|waiting| waiting >= reply_timeout)
+        {
+            // Keep asking, so the check sees the server answer again as soon as it does.
+            if !session {
+                self.0.interface.request_handshake()?;
+            }
+            self.probe(reply_timeout);
+            return Err(NetError::InterfaceUnavailable(NOT_ANSWERING.into()));
+        }
+        if !session {
+            return self.handshake(timeout).await;
+        }
+        let quiet = [liveness.received_age, liveness.handshake_age]
+            .into_iter()
+            .flatten()
+            .min()
+            .unwrap_or(Duration::MAX);
+        if quiet >= reply_timeout / 2 {
+            self.probe(reply_timeout);
+        }
+        Ok(())
+    }
+
+    /// Waits up to `timeout` for a new handshake.
+    async fn handshake(&self, timeout: Duration) -> Result<(), NetError> {
         tokio::time::timeout(timeout, async {
             let mut requested = false;
             loop {
-                if self.0.interface.handshake_age().await?
-                    .is_some_and(|age| age < Duration::from_secs(180)) {
+                if self
+                    .0
+                    .interface
+                    .handshake_age()
+                    .await?
+                    .is_some_and(|age| age < REJECT_AFTER_TIME)
+                {
                     return Ok(());
                 }
                 if !requested {
@@ -201,9 +260,41 @@ impl Tunnel {
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
-        }).await.map_err(|_| NetError::InterfaceUnavailable(
-            "the WireGuard server has not completed a recent handshake; check the endpoint and keys".into()
-        ))?
+        })
+        .await
+        .map_err(|_| NetError::InterfaceUnavailable(NO_HANDSHAKE.into()))?
+    }
+
+    /// Sends a query for the root name servers (tiny, answered from any resolver's cache) to
+    /// the tunnel's DNS server, in the background, and keeps its socket for up to `wait` so the
+    /// answer has somewhere to go. The server's WireGuard answers it too, with a keepalive if the
+    /// resolver does not. Without a DNS server only real traffic is judged.
+    fn probe(&self, wait: Duration) {
+        let tunnel = self.clone();
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(wait, async {
+                let addresses = || tunnel.0.interface.address().addresses();
+                let Some((server, local)) = tunnel.0.dns.iter().find_map(|server| {
+                    addresses()
+                        .find(|ip| ip.is_ipv4() == server.is_ipv4())
+                        .map(|local| (*server, local))
+                }) else {
+                    return Ok(());
+                };
+                let socket = tokio_wireguard::UdpSocket::bind(
+                    SocketAddr::new(local, 0),
+                    &tunnel.0.interface,
+                )
+                .await?;
+                socket
+                    .send_to(&root_query()?, SocketAddr::new(server, 53))
+                    .await?;
+                let mut response = [0u8; 512];
+                socket.recv_from(&mut response[..]).await?;
+                Ok::<_, NetError>(())
+            })
+            .await;
+        });
     }
 
     /// Connects to `target` inside the tunnel (see [`Tunnel::relay`]).
@@ -373,6 +464,22 @@ impl Tunnel {
     }
 }
 
+/// The header of a recursive query with one question and a random ID.
+fn dns_header() -> Result<Vec<u8>, NetError> {
+    let mut id = [0; 2];
+    getrandom::fill(&mut id).map_err(|_| invalid("could not generate a DNS query ID"))?;
+    Ok(vec![id[0], id[1], 1, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+}
+
+/// A query for the root zone's name servers (the health probe).
+fn root_query() -> Result<Vec<u8>, NetError> {
+    let mut query = dns_header()?;
+    query.push(0);
+    query.extend_from_slice(&(dns_parser::QueryType::NS as u16).to_be_bytes());
+    query.extend_from_slice(&1u16.to_be_bytes());
+    Ok(query)
+}
+
 fn dns_query(host: &str, kind: dns_parser::QueryType) -> Result<Vec<u8>, NetError> {
     let name = host.trim_end_matches('.');
     if name.is_empty()
@@ -383,10 +490,8 @@ fn dns_query(host: &str, kind: dns_parser::QueryType) -> Result<Vec<u8>, NetErro
     {
         return Err(invalid("the host name is invalid"));
     }
-    let mut id = [0; 2];
-    getrandom::fill(&mut id).map_err(|_| invalid("could not generate a DNS query ID"))?;
     // Build the small question directly: dns-parser's builder panics on 63-byte DNS labels.
-    let mut query = vec![id[0], id[1], 1, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+    let mut query = dns_header()?;
     for label in name.split('.') {
         query.push(u8::try_from(label.len()).map_err(|_| invalid("the host name is invalid"))?);
         query.extend_from_slice(label.as_bytes());
@@ -681,7 +786,10 @@ mod tests {
                 }
             });
             let tunnel = Tunnel::start(&config).await.unwrap();
-            tunnel.healthy(Duration::from_secs(2)).await.unwrap();
+            tunnel
+                .healthy(Duration::from_secs(2), crate::WIREGUARD_REPLY_TIMEOUT)
+                .await
+                .unwrap();
             for _ in 0..5 {
                 let stream = tunnel
                     .connect("10.44.0.1:8080".parse().unwrap())
@@ -770,6 +878,220 @@ mod tests {
         .unwrap();
     }
 
+    /// What [`relay`] passes between the client and the test server.
+    const PASS_ALL: u8 = 0;
+    /// Handshake messages only: the server authenticates but never answers traffic.
+    const DROP_DATA: u8 = 1;
+    const DROP_ALL: u8 = 2;
+
+    /// A UDP relay in front of the WireGuard test server at `server`, filtered by `mode`. Returns
+    /// the endpoint for the client.
+    async fn relay(server: SocketAddr, mode: Arc<std::sync::atomic::AtomicU8>) -> SocketAddr {
+        use std::sync::atomic::Ordering;
+        let outside = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let inside = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        inside.connect(server).await.unwrap();
+        let endpoint = outside.local_addr().unwrap();
+        tokio::spawn(async move {
+            let passes = |packet: &[u8]| match mode.load(Ordering::SeqCst) {
+                PASS_ALL => true,
+                // Message type 4 is transport data (including keepalives).
+                DROP_DATA => packet.first() != Some(&4),
+                _ => false,
+            };
+            let mut client = None;
+            let (mut up, mut down) = ([0u8; 2048], [0u8; 2048]);
+            loop {
+                tokio::select! {
+                    Ok((n, from)) = outside.recv_from(&mut up) => {
+                        client = Some(from);
+                        if passes(&up[..n]) {
+                            let _ = inside.send(&up[..n]).await;
+                        }
+                    }
+                    Ok(n) = inside.recv(&mut down) => {
+                        if let (Some(client), true) = (client, passes(&down[..n])) {
+                            let _ = outside.send_to(&down[..n], client).await;
+                        }
+                    }
+                }
+            }
+        });
+        endpoint
+    }
+
+    /// Answers every DNS query on the test server with 10.44.0.1.
+    async fn dns_server(server: &Interface) -> tokio::task::JoinHandle<()> {
+        let dns = tokio_wireguard::UdpSocket::bind("10.44.0.1:53", server)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            loop {
+                let mut bytes = [0; 4096];
+                let Ok((length, source)) = dns.recv_from(&mut bytes[..]).await else {
+                    return;
+                };
+                let mut answer = bytes[..length].to_vec();
+                answer[2] = 0x81;
+                answer[3] = 0x80;
+                answer[7] = 1;
+                answer
+                    .extend_from_slice(&[0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4, 10, 44, 0, 1]);
+                let _ = dns.send_to(&answer, source).await;
+            }
+        })
+    }
+
+    /// Waits until the state satisfies `done`.
+    async fn wait_for(net: &Network, done: impl Fn(&ConnectionState) -> bool) -> ConnectionState {
+        let mut changes = net.status_changes();
+        loop {
+            let state = net.status().state;
+            if done(&state) {
+                return state;
+            }
+            changes.changed().await.unwrap();
+        }
+    }
+
+    /// A health check's reason as the status shows it.
+    fn shown(reason: &str) -> String {
+        NetError::InterfaceUnavailable(reason.into()).to_string()
+    }
+
+    fn health_options(reply_timeout: Duration) -> NetworkOptions {
+        NetworkOptions {
+            health_interval: Duration::from_millis(100),
+            retry_interval: Duration::from_millis(50),
+            check_timeout: Duration::from_millis(500),
+            wireguard_reply_timeout: reply_timeout,
+            ..NetworkOptions::default()
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_that_never_answers_never_counts_as_connected() {
+        // Everything sent to this endpoint is dropped.
+        let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let (server, mut config) = pair();
+        config.peers[0].endpoint = silent.local_addr().unwrap().to_string();
+        let net = Network::start(
+            NetworkConfig {
+                mode: crate::NetworkMode::WireGuard(config),
+                allow_ipv6: false,
+                hold: None,
+            },
+            health_options(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        let status = net.settled(Duration::from_secs(5)).await;
+        assert_eq!(
+            status.state,
+            ConnectionState::KillSwitchActive {
+                reason: shown(NO_HANDSHAKE)
+            }
+        );
+        assert!(!status.traffic_allowed && status.kill_switch_engaged);
+        // It stays that way, and nothing is allowed through.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let status = net.status();
+        assert!(!status.traffic_allowed);
+        assert!(status.connected_since_ms.is_none());
+        assert!(matches!(
+            net.connect("10.44.0.1:80".parse().unwrap()).await,
+            Err(NetError::KillSwitch(reason)) if reason == shown(NO_HANDSHAKE)
+        ));
+        assert!(matches!(
+            net.resolve_host("search.torrentplayer.test", 443).await,
+            Err(NetError::KillSwitch(_))
+        ));
+        net.shutdown();
+        server.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_server_that_stops_answering_engages_the_kill_switch_until_it_answers_again() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (server, mut config) = pair();
+            let dns = dns_server(&server).await;
+            let mode = Arc::new(std::sync::atomic::AtomicU8::new(PASS_ALL));
+            let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
+            config.peers[0].endpoint = relay(target, Arc::clone(&mode)).await.to_string();
+            let reply_timeout = Duration::from_secs(1);
+            let net = Network::start(
+                NetworkConfig {
+                    mode: crate::NetworkMode::WireGuard(config),
+                    allow_ipv6: false,
+                    hold: None,
+                },
+                health_options(reply_timeout),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                net.settled(Duration::from_secs(3)).await.state,
+                ConnectionState::Connected
+            );
+            // Idle for several reply timeouts: the probes are answered, so it stays connected.
+            let (_, mut lease) = net
+                .udp_socket("10.44.0.1:6969".parse().unwrap())
+                .await
+                .unwrap();
+            tokio::time::sleep(reply_timeout * 3).await;
+            assert_eq!(net.status().state, ConnectionState::Connected);
+            assert!(lease.is_valid());
+
+            // The server keeps completing handshakes but answers no traffic, as in #60.
+            mode.store(DROP_DATA, std::sync::atomic::Ordering::SeqCst);
+            let lost = tokio::time::Instant::now();
+            let state = wait_for(&net, |s| *s != ConnectionState::Connected).await;
+            assert!(lost.elapsed() >= reply_timeout);
+            assert!(matches!(
+                state,
+                ConnectionState::Reconnecting { reason }
+                    | ConnectionState::KillSwitchActive { reason } if reason == shown(NOT_ANSWERING)
+            ));
+            lease.revoked().await;
+            assert!(matches!(
+                net.connect("10.44.0.1:80".parse().unwrap()).await,
+                Err(NetError::KillSwitch(reason)) if reason == shown(NOT_ANSWERING)
+            ));
+            // No flapping back while it stays silent.
+            let state = wait_for(&net, |s| {
+                matches!(s, ConnectionState::KillSwitchActive { .. })
+            })
+            .await;
+            assert_eq!(
+                state,
+                ConnectionState::KillSwitchActive {
+                    reason: shown(NOT_ANSWERING)
+                }
+            );
+            tokio::time::sleep(reply_timeout * 2).await;
+            assert!(!net.status().traffic_allowed);
+
+            // Silent altogether, then answering again: traffic resumes by itself.
+            mode.store(DROP_ALL, std::sync::atomic::Ordering::SeqCst);
+            tokio::time::sleep(reply_timeout).await;
+            assert!(!net.status().traffic_allowed);
+            mode.store(PASS_ALL, std::sync::atomic::Ordering::SeqCst);
+            wait_for(&net, |s| *s == ConnectionState::Connected).await;
+            assert!(net.status().traffic_allowed);
+            assert!(
+                net.status()
+                    .events
+                    .iter()
+                    .any(|e| e.message.starts_with("Connection restored"))
+            );
+            dns.abort();
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn wrong_keys_never_allow_connections() {
         let (server, mut config) = pair();
@@ -834,7 +1156,10 @@ mod tests {
                 let _ = stream.shutdown().await;
             });
             let tunnel = Tunnel::start(&config).await.unwrap();
-            tunnel.healthy(Duration::from_secs(3)).await.unwrap();
+            tunnel
+                .healthy(Duration::from_secs(3), crate::WIREGUARD_REPLY_TIMEOUT)
+                .await
+                .unwrap();
             let addresses = tunnel
                 .resolve("large.torrentplayer.test", 443, true)
                 .await

@@ -10,6 +10,7 @@
 //! torrentplayer-bench limit   [--limit-mibps 2] [--then-mibps 1] [--change-after 10]
 //!                     [--measure-after 20] [--churn 8] [local swarm shape] [--runs 3] [OPTIONS]
 //! torrentplayer-bench seed    <media file> <output .torrent>
+//! torrentplayer-bench render  <results.json> [--out DIR]
 //! torrentplayer-bench suite   <list file> [public | --public] [--web-seeds] [--quick]
 //!                     [--engines rqbit,swarm] [--links 2,8,25] [--seeders 1,4] [--rtt-ms 40]
 //!                     [--out DIR] [--runs 3] [--piece-kib 256] [--tracker-interval SECS]
@@ -121,7 +122,11 @@
 //! upload to strangers, so they run only with `public` or `--public`. `--quick`: 1 run, and for
 //! local media only 2 MiB/s with 1 seeder and 25 MiB/s with 4 seeders. `--engines` picks
 //! engines; other options apply to every run. `report.md` starts with a guide to reading it and
-//! gives each entry a verdict against the targets.
+//! gives each entry a verdict against the targets, after a summary table of the whole run
+//! (also the `summary` array of `results.json`, and printed at the end).
+//!
+//! `render RESULTS` writes `report.md` and `results.json` again from a suite's saved results
+//! (in `--out DIR`, default the results' folder), in the current layout.
 
 #![forbid(unsafe_code)]
 
@@ -1161,6 +1166,7 @@ fn suite(args: impl Iterator<Item = String>) -> anyhow::Result<bool> {
         network: args.bench.network.as_ref().map(describe_network),
         runs: args.runs,
         entries: Vec::new(),
+        summary: Vec::new(),
     };
     let total = entries.len();
     for (i, entry) in entries.into_iter().enumerate() {
@@ -1182,7 +1188,7 @@ fn suite(args: impl Iterator<Item = String>) -> anyhow::Result<bool> {
             tracing::error!("{}: {error}", result.entry.label);
         }
         report.entries.push(result);
-        write_suite(&args.out, &report)?;
+        write_suite(&args.out, &mut report)?;
     }
     if let Some(shared) = args.bench.shared_network.take() {
         shared.shutdown();
@@ -1234,13 +1240,40 @@ fn entry_result(entry: Entry) -> EntryResult {
         results: Vec::new(),
     }
 }
-
-fn write_suite(out: &Path, report: &SuiteReport) -> anyhow::Result<()> {
+/// Writes `report.md` and `results.json` (with the summary rows) to `out`.
+fn write_suite(out: &Path, report: &mut SuiteReport) -> anyhow::Result<()> {
+    report.summary = torrentplayer_bench::suite::summary_rows(report);
     std::fs::write(
         out.join("report.md"),
         torrentplayer_bench::suite::render_markdown(report),
     )?;
     std::fs::write(out.join("results.json"), serde_json::to_vec_pretty(report)?)?;
+    Ok(())
+}
+
+/// `torrentplayer-bench render <results.json> [--out DIR]`: writes `report.md` and
+/// `results.json` again from a suite's results, in `DIR` (default: the folder of the results),
+/// so a report gets the current layout without running anything.
+fn render(mut args: impl Iterator<Item = String>) -> anyhow::Result<()> {
+    let usage = "usage: torrentplayer-bench render <results.json> [--out DIR]";
+    let input = PathBuf::from(args.next().context(usage)?);
+    let out = match (args.next().as_deref(), args.next()) {
+        (Some("--out"), Some(dir)) => PathBuf::from(dir),
+        (None, None) => input.parent().map(Path::to_path_buf).unwrap_or_default(),
+        _ => bail!(usage),
+    };
+    let text = std::fs::read(&input).with_context(|| format!("reading {}", input.display()))?;
+    let mut report: SuiteReport = serde_json::from_slice(&text)
+        .with_context(|| format!("{} is not a suite's results.json", input.display()))?;
+    std::fs::create_dir_all(&out).with_context(|| format!("creating {}", out.display()))?;
+    write_suite(&out, &mut report)?;
+    let mut stdout = std::io::stdout().lock();
+    write!(
+        stdout,
+        "{}",
+        torrentplayer_bench::suite::render_summary(&report)
+    )?;
+    writeln!(stdout, "report: {}", out.join("report.md").display())?;
     Ok(())
 }
 
@@ -1519,6 +1552,15 @@ fn main() -> ExitCode {
 
     let mut positional = std::env::args().skip(1);
     let mode = positional.next();
+    if mode.as_deref() == Some("render") {
+        return match render(positional) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                tracing::error!("{error:#}");
+                ExitCode::from(2)
+            }
+        };
+    }
     if mode.as_deref() == Some("suite") {
         return match suite(positional) {
             Ok(true) => ExitCode::SUCCESS,

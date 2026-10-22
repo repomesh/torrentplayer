@@ -2,6 +2,7 @@ use std::{
     io,
     net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6},
     sync::Arc,
+    time::Instant,
 };
 
 use boringtun::{
@@ -74,6 +75,20 @@ impl Tunnel {
             .min()
     }
 
+    /// Added for TorrentPlayer: see [`crate::interface::Liveness`].
+    pub fn liveness(&self) -> crate::interface::Liveness {
+        let active = || self.peers.iter().filter(|p| p.active);
+        crate::interface::Liveness {
+            handshake_age: self.handshake_age(),
+            received_age: active()
+                .filter_map(|p| p.received.map(|at| at.elapsed()))
+                .min(),
+            unanswered: active()
+                .filter_map(|p| p.waiting_since.map(|at| at.elapsed()))
+                .max(),
+        }
+    }
+
     pub async fn initiate(&mut self) {
         for peer in self.peers.iter_mut().filter(|p| p.active) {
             if let Some(endpoint) = peer.config.endpoint {
@@ -103,6 +118,7 @@ impl Tunnel {
 
         let (len, source) = socket.try_recv_from(&mut buffers.0).ok()?;
         let packet = Tunn::parse_incoming_packet(&buffers.0[..len]).ok()?;
+        let transport = matches!(packet, Packet::PacketData(..));
 
         let peer = match packet {
             Packet::HandshakeInit(packet) => {
@@ -141,6 +157,13 @@ impl Tunnel {
             };
 
         peer.config.endpoint = Some(source);
+        // Added for TorrentPlayer: an authenticated data or keepalive packet shows the peer
+        // is answering (see `liveness`). Handshake messages do not: a server can complete
+        // handshakes and still drop every data packet.
+        if transport {
+            peer.received = Some(Instant::now());
+            peer.waiting_since = None;
+        }
         match packet {
             Some(packet_out) => {
                 let len = packet_out.len();
@@ -196,6 +219,9 @@ impl Tunnel {
             )),
             e => e,
         };
+        // Added for TorrentPlayer: traffic now waits for an answer (see `liveness`); a packet
+        // queued for a handshake that never completes waits too.
+        peer.waiting_since.get_or_insert_with(Instant::now);
         let packet = peer.tunnel.encapsulate(packet, &mut buffers.1);
         if let TunnResult::WriteToNetwork(packet) = packet {
             socket.send_to(packet, mapped(endpoint)).await.ok();
@@ -247,6 +273,8 @@ impl Tunnel {
             tunnel,
             index,
             active: true,
+            received: None,
+            waiting_since: None,
         };
 
         let slot = peers.iter_mut().find(|p| !p.active);
@@ -286,6 +314,10 @@ struct Peer {
     tunnel: Tunn,
     index: u32,
     active: bool,
+    /// Added for TorrentPlayer: when an authenticated transport packet last arrived.
+    received: Option<Instant>,
+    /// Added for TorrentPlayer: when the oldest packet still waiting for an answer was sent.
+    waiting_since: Option<Instant>,
 }
 
 impl Peer {

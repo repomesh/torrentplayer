@@ -31,7 +31,7 @@ environment.
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | **Direct** (default) | No proxy or tunnel. No kill switch. With a VPN app connected on the computer, traffic goes through it (see [Using a VPN app](#using-a-vpn-app)).                                            | Nothing.                                                                                                    |
 | **SOCKS5 proxy**     | Every TCP connection goes through the proxy (RFC 1928), with optional username and password (RFC 1929). Host names are resolved by the proxy unless "Resolve DNS through the proxy" is off. | A TCP connection to the proxy plus the method negotiation and login. No connection is requested through it. |
-| **WireGuard**        | TCP and DNS run inside an application-local WireGuard tunnel using the imported configuration. No OS routes or adapters are changed.                                                        | A successful authenticated handshake less than 180 seconds old.                                             |
+| **WireGuard**        | TCP and DNS run inside an application-local WireGuard tunnel using the imported configuration. No OS routes or adapters are changed.                                                        | A handshake under 180 s old, and replies to traffic (see [WireGuard health](#wireguard-health)).            |
 
 A protected mode with incomplete settings (a proxy without a host, a username whose password is
 missing from the credential store, no WireGuard configuration) is also `Error`: blocked, with the
@@ -244,8 +244,36 @@ file. Saving an imported configuration while this mode is selected starts the tu
 checks it again immediately; selecting another mode closes the old tunnel and its connections.
 The private key and optional preshared key are read from the OS credential store only in Rust.
 Missing or invalid keys block traffic with an error. A successful authenticated handshake is
-required before any application traffic is allowed. Handshakes older than 180 seconds engage
-the kill switch; keepalives keep the peer active and later successful handshakes resume traffic.
+required before any application traffic is allowed, and the server must keep answering
+traffic (see [WireGuard health](#wireguard-health)); otherwise the kill switch engages until it
+answers again.
+
+### WireGuard health
+
+A WireGuard tunnel can fail in two ways that the transport itself never reports: the server
+stops completing handshakes, or it keeps completing handshakes but answers no traffic (seen
+with a provider's server that had stopped working: boringtun re-handshook every 15 seconds and
+every tunneled DNS lookup failed). The check, every 5 seconds, reads the tunnel's own packet
+timestamps (`tokio_wireguard::Interface::liveness`, added to the vendored copy) and uses
+WireGuard's protocol timers:
+
+| Rule                                                                                                                                                      | Why                                                                                                                                                                                                                                                                                                                      |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Without a current session (none yet, or the last handshake is 180 s old: REJECT_AFTER_TIME), a handshake must complete within the check's 5 s time limit. | Sessions expire after REJECT_AFTER_TIME; a handshake attempt is retried after REKEY_TIMEOUT (5 s). Reason: "the WireGuard server has not completed a recent handshake; check the endpoint and keys".                                                                                                                     |
+| Traffic sent into the tunnel must get an authenticated packet back (data or a keepalive) within 20 s (`NetworkOptions::wireguard_reply_timeout`).         | A WireGuard peer that receives data and has nothing to send answers with a keepalive after KEEPALIVE_TIMEOUT (10 s); two REKEY_TIMEOUTs (5 s each) cover a session renewal at that moment. Handshake messages do not count. Reason: "the WireGuard server is not answering tunnel traffic; check the endpoint and keys". |
+| A tunnel that has heard nothing (no data, keepalive, or handshake) for 10 s is probed with a DNS query for the root name servers to its first DNS server. | WireGuard is silent while idle, so an idle tunnel says nothing about the server; the probe is tiny, stays inside the tunnel, and must be answered by the resolver or, failing that, by the server's keepalive.                                                                                                           |
+
+A failed rule takes a connected tunnel to `reconnecting` and then `killSwitchActive` with that
+reason, like any other failed check: traffic is blocked, the epoch changes so connections close,
+and searches and the public-IP check are refused. Probes continue while it is blocked, and the
+first authenticated answer from the server lets the next check pass and traffic resume. A
+tunnel that never completes a handshake never becomes `connected`.
+
+There is no flapping on brief loss: the server must stay silent for the whole 20 s, through
+several probes (one every check from 10 s on), before traffic is paused, and a dead tunnel is
+not reported connected again until the server actually answers. A busy tunnel with a dead
+server is noticed within about 25 s, an idle one within about 35 s. Without a DNS server in the
+configuration there is no probe, so only the application's own traffic is judged.
 
 The tunnel uses boringtun and smoltcp through a locally maintained copy of tokio-wireguard.
 It carries only TorrentPlayer's traffic and needs no administrator rights, TUN driver, system VPN app,
@@ -344,7 +372,11 @@ All on loopback, no internet:
 
 - WireGuard peer integration tests authenticate with preshared keys, transfer TCP data, resolve
   a search hostname through tunneled UDP DNS, check a public-IP response through the tunnel,
-  reject incorrect keys, and close connections on mode changes.
+  reject incorrect keys, and close connections on mode changes. Through a filtering UDP relay,
+  a server that never answers never counts as connected, and a server that stops answering
+  traffic (while still completing handshakes, then entirely) engages the kill switch after the
+  reply timeout, stays blocked while silent, and is connected again once it answers; an idle
+  tunnel whose probes are answered stays connected.
 
 - `crates/torrentplayer-net`: SOCKS5 client and server parsers (malformed replies, auth, IPv6, domain
   targets), UDP envelope property tests, WireGuard parser, and end-to-end tests with a recording SOCKS5 proxy: proxied

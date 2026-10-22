@@ -307,15 +307,20 @@ cargo bench-suite crates/torrentplayer-bench/lists/benchmarks.txt --public --wir
 
 The results go to `bench-results/<UTC timestamp>/` (git-ignored; `--out DIR` to choose):
 
-- `report.md`: a guide to reading it, then for each entry the media line (container, video and
-  audio codecs, duration, bitrate, size, where the index is, header size, keyframes) or the
-  torrent line (size, files, trackers, web seeds), how start-up and seeks read the file, any
-  warnings, a verdict, and a table with one row per engine and scenario: start-up and seek
-  latency (median / p95 in ms), throughput (median of each run's average download rate), peers
-  per run (live at the end / seen during the run), and stalls while watching.
-- `results.json`: every run, with each start-up read, seek target, keyframe, and byte count.
+- `report.md`: a guide to reading it, a summary table of every entry, engine, and scenario, then
+  for each entry the media line (container, video and audio codecs, duration, bitrate, size,
+  where the index is, header size, keyframes) or the torrent line (size, files, trackers, web
+  seeds), how start-up and seeks read the file, any warnings, a verdict, and a table with one
+  row per engine and scenario: start-up and seek latency (median / p95 in ms), throughput
+  (median of each run's average download rate), peers per run (live at the end / seen during
+  the run), and stalls while watching.
+- `results.json`: every run, with each start-up read, seek target, keyframe, and byte count,
+  and a `summary` array with the summary table's rows (times in seconds, throughput in MiB/s).
 
-The terminal shows the verdicts and a summary at the end, and the reports are rewritten after
+`torrentplayer-bench render <results.json> [--out DIR]` writes `report.md` and `results.json`
+again from saved results, in the current layout, without running anything.
+
+The terminal shows the summary table at the end, and the reports are rewritten after
 each entry, so an interrupted suite keeps what it finished. An entry that fails is reported and
 the suite continues; the exit code is non-zero if anything failed.
 
@@ -330,6 +335,10 @@ The guide at the top of `report.md` says the same as this section.
   the first frame on screen, which add a little on top.
 - **Targets** on a healthy swarm: median start-up under 3 s and median seek under 1.5 s. Each
   entry's verdict counts the rows that meet both and names the slowest start-up and seek.
+- **Summary:** the table after the guide puts every entry, engine, and scenario in one place,
+  in list order: medians within the targets in bold and ✓ when both are, failed rows and
+  skipped or missing entries with a short reason (the entry's section has the full text), and
+  engine rows the app would not use in the network mode left out, with a note saying which.
 - **Median and p95:** the median is the typical case, p95 nearly the worst. With 3 runs (12
   seeks) p95 is close to the maximum, so one slow run moves it.
 - **Local scenarios** run on this machine and repeat well. The link speed is the viewer's
