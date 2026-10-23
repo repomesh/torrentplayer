@@ -18,6 +18,7 @@ media/tears_of_steel_1080p_ac3-5.1.mkv | Tears of Steel 1080p, official Dolby 5.
 # largest file as raw bytes (no container needs).
 https://releases.ubuntu.com/26.10/ubuntu-26.10-desktop-amd64.iso.torrent | Ubuntu 26.10 desktop ISO (6.62 GB, no web seeds)
 https://releases.ubuntu.com/26.10/ubuntu-26.10-live-server-amd64.iso.torrent | Ubuntu 26.10 server ISO (2.90 GB, no web seeds)
+# A large, healthy swarm with HTTP web seeds (ignored unless --web-seeds); not video either.
 https://cdimage.debian.org/debian-cd/current/amd64/bt-dvd/debian-13.7.0-amd64-DVD-1.iso.torrent | Debian 13.7 DVD (3.99 GB, 2 web seeds)
 # Video swarms (small files; these carry an HTTP web seed, ignored unless --web-seeds).
 https://webtorrent.io/torrents/tears-of-steel.torrent | Tears of Steel (WebM, 0.57 GB)

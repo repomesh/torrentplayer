@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 mod engines;
+pub mod fetch;
 pub mod http;
 pub mod limit;
 pub mod link;
@@ -329,9 +330,8 @@ fn add(a: Option<u64>, b: Option<u64>) -> Option<u64> {
     }
 }
 
-// One benchmark run is a linear script (add, start-up, seeks, clean-up); splitting it would
-// scatter the timing logic.
-#[allow(clippy::too_many_lines)]
+/// One session in `dir`: starts the engine, measures, and stops the engine whether or not the
+/// measurement succeeded.
 async fn run_in(
     kind: EngineKind,
     dir: PathBuf,
@@ -344,7 +344,24 @@ async fn run_in(
         .zip(kind.dht_state_file())
         .map(|(d, f)| d.join(f).is_file());
     let mut engine = BenchEngine::start(kind, dir, config).await?;
+    let outcome = measure(&mut engine, kind, source, config, dht_state_loaded).await;
+    // A failed run must not leave its engine downloading and uploading during later runs.
+    let finished = engine.finish().await;
+    let run = outcome?;
+    finished?;
+    Ok(run)
+}
 
+// One benchmark run is a linear script (add, start-up, seeks); splitting it would scatter the
+// timing logic.
+#[allow(clippy::too_many_lines)]
+async fn measure(
+    engine: &mut BenchEngine,
+    kind: EngineKind,
+    source: TorrentSource,
+    config: &BenchConfig,
+    dht_state_loaded: Option<bool>,
+) -> anyhow::Result<RunResult> {
     let started = Instant::now();
     let (name, files) = engine.add(source, config.peers.clone()).await?;
     let metadata_ms = ms(started.elapsed());
@@ -373,7 +390,7 @@ async fn run_in(
 
     let mut first_peer_ms = None;
     sampling_first_peer(
-        &engine,
+        engine,
         started,
         &mut first_peer_ms,
         tokio::time::sleep(config.warm),
@@ -401,7 +418,7 @@ async fn run_in(
     let container_aware = startup_plan.is_some();
     let (player, first_byte, startup_reads) = if let Some(steps) = startup_plan {
         let (player, timing) = sampling_first_peer(
-            &engine,
+            engine,
             started,
             &mut first_peer_ms,
             read_steps(&target, &steps, pace, config.timeout),
@@ -413,7 +430,7 @@ async fn run_in(
         let head_len = config.startup_bytes.min(len);
         let tail_len = config.startup_bytes.min(len);
         let (player, head_ready) = Player::start(target.clone(), 0, head_len, pace);
-        let (head, tail) = sampling_first_peer(&engine, started, &mut first_peer_ms, async {
+        let (head, tail) = sampling_first_peer(engine, started, &mut first_peer_ms, async {
             tokio::join!(
                 tokio::time::timeout(config.timeout, head_ready),
                 timed_range(&target, len - tail_len, tail_len, config.timeout),
@@ -550,7 +567,6 @@ async fn run_in(
     let run_time = play.elapsed();
     drop(playhead);
     server.unpublish(published.id);
-    engine.finish().await?;
 
     Ok(RunResult {
         engine: kind.to_string(),
@@ -861,5 +877,86 @@ mod tests {
         assert_eq!((picked.index, raw), (0, false));
         assert!(pick_file(&iso, Some(7)).is_err());
         assert!(pick_file(&[], None).is_err());
+    }
+
+    /// Removes `dir`, retrying while an engine that just stopped still has files open
+    /// (Windows refuses to delete open files).
+    async fn remove(dir: tempfile::TempDir) {
+        let path = dir.keep();
+        for _ in 0..50 {
+            if std::fs::remove_dir_all(&path).is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!(
+            "{} could not be deleted: its files are still open",
+            path.display()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_runs_stop_their_engine() {
+        let seed = tempfile::tempdir().unwrap();
+        let seeder =
+            seeder::LocalSeeder::start(seed.path(), 1024 * 1024, 256 * 1024, None, 1, Vec::new())
+                .await
+                .unwrap();
+        // No peers: the data never arrives, so start-up times out.
+        let local = BenchConfig {
+            public_swarm: false,
+            dht: false,
+            trackers: false,
+            seeks: Vec::new(),
+            watch: Duration::ZERO,
+            timeout: Duration::from_millis(300),
+            ..BenchConfig::default()
+        };
+        let failures = [
+            (
+                "no such file",
+                BenchConfig {
+                    file: Some(99),
+                    ..local.clone()
+                },
+            ),
+            ("start-up timed out", local),
+        ];
+        for kind in [EngineKind::Rqbit, EngineKind::Swarm] {
+            for (what, config) in &failures {
+                let dir = tempfile::tempdir().unwrap();
+                let source = TorrentSource::from_file_bytes(seeder.torrent.clone()).unwrap();
+                let error = run_in(kind, dir.path().to_path_buf(), source, config)
+                    .await
+                    .expect_err(what);
+                assert!(
+                    !engines::running(dir.path()),
+                    "{kind}, {what} ({error:#}): the engine is still running"
+                );
+                // Finished and waited for, not merely dropped.
+                assert!(!engines::abandoned(dir.path()), "{kind}, {what}");
+                remove(dir).await;
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_dropped_engine_stops() {
+        let config = BenchConfig {
+            public_swarm: false,
+            ..BenchConfig::default()
+        };
+        for kind in [EngineKind::Rqbit, EngineKind::Swarm] {
+            let dir = tempfile::tempdir().unwrap();
+            let engine = BenchEngine::start(kind, dir.path().to_path_buf(), &config)
+                .await
+                .unwrap();
+            assert!(engines::running(dir.path()));
+            // As when a run's future is cancelled.
+            drop(engine);
+            assert!(!engines::running(dir.path()), "{kind}");
+            assert!(engines::abandoned(dir.path()), "{kind}");
+            remove(dir).await;
+        }
     }
 }

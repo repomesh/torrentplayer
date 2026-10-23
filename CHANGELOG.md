@@ -30,6 +30,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - `cargo bench-suite … --download-mibps 0` now runs public entries with no download limit (labelled
   "no cap"); before, 0 fell back to the 10 MiB/s default.
+- `cargo bench-suite … --wireguard`/`--socks5` now downloads the `.torrent` links of public
+  entries through the tunnel or proxy (waiting for it like the runs do) instead of directly,
+  and, in every mode, only from public hosts: a link or redirect to `localhost` or a private,
+  loopback, or link-local address is refused, as in the app.
+- A benchmark run that fails (no such file, a start-up time-out, an engine error) now stops its
+  engine. Before, the engine kept downloading from and uploading to the swarm while later
+  suite entries were measured, skewing their results, and on Windows kept the run's temporary
+  folder from being deleted. The same holds for `torrentplayer-bench limit` runs.
+- The benchmark list's Debian DVD entry is no longer filed under "swarms without web seeds",
+  and the suite's error for an unsupported link scheme now mentions http:// links.
 - A WireGuard tunnel whose server stops answering is no longer shown as Connected. The tunnel
   now counts as connected only while its server completes handshakes and answers traffic within
   20 seconds; otherwise the kill switch pauses traffic with the reason ("the WireGuard server is

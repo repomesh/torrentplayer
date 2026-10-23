@@ -194,8 +194,13 @@ within 30 seconds or the benchmark stops with the network's reason instead of me
 swarm. Starting a tunnel per run reconnected to the VPN server every few seconds, and some
 servers then stop completing handshakes. If the tunnel or proxy drops later, the manager
 reconnects by itself: each run first waits up to 90 seconds for traffic to flow again, and an
-entry that cannot start reports "tunnel down". The kill switch stays on, so nothing leaves
-outside the tunnel or proxy.
+entry that cannot start reports "tunnel down". The kill switch stays on, and everything a
+public run sends goes through the network manager: both engines' peer, tracker, and DHT
+traffic, and the suite's download of an entry's `.torrent` link, which likewise waits for
+traffic to flow and fails rather than connect directly. As in the app, that download (and
+every redirect it follows) only goes to public hosts, never to `localhost` or a private,
+loopback, or link-local address, also without these options. Only the loopback connections
+between the simulated player and the stream server stay on the machine.
 
 The engines run as the app runs them in these modes. librqbit has no DHT, listener, or UDP of
 its own and reaches peers through the network's loopback bridge; it only takes magnet links

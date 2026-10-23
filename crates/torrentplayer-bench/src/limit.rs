@@ -135,39 +135,45 @@ pub async fn run_limit(
         ..config.clone()
     };
     let mut engine = BenchEngine::start(kind, dir.path().to_path_buf(), &config).await?;
-    let (_, files) = engine.add(source, config.peers.clone()).await?;
-    let (entry, _) = pick_file(&files, config.file)?;
-    let byte_rate = config.prioritization.fallback_byte_rate.max(1);
-    let playhead = engine.play(&entry, &config, byte_rate).await?;
-    playhead.update(0);
+    let outcome = async {
+        let (_, files) = engine.add(source, config.peers.clone()).await?;
+        let (entry, _) = pick_file(&files, config.file)?;
+        let byte_rate = config.prioritization.fallback_byte_rate.max(1);
+        let playhead = engine.play(&entry, &config, byte_rate).await?;
+        playhead.update(0);
 
-    let start = Instant::now();
-    let change_at = start + plan.change_after;
-    let end = change_at + plan.measure_after;
-    let mut changed = false;
-    let mut samples = Vec::new();
-    let mut next = start;
-    while next <= end {
-        tokio::time::sleep_until(next.into()).await;
-        let now = Instant::now();
-        if !changed && now >= change_at {
-            engine.set_download_limit(Some(plan.then_bps));
-            changed = true;
+        let start = Instant::now();
+        let change_at = start + plan.change_after;
+        let end = change_at + plan.measure_after;
+        let mut changed = false;
+        let mut samples = Vec::new();
+        let mut next = start;
+        while next <= end {
+            tokio::time::sleep_until(next.into()).await;
+            let now = Instant::now();
+            if !changed && now >= change_at {
+                engine.set_download_limit(Some(plan.then_bps));
+                changed = true;
+            }
+            let stats = engine.stats()?;
+            samples.push(LimitSample {
+                t_ms: ms(now - start),
+                verified_bytes: stats.downloaded_bytes,
+                reported_bps: stats.download_bps,
+                peers_live: stats.peers_live,
+                wasted_bytes: stats.wasted_bytes,
+                duplicate_requests: stats.duplicate_requests,
+            });
+            next += SAMPLE_EVERY;
         }
         let stats = engine.stats()?;
-        samples.push(LimitSample {
-            t_ms: ms(now - start),
-            verified_bytes: stats.downloaded_bytes,
-            reported_bps: stats.download_bps,
-            peers_live: stats.peers_live,
-            wasted_bytes: stats.wasted_bytes,
-            duplicate_requests: stats.duplicate_requests,
-        });
-        next += SAMPLE_EVERY;
+        anyhow::Ok((entry, samples, stats))
     }
-    let stats = engine.stats()?;
-    drop(playhead);
-    engine.finish().await?;
+    .await;
+    // Stopped on every path, as in `run_once`.
+    let finished = engine.finish().await;
+    let (entry, samples, stats) = outcome?;
+    finished?;
     anyhow::ensure!(
         stats.downloaded_bytes < entry.len,
         "the whole file downloaded before the run ended; use a larger --size-mib"
