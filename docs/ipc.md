@@ -743,7 +743,9 @@ call stops the previous one's wait (its answer is empty). Never starts the engin
   as text, never as HTML.
 - **Videos**: a stream URL in `video` for a still frame, only when the file's start and end
   are already downloaded (so showing it downloads nothing new); otherwise a `note`. The URL
-  carries a session token: never log it. The previous preview's URL is withdrawn.
+  carries a session token: never log it. The previous preview's URL is withdrawn, also when a
+  file of another kind is previewed. While it is published, its torrent is kept from cache
+  clean-up.
 - **Anything else** (PDFs, archives, HTML, programs): metadata only. Nothing is rendered,
   executed, or opened.
 
@@ -755,6 +757,18 @@ A file that does not arrive within 20 s gives a `note` ("Still downloading…").
 | Returns    | [`FilePreviewDto`](../ui/src/lib/bindings/FilePreviewDto.ts): `kind`, `image`, `text`, `truncated`, `video`, `note` |
 | Errors     | `not-found` (torrent or file, or the engine has not started)                                                        |
 | Permission | `allow-preview-file`                                                                                                |
+
+#### `stop_preview`
+
+Called when the file explorer closes: stops a preview still waiting and withdraws the preview
+video's stream, so its torrent is no longer kept from cache clean-up.
+
+|            |                      |
+| ---------- | -------------------- |
+| Arguments  | none                 |
+| Returns    | nothing              |
+| Errors     | none                 |
+| Permission | `allow-stop-preview` |
 
 ### FFmpeg (optional)
 

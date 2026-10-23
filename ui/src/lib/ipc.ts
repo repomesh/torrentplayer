@@ -500,6 +500,14 @@ export function previewFile(torrentId: number, fileIndex: number): Promise<FileP
   return invoke<FilePreviewDto>('preview_file', { torrentId, fileIndex });
 }
 
+/**
+ * Ends the file explorer's preview when it closes: stops a preview still loading and withdraws
+ * the preview video's stream, so its torrent's data is no longer kept from cache clean-up.
+ */
+export function stopPreview(): Promise<void> {
+  return invoke<undefined>('stop_preview');
+}
+
 // --- FFmpeg (optional) --------------------------------------------------------------------
 
 import type { MediaToolDto } from './bindings/MediaToolDto';

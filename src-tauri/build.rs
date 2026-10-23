@@ -38,6 +38,7 @@ fn main() {
             "queue_downloads",
             "library_items",
             "preview_file",
+            "stop_preview",
             "seek_thumbnail",
             "media_tools",
             "choose_ffmpeg_dir",

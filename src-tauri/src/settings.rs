@@ -696,6 +696,10 @@ fn protected_hashes(app: &AppHandle) -> Option<HashSet<String>> {
     if let Some(preload) = core.engine.preload_status() {
         hashes.insert(preload.info_hash.to_ascii_lowercase());
     }
+    // The explorer's video preview reads from its torrent while it is open.
+    if let Some(previewed) = app.state::<crate::preview::PreviewState>().previewed_hash() {
+        hashes.insert(previewed);
+    }
     Some(hashes)
 }
 

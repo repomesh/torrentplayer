@@ -224,6 +224,7 @@ pub fn run() -> anyhow::Result<()> {
             downloads::queue_downloads,
             library::library_items,
             preview::preview_file,
+            preview::stop_preview,
             media::seek_thumbnail,
             media::media_tools,
             media::choose_ffmpeg_dir,

@@ -139,8 +139,9 @@ and periodically while it runs. It removes the oldest eligible downloads first u
 within the limit; the age setting independently removes eligible downloads older than the selected
 number of days.
 
-**Clear now…** removes every finished download that is no longer in the queue. A queued torrent or
-one with an open player stream is always protected. Cleanup deletes only validated info-hash
+**Clear now…** removes every finished download that is no longer in the queue. A queued torrent, one
+with an open player stream, and the one whose video the file explorer previews are always
+protected. Cleanup deletes only validated info-hash
 folders inside TorrentPlayer's own `torrentplayer-swarm/` and `librqbit/` cache folders. Unrecognized and
 legacy layouts count toward the displayed size but are not removed automatically because they
 cannot be associated safely with a finished torrent.
