@@ -116,10 +116,12 @@
 //! `bench-results/<UTC timestamp>/`). Local media: both engines × `--links` (MiB/s, default
 //! 2,8,25) × `--seeders` (default 1,4) at `--rtt-ms` (default 40), plus 8 MiB/s with 4 seeders at
 //! 120 ms, 3 runs each. Torrents and magnet links: their public swarm, both engines, a 10 MiB/s
-//! download limit (`--download-mibps N`; `0` removes it), 3 runs, from peers only: web seeds (BEP 19) are off for
-//! the swarm engine, as librqbit never uses them, and `--web-seeds` adds a separate swarm row
-//! with them. The report lists each torrent's trackers and web seeds. These download from and
-//! upload to strangers, so they run only with `public` or `--public`. `--quick`: 1 run, and for
+//! download limit (`--download-mibps N`; `0` removes it), 3 runs, from peers only: web seeds
+//! (BEP 19) are off for the swarm engine, as librqbit never uses them, and `--web-seeds` adds a
+//! separate swarm row with them. The report lists each torrent's trackers and web seeds. These
+//! download from and upload to strangers, so they run only with `public` or `--public`; with
+//! `--wireguard` or `--socks5`, `.torrent` links are downloaded through the tunnel or proxy
+//! too, and only from public hosts (as in the app). `--quick`: 1 run, and for
 //! local media only 2 MiB/s with 1 seeder and 25 MiB/s with 4 seeders. `--engines` picks
 //! engines; other options apply to every run. `report.md` starts with a guide to reading it and
 //! gives each entry a verdict against the targets, after a summary table of the whole run
@@ -138,6 +140,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context as _, bail};
+use torrentplayer_bench::fetch::fetch_torrent;
 use torrentplayer_bench::limit::{LimitPlan, LimitReport, run_limit};
 use torrentplayer_bench::link::{ChokeCycle, Clock, Dialers, Link, PeerProfile};
 use torrentplayer_bench::media::MediaInfo;
@@ -1402,37 +1405,24 @@ async fn run_media(args: &SuiteArgs, path: &Path, result: &mut EntryResult) -> a
     Ok(())
 }
 
-/// Largest `.torrent` file downloaded.
-const MAX_TORRENT_BYTES: usize = 16 * 1024 * 1024;
-
-/// Downloads a `.torrent` file, once per entry, so every engine and session plays the same one.
-async fn fetch_torrent(url: &str) -> anyhow::Result<Vec<u8>> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("torrentplayer-bench/", env!("CARGO_PKG_VERSION")))
-        .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(60))
-        .build()?;
-    let mut response = client.get(url).send().await?.error_for_status()?;
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        anyhow::ensure!(
-            body.len() + chunk.len() <= MAX_TORRENT_BYTES,
-            "the .torrent file is larger than 16 MiB"
-        );
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
-}
-
-/// The `.torrent` file of a public entry (downloaded once for a link), and what it lists. A
-/// magnet link has no file until its metadata is fetched.
-async fn load_torrent(source: &Source) -> anyhow::Result<(Option<Vec<u8>>, TorrentInfo)> {
+/// The `.torrent` file of a public entry (downloaded once for a link, so every engine and
+/// session plays the same one), and what it lists. A magnet link has no file until its
+/// metadata is fetched. In a protected mode the link is downloaded through the tunnel or proxy.
+async fn load_torrent(
+    source: &Source,
+    bench: &BenchConfig,
+) -> anyhow::Result<(Option<Vec<u8>>, TorrentInfo)> {
     let torrent = match source {
-        Source::Url(url) => Some(
-            fetch_torrent(url)
-                .await
-                .with_context(|| format!("downloading {url}"))?,
-        ),
+        Source::Url(url) => {
+            if bench.network.is_some() && bench.shared_network.is_none() {
+                bail!("the protected network is not started; not downloading {url} directly");
+            }
+            Some(
+                fetch_torrent(url, bench.shared_network.as_ref())
+                    .await
+                    .with_context(|| format!("downloading {url}"))?,
+            )
+        }
         Source::TorrentFile(path) => {
             Some(std::fs::read(path).with_context(|| format!("reading {}", path.display()))?)
         }
@@ -1462,7 +1452,7 @@ async fn run_public(
     source: &Source,
     result: &mut EntryResult,
 ) -> anyhow::Result<()> {
-    let (torrent, info) = load_torrent(source).await?;
+    let (torrent, info) = load_torrent(source, &args.bench).await?;
     tracing::info!("torrent: {}", info.summary());
     let has_web_seeds = info.web_seeds > 0;
     result.torrent = Some(info);
