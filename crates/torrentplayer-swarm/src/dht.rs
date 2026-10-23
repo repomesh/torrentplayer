@@ -33,8 +33,9 @@ use crate::torrent::Shared;
 /// Wait before trying again when the node cannot start (for example, no UDP socket).
 const RESTART_AFTER: Duration = Duration::from_secs(30);
 
-/// How often a running node's routing tables are saved (as librqbit does).
-const SAVE_EVERY: Duration = Duration::from_secs(60);
+/// How often a running node's routing tables are saved. Contacts change slowly, and the node
+/// also saves when it stops.
+const SAVE_EVERY: Duration = Duration::from_secs(10 * 60);
 
 /// The engine's DHT node, started on first use.
 pub(crate) struct DhtNode {
@@ -66,7 +67,7 @@ impl DhtNode {
             state: state_file.map(|path| {
                 Arc::new(StateFile {
                     path,
-                    writing: std::sync::Mutex::new(()),
+                    written: std::sync::Mutex::new(None),
                 })
             }),
         }
@@ -156,8 +157,10 @@ impl DhtNode {
 /// The file holding a direct-mode node's routing tables between runs.
 struct StateFile {
     path: PathBuf,
-    /// One save at a time: a stopping node's last save can overlap its successor's first.
-    writing: std::sync::Mutex<()>,
+    /// The SHA-1 of what the file holds, when known, so an unchanged table is not written
+    /// again. Locked for the whole save: a stopping node's last save can overlap its
+    /// successor's first.
+    written: std::sync::Mutex<Option<[u8; 20]>>,
 }
 
 /// The saved routing tables. librqbit's table type is not exported, so it is only ever
@@ -183,6 +186,7 @@ impl StateFile {
         match serde_json::from_slice(&bytes) {
             Ok(saved) => {
                 debug!("loaded the saved DHT routing tables");
+                *self.lock_written() = Some(digest(&bytes));
                 Some(saved)
             }
             Err(error) => {
@@ -193,21 +197,63 @@ impl StateFile {
     }
 
     /// Saves `dht`'s tables, unless it knows no nodes yet: a node stopped right after starting
-    /// must not replace a useful file with an empty one.
+    /// must not replace a useful file with an empty one. Tables the file already holds are
+    /// not written again.
     fn save(&self, dht: &Dht) -> io::Result<()> {
         let stats = dht.stats();
         if stats.routing_table_size + stats.routing_table_size_v6 == 0 {
             return Ok(());
         }
-        let json = dht
-            .with_routing_tables(|table, table_v6| serde_json::to_vec(&Saved { table, table_v6 }))
+        let mut value = dht
+            .with_routing_tables(|table, table_v6| serde_json::to_value(Saved { table, table_v6 }))
             .map_err(io::Error::other)?;
-        let _writing = self
-            .writing
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        write_replacing(&self.path, &json)
+        strip_volatile(&mut value);
+        let json = serde_json::to_vec(&value).map_err(io::Error::other)?;
+        let digest = digest(&json);
+        let mut written = self.lock_written();
+        if *written == Some(digest) {
+            return Ok(());
+        }
+        // Unknown until the write succeeds: a failed one may have changed nothing.
+        *written = None;
+        write_replacing(&self.path, &json)?;
+        *written = Some(digest);
+        Ok(())
     }
+
+    fn lock_written(&self) -> std::sync::MutexGuard<'_, Option<[u8; 20]>> {
+        self.written
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Fields librqbit writes but never reads back: times since the last contact or refresh, a
+/// node's status, and its error count. They change on every save, so they are dropped to
+/// leave only the contacts (whose ids and addresses are what a restart uses).
+const VOLATILE: [&str; 6] = [
+    "last_refreshed",
+    "last_request_ago",
+    "last_response_ago",
+    "last_query_ago",
+    "status",
+    "errors_in_a_row",
+];
+
+fn strip_volatile(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            map.retain(|key, _| !VOLATILE.contains(&key.as_str()));
+            map.values_mut().for_each(strip_volatile);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_volatile),
+        _ => {}
+    }
+}
+
+fn digest(bytes: &[u8]) -> [u8; 20] {
+    use sha1::Digest as _;
+    sha1::Sha1::digest(bytes).into()
 }
 
 /// Writes `bytes` to `path` through a temporary file, so a crash never leaves half a file.
@@ -472,7 +518,7 @@ mod tests {
     fn state_file(path: PathBuf) -> StateFile {
         StateFile {
             path,
-            writing: std::sync::Mutex::new(()),
+            written: std::sync::Mutex::new(None),
         }
     }
 
@@ -512,6 +558,12 @@ mod tests {
         let node = local_node(vec![contact.to_string()]).await;
         knows_a_node(&node).await;
         state.save(&node).unwrap();
+        // Unchanged tables are not written again (times since contact are not saved).
+        let modified = std::fs::metadata(&state.path).unwrap().modified().unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        state.save(&node).unwrap();
+        let after = std::fs::metadata(&state.path).unwrap().modified().unwrap();
+        assert_eq!(modified, after, "an unchanged table is not rewritten");
         node.cancellation_token().cancel();
 
         let saved = state.load().await.expect("the tables were saved");

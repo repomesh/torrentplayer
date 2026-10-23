@@ -30,10 +30,10 @@ choice) as their own files.
 The app data folder is the same as the config folder on Windows and macOS, and
 `~/.local/share/io.torrentplayer.desktop` on Linux. Its `dht` folder keeps the DHT nodes
 TorrentPlayer's engine knew (`swarm.json`), so after a restart magnet links find peers without
-starting the search from the bootstrap servers. They are saved every minute and when the node
-stops, and only in Direct mode: a protected mode starts with a fresh node id and saves nothing,
-so the id seen over a VPN or proxy is never the one seen from your own address. Deleting the
-folder is safe; TorrentPlayer starts from the bootstrap servers again.
+starting the search from the bootstrap servers. They are saved every 10 minutes if they changed
+and when the node stops, and only in Direct mode: a protected mode starts with a fresh node id
+and saves nothing, so the id seen over a VPN or proxy is never the one seen from your own
+address. Deleting the folder is safe; TorrentPlayer starts from the bootstrap servers again.
 
 Versions from before the rename to TorrentPlayer used `io.torrentstream.desktop` (and, earlier
 still, `io.github.lumen-app.lumen`) for these folders, `TorrentStream` in the Downloads folder,
