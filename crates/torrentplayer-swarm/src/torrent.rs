@@ -3,6 +3,7 @@
 //! The engine session and per-torrent driver.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ use crate::dht::DhtNode;
 use crate::limit::RateLimiter;
 use crate::metainfo::{BLOCK_LEN, Metainfo};
 use crate::reader::FileReader;
+use crate::reload::Rechecker;
 use crate::sched::{
     BlockDigest, Interest, InterestId, InterestKind, PeerKey, PieceCheck, Request, Scheduler,
     SchedulerConfig,
@@ -174,7 +176,7 @@ impl SwarmConfig {
 pub enum SwarmError {
     /// The cache directory could not be created.
     #[error("could not create the piece cache: {0}")]
-    Storage(#[from] std::io::Error),
+    Storage(#[from] io::Error),
     /// No file with that index.
     #[error("unknown file")]
     UnknownFile,
@@ -303,6 +305,8 @@ pub struct Swarm {
     udp: Option<UdpTrackerClient>,
     dht: Option<Arc<DhtNode>>,
     torrents: Registry,
+    /// Checks the pieces kept from earlier sessions, for every torrent.
+    rechecker: Arc<Rechecker>,
     cancel: CancellationToken,
 }
 
@@ -377,6 +381,7 @@ impl Swarm {
             udp,
             dht,
             torrents,
+            rechecker: Rechecker::new(),
             cancel,
         })
     }
@@ -453,7 +458,7 @@ impl Swarm {
         );
         drop(torrents);
         // Before any peer connects, so pieces kept from an earlier session are not requested.
-        crate::reload::start(&shared);
+        self.rechecker.start(&shared);
         shared.add_candidates(peers);
         if let Some(node) = &self.dht {
             tokio::spawn(crate::dht::discover(
@@ -511,9 +516,25 @@ impl Swarm {
         self.upload_limiter.set_rate(limit);
     }
 
-    /// Stops every torrent.
+    /// Stops every torrent, and marks their piece caches as ended cleanly, so the next session
+    /// trusts the pieces in them instead of checking every one before use. Blocks while the
+    /// caches that stored pieces since they were opened are flushed to disk.
     pub fn shutdown(&self) {
         self.cancel.cancel();
+        let caches: Vec<Arc<CacheFile>> = self
+            .torrents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter_map(|t| t.cache_file.upgrade())
+            .collect();
+        for cache in caches {
+            match cache.seal() {
+                Ok(true) => {}
+                Ok(false) => debug!("piece cache left to be checked next time"),
+                Err(error) => tracing::warn!(%error, "could not mark a piece cache as complete"),
+            }
+        }
     }
 }
 
@@ -1359,6 +1380,29 @@ impl Shared {
                 len: r.len,
             }),
         );
+    }
+
+    /// Reads part of a stored piece (see [`PieceStore::read`]). Blocking. A piece trusted from
+    /// an earlier session that fails its check on this first read is no longer counted as
+    /// stored, and is downloaded again.
+    pub(crate) fn read_piece(&self, piece: u32, offset: u32, buf: &mut [u8]) -> io::Result<()> {
+        let read = self.store.read(piece, offset, buf);
+        if let Err(error) = &read
+            && matches!(
+                error.kind(),
+                io::ErrorKind::InvalidData | io::ErrorKind::NotFound
+            )
+        {
+            let mut sched = self.sched();
+            if sched.have(piece) {
+                sched.lose(piece);
+                drop(sched);
+                debug!(piece, "a stored piece is bad; downloading it again");
+                self.refresh_background.store(true, Ordering::Relaxed);
+                self.request_replan(false);
+            }
+        }
+        read
     }
 
     /// Tells every peer that `piece` is now verified.
@@ -2239,14 +2283,24 @@ mod tests {
         .unwrap_or_else(|_| panic!("timed out: {what}"));
     }
 
-    /// A session that stored every piece of `meta` in `dir`, then ended.
-    async fn earlier_session(dir: &std::path::Path, meta: &Metainfo) {
+    /// A session that stored `pieces` of `meta` in `dir`, then ended: cleanly (the app quit) or
+    /// not (a crash: the engine was not shut down).
+    async fn earlier_session(
+        dir: &std::path::Path,
+        meta: &Metainfo,
+        pieces: &[&[u8]],
+        clean: bool,
+    ) {
         let swarm = Swarm::start(config(dir)).await.unwrap();
         let torrent = swarm.add(meta.clone(), Vec::new()).unwrap();
-        for (piece, data) in (0..).zip(PIECES) {
+        for (piece, data) in (0..).zip(pieces) {
             torrent.shared.store.write_piece(piece, data).unwrap();
         }
-        swarm.shutdown();
+        if clean {
+            swarm.shutdown();
+        } else {
+            torrent.stop();
+        }
         let gone = Arc::downgrade(&torrent.shared);
         drop(torrent);
         wait_for("the torrent closes", Duration::from_secs(5), || {
@@ -2256,10 +2310,37 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn pieces_stored_before_a_restart_are_used_again() {
+    async fn pieces_stored_before_a_clean_restart_are_used_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let meta = crate::store::tests::meta(&PIECES, 8);
-        earlier_session(dir.path(), &meta).await;
+        earlier_session(dir.path(), &meta, &PIECES, true).await;
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta, Vec::new()).unwrap();
+        assert_eq!(
+            torrent.have_pieces(),
+            [true; 3],
+            "trusted, not checked first"
+        );
+        let mut all = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut torrent.reader(0).unwrap(), &mut all)
+            .await
+            .unwrap();
+        assert_eq!(all, PIECES.concat());
+        assert_eq!(torrent.stats().downloaded_bytes, 0, "nothing downloaded");
+        assert_eq!(
+            swarm.rechecker.peak(),
+            0,
+            "nothing checked in the background"
+        );
+        swarm.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pieces_stored_before_a_crash_are_checked_then_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        earlier_session(dir.path(), &meta, &PIECES, false).await;
 
         let swarm = Swarm::start(config(dir.path())).await.unwrap();
         let torrent = swarm.add(meta, Vec::new()).unwrap();
@@ -2277,10 +2358,122 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_trusted_piece_that_fails_when_read_is_downloaded_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        earlier_session(dir.path(), &meta, &PIECES, true).await;
+        // Damaged in place, keeping the cache file's length and modification time.
+        let data = dir.path().join(meta.info_hash_hex()).join("pieces.dat");
+        let mut bytes = std::fs::read(&data).unwrap();
+        let modified = std::fs::metadata(&data).unwrap().modified().unwrap();
+        bytes[9] ^= 0xff;
+        std::fs::write(&data, &bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&data)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta, Vec::new()).unwrap();
+        assert_eq!(torrent.have_pieces(), [true; 3]);
+        let mut buf = [0u8; 8];
+        let error = torrent.shared.read_piece(1, 0, &mut buf).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            torrent.have_pieces(),
+            [true, false, true],
+            "to download again"
+        );
+        torrent.shared.read_piece(0, 0, &mut buf).unwrap();
+        assert_eq!(&buf, PIECES[0]);
+        swarm.shutdown();
+    }
+
+    /// `n` pieces of 8 bytes, different for each `seed`.
+    fn numbered(seed: u8, n: u8) -> Vec<Vec<u8>> {
+        (0..n).map(|i| vec![seed, i, 1, 2, 3, 4, 5, 6]).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checks_after_a_crash_share_two_threads_across_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut metas = Vec::new();
+        for seed in 0..8 {
+            let pieces = numbered(seed, 16);
+            let pieces: Vec<&[u8]> = pieces.iter().map(Vec::as_slice).collect();
+            let meta = crate::store::tests::meta(&pieces, 8);
+            earlier_session(dir.path(), &meta, &pieces, false).await;
+            metas.push(meta);
+        }
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrents: Vec<Torrent> = metas
+            .into_iter()
+            .map(|meta| swarm.add(meta, Vec::new()).unwrap())
+            .collect();
+        wait_for("every piece verifies", Duration::from_secs(10), || {
+            torrents.iter().all(|t| t.have_pieces().iter().all(|h| *h))
+        })
+        .await;
+        let peak = swarm.rechecker.peak();
+        assert!((1..=2).contains(&peak), "{peak} pieces checked at once");
+        swarm.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_playhead_and_the_torrent_being_read_are_checked_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut metas = Vec::new();
+        for seed in 0..2 {
+            let pieces = numbered(seed, 8);
+            let pieces: Vec<&[u8]> = pieces.iter().map(Vec::as_slice).collect();
+            let meta = crate::store::tests::meta(&pieces, 8);
+            earlier_session(dir.path(), &meta, &pieces, false).await;
+            metas.push(meta);
+        }
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        swarm.rechecker.set_limit(0);
+        let mut added = metas
+            .into_iter()
+            .map(|meta| swarm.add(meta, Vec::new()).unwrap());
+        let (first, second) = (added.next().unwrap(), added.next().unwrap());
+        // The torrent added second is played from piece 5.
+        second.set_playhead(0, 5 * 8, None).unwrap();
+        wait_for(
+            "the driver plans the playhead",
+            Duration::from_secs(5),
+            || second.shared.sched().urgent_pieces().first() == Some(&5),
+        )
+        .await;
+
+        let mut order = Vec::new();
+        while let Some((shared, piece)) = swarm.rechecker.take_next() {
+            let which = if Arc::ptr_eq(&shared, &second.shared) {
+                2
+            } else {
+                1
+            };
+            order.push((which, piece));
+        }
+        assert_eq!(order.first(), Some(&(2, 5)), "{order:?}");
+        let seconds = order.iter().take_while(|(which, _)| *which == 2).count();
+        assert_eq!(
+            seconds, 8,
+            "the torrent being read before the other: {order:?}"
+        );
+        assert_eq!(order.len(), 16);
+        assert!(!first.have_pieces()[0]);
+        swarm.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_corrupted_stored_piece_is_not_trusted_and_is_requested_again() {
         let dir = tempfile::tempdir().unwrap();
         let meta = crate::store::tests::meta(&PIECES, 8);
-        earlier_session(dir.path(), &meta).await;
+        earlier_session(dir.path(), &meta, &PIECES, false).await;
         let data = dir.path().join(meta.info_hash_hex()).join("pieces.dat");
         let mut bytes = std::fs::read(&data).unwrap();
         bytes[9] ^= 0xff;

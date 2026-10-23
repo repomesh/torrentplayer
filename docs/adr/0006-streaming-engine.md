@@ -62,8 +62,11 @@ the normal layout can be added later.
 
 Since 0.3.1 the index is also appended to disk (`pieces.idx`: a header with the format version and
 the info hash, then one checksummed record per stored piece), so the cache survives restarts.
-Nothing is flushed: every piece found through it is checked against the torrent's SHA-1 again
-before use, which also covers torn records and data lost in a crash (see
+Pieces are not flushed as they are stored. After a crash every piece found through the index is
+checked against the torrent's SHA-1 again before use, which also covers torn records and data
+lost in the crash. A clean quit flushes both files and appends a marker with the cache file's
+length and modification time; while it holds, the next session counts the pieces as stored at
+once and checks each one when it is first read, before any byte of it is used (see
 [Streaming](../streaming.md#downloaded-once)).
 
 ## Milestones

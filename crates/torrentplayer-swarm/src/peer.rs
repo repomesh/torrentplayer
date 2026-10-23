@@ -75,8 +75,7 @@ impl Uploads {
             let data = tokio::task::spawn_blocking(move || {
                 let mut data = vec![0_u8; key.len as usize];
                 read_from
-                    .store
-                    .read(key.piece, key.begin, &mut data)
+                    .read_piece(key.piece, key.begin, &mut data)
                     .map(|()| Bytes::from(data))
             })
             .await;

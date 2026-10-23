@@ -167,7 +167,7 @@ impl AsyncRead for FileReader {
                         let shared = Arc::clone(&self.shared);
                         self.state = State::Reading(tokio::task::spawn_blocking(move || {
                             let mut out = vec![0u8; n];
-                            shared.store.read(piece, in_piece, &mut out)?;
+                            shared.read_piece(piece, in_piece, &mut out)?;
                             Ok(out)
                         }));
                     } else if self.stored_only {

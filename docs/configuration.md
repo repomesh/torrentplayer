@@ -26,9 +26,10 @@ unless you chose a folder yourself, they are moved to the new default at start-u
 `torrentplayer-swarm` holds TorrentPlayer's engine cache (a folder per torrent, named by its info
 hash, with the downloaded pieces in `pieces.dat` and where each one is in `pieces.idx`; not
 playable files) and `librqbit` holds downloads made with the librqbit engine (the `rqbit` engine
-choice) as their own files. After a restart the engine checks the pieces in its cache against the
-torrent's hashes and uses them again, so nothing is downloaded twice; a piece that fails the check
-is downloaded again. Deleting a torrent's folder there (with the app closed) is always safe: it
+choice) as their own files. After a restart the engine uses the pieces in its cache again, so
+nothing is downloaded twice: after a normal quit each piece is checked against the torrent's
+hashes when first read, and after a crash all of them are checked in the background first. A
+piece that fails the check is downloaded again. Deleting a torrent's folder there (with the app closed) is always safe: it
 starts empty. Caches from versions before 0.3.1 have no `pieces.idx` and start empty once.
 
 The app data folder is the same as the config folder on Windows and macOS, and

@@ -11,17 +11,24 @@
 //!
 //! The index is also appended to `pieces.idx` next to `pieces.dat`, one fixed-size record per
 //! stored piece after a header naming the format and the torrent, so a later session can use
-//! the pieces again. Nothing is flushed on purpose: after a crash or power loss either file may
-//! end early or hold garbage, so the index read back only says where a piece may be. Records
-//! that are torn, fail their checksum, or point past the end of `pieces.dat` are skipped, and
-//! every piece found is still unverified: it cannot be read until [`PieceStore::verify`] has
-//! checked it against the torrent's SHA-1.
+//! the pieces again. Pieces are not flushed as they are stored: after a crash or power loss
+//! either file may end early or hold garbage, so the index read back only says where a piece
+//! may be. Records that are torn, fail their checksum, or point past the end of `pieces.dat` are
+//! skipped, and every piece found is [`Check::Unverified`]: it cannot be read until
+//! [`PieceStore::verify`] has checked it against the torrent's SHA-1.
+//!
+//! A session that ends cleanly flushes both files and appends a clean marker naming the cache
+//! file's length and modification time ([`CacheFile::seal`]). If the marker is still the last
+//! record and the cache file still matches it, the next session takes the pieces as
+//! [`Check::Trusted`]: stored at once, and each checked when it is first read. Any later write
+//! puts records after the marker, so a session that then crashes leaves no valid marker.
 
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak};
+use std::time::UNIX_EPOCH;
 
 use sha1::Digest as _;
 
@@ -43,6 +50,10 @@ const RECORD_LEN: usize = 4 + 4 + 8 + 8;
 /// Each record stands for bytes appended to `pieces.dat`, and the cap on unused bytes there
 /// (see [`PieceStore::open`]) keeps an honest index at about two per piece.
 const MAX_RECORDS_PER_PIECE: u64 = 4;
+/// The piece number of the two records of the clean marker: the cache file's length (record
+/// length 0), then its modification time in nanoseconds since 1970 (record length 1). A record
+/// of length 2 voids a marker before it (see [`CacheFile::unseal`]).
+const MARKER: u32 = u32::MAX;
 
 /// Stores verified pieces for one torrent.
 #[derive(Debug)]
@@ -62,8 +73,28 @@ pub(crate) struct CacheFile {
     /// Where the next index record is written.
     next_record: AtomicU64,
     info_hash: [u8; 20],
+    /// Each piece's SHA-1.
+    hashes: Vec<[u8; 20]>,
     /// Where each stored piece is.
     index: RwLock<Vec<Option<Slot>>>,
+    /// The clean marker on disk still holds: nothing was stored since it was written.
+    sealed: AtomicBool,
+}
+
+/// How far a stored piece is trusted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Check {
+    /// Found through the index of a session that did not end cleanly: not read until
+    /// [`PieceStore::verify`] has checked it.
+    Unverified,
+    /// Kept by a session that ended cleanly: counted as stored, and checked before it is first
+    /// read (see [`PieceStore::read`]).
+    Trusted,
+    /// Checked in this session.
+    Verified,
+    /// Failed its check, or its record points past the end of the cache file: not stored. Kept
+    /// so the session does not leave a clean marker over its record.
+    Bad,
 }
 
 /// Where a stored piece is in the cache file.
@@ -71,22 +102,21 @@ pub(crate) struct CacheFile {
 struct Slot {
     at: u64,
     len: u32,
-    /// Checked against the torrent's hash in this session. Only verified pieces are read.
-    verified: bool,
+    check: Check,
 }
 
 impl PieceStore {
     /// Opens the cache in `dir`, keeping the pieces an earlier session stored there for `meta`
-    /// (unverified: see [`PieceStore::verify`]). Starts empty, truncating `pieces.dat`, without
-    /// a usable index: none (a cache from before the index existed), one in another format or
-    /// for another torrent, or a cache file with more unused bytes than the whole torrent
-    /// (pieces stored again and again over many sessions: rare enough not to be worth
-    /// compacting). Blocking; reads only the index.
+    /// (trusted if it ended cleanly, unverified otherwise: see [`Check`]). Starts empty,
+    /// truncating `pieces.dat`, without a usable index: none (a cache from before the index
+    /// existed), one in another format or for another torrent, or a cache file with more unused
+    /// bytes than the whole torrent (pieces stored again and again over many sessions: rare
+    /// enough not to be worth compacting). Blocking; reads only the index.
     pub(crate) fn open(dir: &Path, meta: &Metainfo) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         let header = header(meta);
         let index_path = dir.join(INDEX_FILE);
-        let records = std::fs::read(&index_path)
+        let parsed = std::fs::read(&index_path)
             .ok()
             .and_then(|bytes| parse_index(&bytes, &header, meta));
         let file = OpenOptions::new()
@@ -96,36 +126,57 @@ impl PieceStore {
             .truncate(false)
             .open(dir.join(DATA_FILE))?;
         let data_len = file.metadata()?.len();
-        let kept = records.and_then(|(slots, count)| {
-            let slots: Vec<Option<Slot>> = slots
+        let kept = parsed.and_then(|index| {
+            let clean = index.clean.is_some_and(|(len, modified)| {
+                len == data_len && mtime(&file).is_ok_and(|now| now == modified)
+            });
+            let slots: Vec<Option<Slot>> = index
+                .slots
                 .into_iter()
-                .map(|slot| slot.filter(|s| s.at + u64::from(s.len) <= data_len))
+                .map(|slot| {
+                    slot.map(|s| Slot {
+                        check: if s.at + u64::from(s.len) > data_len {
+                            Check::Bad
+                        } else if clean {
+                            Check::Trusted
+                        } else {
+                            Check::Unverified
+                        },
+                        ..s
+                    })
+                })
                 .collect();
-            let used: u64 = slots.iter().flatten().map(|s| u64::from(s.len)).sum();
-            (data_len.saturating_sub(used) <= meta.total_len).then_some((slots, count))
+            let used: u64 = slots
+                .iter()
+                .flatten()
+                .filter(|s| s.check != Check::Bad)
+                .map(|s| u64::from(s.len))
+                .sum();
+            (data_len.saturating_sub(used) <= meta.total_len).then_some((slots, index.count, clean))
         });
-        let (slots, next, next_record, index_file) = if let Some((slots, count)) = kept {
-            let index_file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&index_path)?;
-            // After the last whole record: a torn one is overwritten.
-            let next_record = (HEADER_LEN + count * RECORD_LEN) as u64;
-            (slots, data_len, next_record, index_file)
-        } else {
-            // The index first: a crash before the cache file is truncated leaves an empty
-            // index, never records pointing into a new cache file.
-            let index_file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&index_path)?;
-            write_all_at(&index_file, &header, 0)?;
-            file.set_len(0)?;
-            let slots = vec![None; meta.piece_count() as usize];
-            (slots, 0, HEADER_LEN as u64, index_file)
-        };
+        let (slots, next, next_record, index_file, sealed) =
+            if let Some((slots, count, clean)) = kept {
+                let index_file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&index_path)?;
+                // After the last whole record: a torn one is overwritten.
+                let next_record = (HEADER_LEN + count * RECORD_LEN) as u64;
+                (slots, data_len, next_record, index_file, clean)
+            } else {
+                // The index first: a crash before the cache file is truncated leaves an empty
+                // index, never records pointing into a new cache file.
+                let index_file = OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&index_path)?;
+                write_all_at(&index_file, &header, 0)?;
+                file.set_len(0)?;
+                let slots = vec![None; meta.piece_count() as usize];
+                (slots, 0, HEADER_LEN as u64, index_file, false)
+            };
         Ok(Self {
             file: Arc::new(CacheFile {
                 file,
@@ -133,7 +184,11 @@ impl PieceStore {
                 index_file,
                 next_record: AtomicU64::new(next_record),
                 info_hash: meta.info_hash,
+                hashes: (0..meta.piece_count())
+                    .map(|p| meta.piece_hash(p).copied().unwrap_or_default())
+                    .collect(),
                 index: RwLock::new(slots),
+                sealed: AtomicBool::new(sealed),
             }),
         })
     }
@@ -154,49 +209,58 @@ impl PieceStore {
         })
     }
 
-    /// The stored pieces in their order in the cache file, and whether each is verified.
-    pub(crate) fn stored(&self) -> Vec<(u32, bool)> {
+    /// The stored pieces in their order in the cache file, and how far each is trusted (never
+    /// [`Check::Bad`]).
+    pub(crate) fn stored(&self) -> Vec<(u32, Check)> {
         let index = self.file.index();
-        let mut stored: Vec<(u64, u32, bool)> = index
+        let mut stored: Vec<(u64, u32, Check)> = index
             .iter()
             .enumerate()
             .filter_map(|(piece, slot)| {
-                let slot = slot.as_ref()?;
-                Some((slot.at, u32::try_from(piece).ok()?, slot.verified))
+                let slot = slot.as_ref().filter(|s| s.check != Check::Bad)?;
+                Some((slot.at, u32::try_from(piece).ok()?, slot.check))
             })
             .collect();
         drop(index);
-        stored.sort_unstable();
-        stored.into_iter().map(|(_, p, v)| (p, v)).collect()
+        stored.sort_unstable_by_key(|&(at, piece, _)| (at, piece));
+        stored.into_iter().map(|(_, p, c)| (p, c)).collect()
     }
 
-    /// Checks a stored piece against `expected` (its SHA-1), so that it can be read. Returns
+    /// Checks a stored piece against the torrent's SHA-1, so that it can be read. Returns
     /// whether it is stored and verified; a piece that does not match (or cannot be read) is
     /// forgotten. Blocking: call from a blocking thread.
-    pub(crate) fn verify(&self, piece: u32, expected: &[u8; 20]) -> bool {
+    pub(crate) fn verify(&self, piece: u32) -> bool {
         let Some(slot) = self.file.slot(piece) else {
             return false;
         };
-        if slot.verified {
-            return true;
+        match slot.check {
+            Check::Verified => return true,
+            Check::Bad => return false,
+            Check::Unverified | Check::Trusted => {}
         }
         let mut data = vec![0; slot.len as usize];
         let ok = match read_exact_at(&self.file.file, &mut data, slot.at) {
-            Ok(()) => sha1::Sha1::digest(&data).as_slice() == expected,
+            Ok(()) => self
+                .file
+                .hashes
+                .get(piece as usize)
+                .is_some_and(|expected| sha1::Sha1::digest(&data).as_slice() == expected),
             Err(error) => {
                 tracing::debug!(%error, piece, "could not read a stored piece");
                 false
             }
         };
+        if !ok {
+            tracing::warn!(piece, "a stored piece failed its check");
+            self.file.unseal();
+        }
         let mut index = self.file.index_mut();
         // Unless the piece was stored again meanwhile.
         if let Some(current) = index.get_mut(piece as usize)
             && *current == Some(slot)
         {
-            *current = ok.then_some(Slot {
-                verified: true,
-                ..slot
-            });
+            let check = if ok { Check::Verified } else { Check::Bad };
+            *current = Some(Slot { check, ..slot });
         }
         ok
     }
@@ -205,13 +269,14 @@ impl PieceStore {
     pub(crate) fn write_piece(&self, piece: u32, data: &[u8]) -> io::Result<()> {
         let len = u32::try_from(data.len())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "piece too large"))?;
+        self.file.sealed.store(false, Ordering::Relaxed);
         let at = self.file.next.fetch_add(u64::from(len), Ordering::Relaxed);
         write_all_at(&self.file.file, data, at)?;
         if let Some(slot) = self.file.index_mut().get_mut(piece as usize) {
             *slot = Some(Slot {
                 at,
                 len,
-                verified: true,
+                check: Check::Verified,
             });
         }
         let record = record(&self.file.info_hash, piece, len, at);
@@ -228,18 +293,37 @@ impl PieceStore {
 
     /// Reads `buf.len()` bytes starting `offset` bytes into a stored piece. Blocking. Fails
     /// rather than read past the end of the piece, into whichever piece was stored after it,
-    /// and for a piece kept from an earlier session that is not verified yet.
+    /// and for a piece kept from an earlier session that is not verified yet. A trusted piece
+    /// is verified first; if it fails, so does the read, with [`io::ErrorKind::InvalidData`].
     pub(crate) fn read(&self, piece: u32, offset: u32, buf: &mut [u8]) -> io::Result<()> {
-        let Slot { at, len, .. } = self
-            .file
-            .slot(piece)
-            .filter(|s| s.verified)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "piece is not stored"))?;
+        let Some(Slot { at, len, check }) = self.file.slot(piece) else {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "piece is not stored",
+            ));
+        };
         if u64::from(offset) + buf.len() as u64 > u64::from(len) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "read past the end of the piece",
             ));
+        }
+        match check {
+            Check::Verified => {}
+            Check::Trusted => {
+                if !self.verify(piece) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "stored piece failed its check",
+                    ));
+                }
+            }
+            Check::Unverified | Check::Bad => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "piece is not stored",
+                ));
+            }
         }
         read_exact_at(&self.file.file, buf, at + u64::from(offset))
     }
@@ -257,6 +341,64 @@ impl CacheFile {
     fn slot(&self, piece: u32) -> Option<Slot> {
         self.index().get(piece as usize).copied().flatten()
     }
+
+    /// Lets the next session trust the stored pieces (see [`Check::Trusted`]): flushes both
+    /// files to disk and appends the clean marker. Does nothing if the marker on disk still
+    /// holds, and leaves none while a piece of the index is unchecked or failed its check
+    /// (those are checked again next time). Returns whether a marker holds now. Blocking.
+    pub(crate) fn seal(&self) -> io::Result<bool> {
+        if self.sealed.load(Ordering::Relaxed) {
+            return Ok(true);
+        }
+        let doubtful = self
+            .index()
+            .iter()
+            .flatten()
+            .any(|s| matches!(s.check, Check::Unverified | Check::Bad));
+        if doubtful {
+            return Ok(false);
+        }
+        self.file.sync_all()?;
+        let len = self.file.metadata()?.len();
+        let modified = mtime(&self.file)?;
+        // The records before the marker reach the disk first.
+        self.index_file.sync_data()?;
+        let mut marker = [0; 2 * RECORD_LEN];
+        marker[..RECORD_LEN].copy_from_slice(&record(&self.info_hash, MARKER, 0, len));
+        marker[RECORD_LEN..].copy_from_slice(&record(&self.info_hash, MARKER, 1, modified));
+        let at = self
+            .next_record
+            .fetch_add(2 * RECORD_LEN as u64, Ordering::Relaxed);
+        write_all_at(&self.index_file, &marker, at)?;
+        self.index_file.sync_data()?;
+        self.sealed.store(true, Ordering::Relaxed);
+        Ok(true)
+    }
+
+    /// Voids the clean marker on disk, so the next session checks every piece again: one of
+    /// them failed its check. A record after the marker is enough.
+    fn unseal(&self) {
+        if !self.sealed.swap(false, Ordering::Relaxed) {
+            return;
+        }
+        let record = record(&self.info_hash, MARKER, 2, 0);
+        let at = self
+            .next_record
+            .fetch_add(RECORD_LEN as u64, Ordering::Relaxed);
+        if let Err(error) = write_all_at(&self.index_file, &record, at) {
+            tracing::warn!(%error, "could not void the piece cache's clean marker");
+        }
+    }
+}
+
+/// When `file` was last modified, in nanoseconds since 1970.
+fn mtime(file: &File) -> io::Result<u64> {
+    let since = file
+        .metadata()?
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .map_err(io::Error::other)?;
+    u64::try_from(since.as_nanos()).map_err(io::Error::other)
 }
 
 /// The header `pieces.idx` starts with for `meta`.
@@ -291,15 +433,20 @@ fn record_check(info_hash: &[u8; 20], record: &[u8; RECORD_LEN]) -> [u8; 8] {
     check
 }
 
-/// Reads `pieces.idx`: where each piece was stored (the latest record wins), and how many whole
-/// records there are. `None` if it does not start with `header` or is too large. Records that
+/// What `pieces.idx` says.
+struct Index {
+    /// Where each piece was stored (the latest record wins), unchecked.
+    slots: Vec<Option<Slot>>,
+    /// Whole records.
+    count: usize,
+    /// The cache file's length and modification time, if the index ends with a clean marker.
+    clean: Option<(u64, u64)>,
+}
+
+/// Reads `pieces.idx`. `None` if it does not start with `header` or is too large. Records that
 /// fail their checksum, name a piece the torrent does not have, or give a length other than
 /// the piece's are skipped; a torn last record is ignored.
-fn parse_index(
-    bytes: &[u8],
-    header: &[u8; HEADER_LEN],
-    meta: &Metainfo,
-) -> Option<(Vec<Option<Slot>>, usize)> {
+fn parse_index(bytes: &[u8], header: &[u8; HEADER_LEN], meta: &Metainfo) -> Option<Index> {
     let records = bytes.strip_prefix(header.as_slice())?;
     let max = u64::from(meta.piece_count()) * MAX_RECORDS_PER_PIECE + 64;
     if (records.len() / RECORD_LEN) as u64 > max {
@@ -307,16 +454,33 @@ fn parse_index(
     }
     let mut slots = vec![None; meta.piece_count() as usize];
     let chunks = records.chunks_exact(RECORD_LEN);
+    let torn = !chunks.remainder().is_empty();
     let count = chunks.len();
+    // The marker's records, and how many records came after its start.
+    let (mut marker_len, mut marker_time, mut since) = (None, None, 0_usize);
     for chunk in chunks {
+        since += 1;
         let Ok(r) = <[u8; RECORD_LEN]>::try_from(chunk) else {
             continue;
         };
         let piece = u32::from_le_bytes([r[0], r[1], r[2], r[3]]);
         let len = u32::from_le_bytes([r[4], r[5], r[6], r[7]]);
         let at = u64::from_le_bytes([r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]]);
-        if r[16..] != record_check(&meta.info_hash, &r)
-            || len == 0
+        if r[16..] != record_check(&meta.info_hash, &r) {
+            continue;
+        }
+        match (piece, len) {
+            (MARKER, 0) => {
+                (marker_len, marker_time, since) = (Some(at), None, 1);
+                continue;
+            }
+            (MARKER, 1) => {
+                marker_time = Some(at);
+                continue;
+            }
+            _ => {}
+        }
+        if len == 0
             || piece >= meta.piece_count()
             || len != meta.piece_size(piece)
             || at.checked_add(u64::from(len)).is_none()
@@ -327,11 +491,17 @@ fn parse_index(
             *slot = Some(Slot {
                 at,
                 len,
-                verified: false,
+                check: Check::Unverified,
             });
         }
     }
-    Some((slots, count))
+    // Only as the very last two records, with nothing torn after them.
+    let clean = marker_len.zip(marker_time).filter(|_| since == 2 && !torn);
+    Some(Index {
+        slots,
+        count,
+        clean,
+    })
 }
 
 #[cfg(unix)]
@@ -376,6 +546,7 @@ fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use super::Check::{Trusted as T, Unverified as U, Verified as V};
     use super::*;
 
     /// A single-file torrent of `pieces`, each `piece_len` long but the last.
@@ -397,8 +568,12 @@ pub(crate) mod tests {
 
     fn verify_all(store: &PieceStore, meta: &Metainfo) -> Vec<u32> {
         (0..meta.piece_count())
-            .filter(|&p| store.verify(p, meta.piece_hash(p).unwrap()))
+            .filter(|&p| store.verify(p))
             .collect()
+    }
+
+    fn seal(store: &PieceStore) -> bool {
+        store.file.seal().unwrap()
     }
 
     #[test]
@@ -424,7 +599,7 @@ pub(crate) mod tests {
             "reading past the piece fails"
         );
         assert!(store.read(99, 0, &mut buf).is_err());
-        assert_eq!(store.stored(), vec![(3, true), (0, true)]);
+        assert_eq!(store.stored(), vec![(3, V), (0, V)]);
     }
 
     #[test]
@@ -459,7 +634,7 @@ pub(crate) mod tests {
         old.write_piece(0, PIECES[0]).unwrap();
         let file = old.cache_file();
         let new = PieceStore::share(&file).unwrap();
-        assert_eq!(new.stored(), vec![(0, true)], "verified in this session");
+        assert_eq!(new.stored(), vec![(0, V)], "verified in this session");
         new.write_piece(1, PIECES[1]).unwrap();
 
         let mut buf = [0u8; 8];
@@ -491,7 +666,7 @@ pub(crate) mod tests {
         drop(store);
 
         let store = PieceStore::open(dir.path(), &meta).unwrap();
-        assert_eq!(store.stored(), vec![(2, false), (3, false), (0, false)]);
+        assert_eq!(store.stored(), vec![(2, U), (3, U), (0, U)]);
         let mut buf = [0u8; 3];
         assert_eq!(
             store.read(2, 0, &mut buf).unwrap_err().kind(),
@@ -529,7 +704,7 @@ pub(crate) mod tests {
         bytes.extend_from_slice(&record(&meta.info_hash, 2, 8, 16)[..10]);
         std::fs::write(&index, &bytes).unwrap();
         let store = PieceStore::open(dir.path(), &meta).unwrap();
-        assert_eq!(store.stored(), vec![(0, false), (1, false)]);
+        assert_eq!(store.stored(), vec![(0, U), (1, U)]);
         // The next record replaces it.
         store.write_piece(2, PIECES[2]).unwrap();
         drop(store);
@@ -548,7 +723,7 @@ pub(crate) mod tests {
         bytes.extend_from_slice(&record(&meta.info_hash, 3, 3, 24));
         std::fs::write(&index, &bytes).unwrap();
         let store = PieceStore::open(dir.path(), &meta).unwrap();
-        assert_eq!(store.stored(), vec![(0, false), (2, false)]);
+        assert_eq!(store.stored(), vec![(0, U), (2, U)]);
         drop(store);
 
         // So is a record for another torrent, a piece out of range, or the wrong length.
@@ -558,7 +733,7 @@ pub(crate) mod tests {
         bytes.extend_from_slice(&record(&meta.info_hash, 1, 7, 8));
         std::fs::write(&index, &bytes).unwrap();
         let store = PieceStore::open(dir.path(), &meta).unwrap();
-        assert_eq!(store.stored(), vec![(0, false), (2, false)]);
+        assert_eq!(store.stored(), vec![(0, U), (2, U)]);
     }
 
     #[test]
@@ -576,7 +751,7 @@ pub(crate) mod tests {
 
         let store = PieceStore::open(dir.path(), &meta).unwrap();
         assert_eq!(verify_all(&store, &meta), vec![0]);
-        assert_eq!(store.stored(), vec![(0, true)], "the bad copy is forgotten");
+        assert_eq!(store.stored(), vec![(0, V)], "the bad copy is forgotten");
         let mut buf = [0u8; 8];
         assert!(store.read(1, 0, &mut buf).is_err());
         store.write_piece(1, PIECES[1]).unwrap();
@@ -628,11 +803,7 @@ pub(crate) mod tests {
         }
         drop(store);
         let store = PieceStore::open(dir.path(), &meta).unwrap();
-        assert_eq!(
-            store.stored(),
-            vec![(0, false)],
-            "24 unused bytes, 27 allowed"
-        );
+        assert_eq!(store.stored(), vec![(0, U)], "24 unused bytes, 27 allowed");
         store.write_piece(0, PIECES[0]).unwrap();
         drop(store);
         let store = PieceStore::open(dir.path(), &meta).unwrap();
@@ -657,5 +828,129 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&cache).unwrap();
         let store = PieceStore::open(&cache, &meta).unwrap();
         assert!(store.stored().is_empty());
+    }
+
+    #[test]
+    fn pieces_of_a_cleanly_ended_session_are_trusted_and_checked_when_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = meta(&PIECES, 8);
+        let store = PieceStore::open(dir.path(), &meta).unwrap();
+        store.write_piece(1, PIECES[1]).unwrap();
+        store.write_piece(0, PIECES[0]).unwrap();
+        assert!(seal(&store));
+        drop(store);
+
+        let store = PieceStore::open(dir.path(), &meta).unwrap();
+        assert_eq!(store.stored(), vec![(1, T), (0, T)]);
+        let mut buf = [0u8; 8];
+        store.read(1, 0, &mut buf).unwrap();
+        assert_eq!(&buf, PIECES[1]);
+        assert_eq!(
+            store.stored(),
+            vec![(1, V), (0, T)],
+            "checked on first read"
+        );
+        // Nothing stored since: the marker still holds, for the session after this one too.
+        assert!(seal(&store));
+        drop(store);
+        let store = PieceStore::open(dir.path(), &meta).unwrap();
+        assert_eq!(store.stored(), vec![(1, T), (0, T)]);
+
+        // Storing a piece puts records after the marker: a crash now leaves none.
+        store.write_piece(2, PIECES[2]).unwrap();
+        drop(store);
+        let store = PieceStore::open(dir.path(), &meta).unwrap();
+        assert_eq!(store.stored(), vec![(1, U), (0, U), (2, U)]);
+        // Unchecked pieces leave no marker either.
+        assert!(!seal(&store));
+        assert_eq!(verify_all(&store, &meta), vec![0, 1, 2]);
+        assert!(seal(&store));
+        drop(store);
+        let store = PieceStore::open(dir.path(), &meta).unwrap();
+        assert_eq!(store.stored(), vec![(1, T), (0, T), (2, T)]);
+    }
+
+    #[test]
+    fn a_trusted_piece_that_changed_on_disk_is_never_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = meta(&PIECES, 8);
+        let store = PieceStore::open(dir.path(), &meta).unwrap();
+        store.write_piece(0, PIECES[0]).unwrap();
+        store.write_piece(1, PIECES[1]).unwrap();
+        assert!(seal(&store));
+        drop(store);
+        // Damaged in place, with the length and modification time it had (bit rot).
+        let data = dir.path().join(DATA_FILE);
+        let file = OpenOptions::new().write(true).open(&data).unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        write_all_at(&file, b"X", 9).unwrap();
+        file.set_modified(modified).unwrap();
+        drop(file);
+
+        let store = PieceStore::open(dir.path(), &meta).unwrap();
+        assert_eq!(store.stored(), vec![(0, T), (1, T)]);
+        let mut buf = [0u8; 8];
+        assert_eq!(
+            store.read(1, 0, &mut buf).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(store.stored(), vec![(0, T)], "forgotten");
+        assert!(!seal(&store));
+        store.read(0, 0, &mut buf).unwrap();
+        assert_eq!(&buf, PIECES[0]);
+        drop(store);
+        let store = PieceStore::open(dir.path(), &meta).unwrap();
+        assert_eq!(
+            store.stored(),
+            vec![(0, U), (1, U)],
+            "every piece is checked again next time"
+        );
+    }
+
+    #[test]
+    fn a_cache_file_changed_after_a_clean_end_is_checked_in_full() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = meta(&PIECES, 8);
+        let data = dir.path().join(DATA_FILE);
+        let index = dir.path().join(INDEX_FILE);
+        let store = PieceStore::open(dir.path(), &meta).unwrap();
+        store.write_piece(0, PIECES[0]).unwrap();
+        assert!(seal(&store));
+        drop(store);
+
+        // Changed in place: a later modification time.
+        let file = OpenOptions::new().write(true).open(&data).unwrap();
+        let later =
+            file.metadata().unwrap().modified().unwrap() + std::time::Duration::from_secs(5);
+        file.set_modified(later).unwrap();
+        drop(file);
+        assert_eq!(
+            PieceStore::open(dir.path(), &meta).unwrap().stored(),
+            vec![(0, U)]
+        );
+
+        // Seal again, then a torn record after the marker, or a cache file of another length.
+        let store = PieceStore::open(dir.path(), &meta).unwrap();
+        assert_eq!(verify_all(&store, &meta), vec![0]);
+        assert!(seal(&store));
+        drop(store);
+        let sealed = std::fs::read(&index).unwrap();
+        let mut torn = sealed.clone();
+        torn.extend_from_slice(&[1, 2, 3]);
+        std::fs::write(&index, &torn).unwrap();
+        assert_eq!(
+            PieceStore::open(dir.path(), &meta).unwrap().stored(),
+            vec![(0, U)]
+        );
+        std::fs::write(&index, &sealed).unwrap();
+        let file = OpenOptions::new().write(true).open(&data).unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        file.set_len(9).unwrap();
+        file.set_modified(modified).unwrap();
+        drop(file);
+        assert_eq!(
+            PieceStore::open(dir.path(), &meta).unwrap().stored(),
+            vec![(0, U)]
+        );
     }
 }

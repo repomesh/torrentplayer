@@ -3,34 +3,58 @@
 //! Checks the pieces a torrent's cache kept from an earlier session, so they are used again
 //! instead of downloaded again.
 //!
-//! The pieces are checked against the torrent's SHA-1 when the torrent is added, on a few
-//! blocking threads, and become available one by one as they pass: the add itself does not
-//! wait, even for a large torrent. Until a piece is checked the scheduler does not request it
-//! (see [`crate::sched::Scheduler::checking_stored`]) and readers wait for it, as for a piece
-//! being downloaded; pieces the playhead or a reader needs are checked first. A piece that
-//! fails is forgotten and downloaded again, and no peer is blamed for it.
+//! Pieces kept by a session that ended cleanly are trusted (see [`crate::store::Check`]): they
+//! count as stored at once and are checked when first read. The others, after a crash, are
+//! checked against the torrent's SHA-1 when the torrent is added, in the background, and become
+//! available one by one as they pass: the add itself does not wait, even for a large torrent.
+//! Until a piece is checked the scheduler does not request it (see
+//! [`crate::sched::Scheduler::checking_stored`]) and readers wait for it, as for a piece being
+//! downloaded. A piece that fails is forgotten and downloaded again, and no peer is blamed.
 //!
-//! Checking everything at once, rather than each piece when it is first read or uploaded, keeps
-//! one meaning for "have": what the scheduler, the bitfield sent to peers, and the progress
-//! shown to the user count is verified data, and a finished torrent shows as finished again
-//! within seconds of a restart (reading at disk speed, which is far faster than downloading).
+//! One [`Rechecker`] per engine does this work for all its torrents on at most [`WORKERS`]
+//! blocking threads, so a long queue added at start-up does not take every core and the disk
+//! from playback. Pieces the playhead or a reader of any torrent needs come first, then the
+//! other pieces of torrents being read, then the torrents in the order they were added; each
+//! torrent's pieces in their order in the cache file, so it is read sequentially.
 
 use std::collections::VecDeque;
-use std::num::NonZeroUsize;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use tracing::{debug, info};
 
 use crate::sched::PieceCheck;
+use crate::store::Check;
 use crate::torrent::Shared;
 
-/// Most threads checking one torrent's pieces.
-const MAX_THREADS: usize = 4;
+/// Threads checking pieces at once, across the engine.
+const WORKERS: usize = 2;
 
-/// The pieces still to check.
+/// Checks stored pieces for every torrent of an engine.
 #[derive(Debug)]
-struct Pending {
-    /// In their order in the cache file, so it is read sequentially.
+pub(crate) struct Rechecker {
+    state: Mutex<State>,
+    /// Pieces being checked right now.
+    busy: AtomicUsize,
+    /// The most pieces checked at once so far.
+    peak: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct State {
+    /// In the order the torrents were added.
+    jobs: Vec<Job>,
+    /// Worker threads running.
+    workers: usize,
+    /// At most this many.
+    limit: usize,
+}
+
+/// One torrent's pieces still to check.
+#[derive(Debug)]
+struct Job {
+    shared: Weak<Shared>,
+    /// In their order in the cache file.
     order: VecDeque<u32>,
     /// Whether each piece is still to be taken.
     waiting: Vec<bool>,
@@ -40,7 +64,7 @@ struct Pending {
     unchecked: usize,
 }
 
-impl Pending {
+impl Job {
     fn is_waiting(&self, piece: u32) -> bool {
         self.waiting.get(piece as usize).copied().unwrap_or(false)
     }
@@ -55,134 +79,194 @@ impl Pending {
         }
         taken
     }
-}
 
-/// Makes the pieces in `shared`'s store available: those already verified in this session (by
-/// a live instance sharing the cache) at once, the others once checked in the background.
-/// Call before the torrent's driver starts. Must be called inside a Tokio runtime.
-pub(crate) fn start(shared: &Arc<Shared>) {
-    let stored = shared.store.stored();
-    if stored.is_empty() {
-        return;
-    }
-    let mut pending = Pending {
-        order: VecDeque::new(),
-        waiting: vec![false; shared.meta.piece_count() as usize],
-        left: 0,
-        unchecked: 0,
-    };
-    let mut sched = shared.sched();
-    for (piece, verified) in stored {
-        if verified {
-            sched.on_verified(piece, PieceCheck::Valid(None));
-        } else if let Some(slot) = pending.waiting.get_mut(piece as usize) {
-            sched.checking_stored(piece);
-            *slot = true;
-            pending.order.push_back(piece);
-            pending.left += 1;
-            pending.unchecked += 1;
+    /// The next piece in cache file order.
+    fn take_next(&mut self) -> Option<u32> {
+        while let Some(piece) = self.order.pop_front() {
+            if self.take(piece) {
+                return Some(piece);
+            }
         }
-    }
-    drop(sched);
-    let count = pending.left;
-    if count == 0 {
-        return;
-    }
-    debug!(
-        pieces = count,
-        "checking pieces stored by an earlier session"
-    );
-    let threads = std::thread::available_parallelism()
-        .map_or(1, NonZeroUsize::get)
-        .min(MAX_THREADS)
-        .min(count);
-    let pending = Arc::new(Mutex::new(pending));
-    for _ in 0..threads {
-        let shared = Arc::clone(shared);
-        let pending = Arc::clone(&pending);
-        tokio::task::spawn_blocking(move || check(&shared, &pending));
+        None
     }
 }
 
-/// Checks pieces until none is left or the torrent stops.
-fn check(shared: &Arc<Shared>, pending: &Mutex<Pending>) {
-    let (mut kept, mut lost) = (0_u32, 0_u32);
-    while !shared.cancel.is_cancelled() {
-        let Some(piece) = next(shared, pending) else {
-            break;
+impl Rechecker {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(State {
+                jobs: Vec::new(),
+                workers: 0,
+                limit: WORKERS,
+            }),
+            busy: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        })
+    }
+
+    fn state(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Makes the pieces in `shared`'s store available: those verified in this session (by a
+    /// live instance sharing the cache) or trusted at once, the others once checked. Call
+    /// before the torrent's driver starts, inside a Tokio runtime.
+    pub(crate) fn start(self: &Arc<Self>, shared: &Arc<Shared>) {
+        let stored = shared.store.stored();
+        if stored.is_empty() {
+            return;
+        }
+        let mut job = Job {
+            shared: Arc::downgrade(shared),
+            order: VecDeque::new(),
+            waiting: vec![false; shared.meta.piece_count() as usize],
+            left: 0,
+            unchecked: 0,
         };
-        let ok = shared
-            .meta
-            .piece_hash(piece)
-            .is_some_and(|expected| shared.store.verify(piece, expected));
-        if ok {
-            shared.sched().on_verified(piece, PieceCheck::Valid(None));
-            shared.piece_done.notify_waiters();
-            shared.announce_have(piece);
-            kept += 1;
-        } else {
-            shared.sched().on_verified(piece, PieceCheck::NotStored);
-            // It can be requested now.
-            shared.request_replan(false);
-            lost += 1;
+        let mut kept = 0_u32;
+        let mut sched = shared.sched();
+        for (piece, check) in stored {
+            match check {
+                Check::Verified | Check::Trusted => {
+                    sched.on_verified(piece, PieceCheck::Valid(None));
+                    kept += 1;
+                }
+                Check::Unverified => {
+                    if let Some(slot) = job.waiting.get_mut(piece as usize) {
+                        sched.checking_stored(piece);
+                        *slot = true;
+                        job.order.push_back(piece);
+                        job.left += 1;
+                        job.unchecked += 1;
+                    }
+                }
+                Check::Bad => {}
+            }
         }
-        let mut state = pending.lock().unwrap_or_else(PoisonError::into_inner);
-        state.unchecked -= 1;
-        if state.unchecked == 0 {
+        drop(sched);
+        debug!(
+            kept,
+            to_check = job.left,
+            "pieces stored by an earlier session"
+        );
+        if job.left == 0 {
+            return;
+        }
+        let mut state = self.state();
+        state.jobs.push(job);
+        self.spawn_workers(&mut state);
+    }
+
+    /// Starts workers up to the limit, and no more than there are pieces to check.
+    fn spawn_workers(self: &Arc<Self>, state: &mut State) {
+        let left: usize = state.jobs.iter().map(|j| j.left).sum();
+        while state.workers < state.limit && state.workers < left {
+            state.workers += 1;
+            let checker = Arc::clone(self);
+            tokio::task::spawn_blocking(move || checker.work());
+        }
+    }
+
+    /// Checks pieces until none is left.
+    fn work(&self) {
+        while let Some((shared, piece)) = self.next() {
+            let busy = self.busy.fetch_add(1, Ordering::Relaxed) + 1;
+            self.peak.fetch_max(busy, Ordering::Relaxed);
+            let ok = shared.store.verify(piece);
+            self.busy.fetch_sub(1, Ordering::Relaxed);
+            if ok {
+                shared.sched().on_verified(piece, PieceCheck::Valid(None));
+                shared.piece_done.notify_waiters();
+                shared.announce_have(piece);
+            } else {
+                shared.sched().on_verified(piece, PieceCheck::NotStored);
+                // It can be requested now.
+                shared.request_replan(false);
+            }
+            self.checked(&shared);
+        }
+    }
+
+    /// The next piece to check, or `None` once there is none, when the calling worker ends.
+    fn next(&self) -> Option<(Arc<Shared>, u32)> {
+        let mut state = self.state();
+        let picked = pick(&mut state.jobs);
+        if picked.is_none() {
+            state.workers -= 1;
+        }
+        picked
+    }
+
+    /// Counts a piece of `shared` as checked.
+    fn checked(&self, shared: &Arc<Shared>) {
+        let mut state = self.state();
+        let Some(at) = state
+            .jobs
+            .iter()
+            .position(|j| std::ptr::eq(j.shared.as_ptr(), Arc::as_ptr(shared)))
+        else {
+            return;
+        };
+        let job = &mut state.jobs[at];
+        job.unchecked -= 1;
+        if job.unchecked == 0 {
+            state.jobs.remove(at);
             drop(state);
             info!(torrent = %shared.meta.info_hash_hex(), "stored pieces checked");
             shared.request_replan(false);
         }
     }
-    if kept > 0 || lost > 0 {
-        debug!(kept, lost, "checked stored pieces");
+
+    /// Changes the number of workers, for tests.
+    #[cfg(test)]
+    pub(crate) fn set_limit(self: &Arc<Self>, limit: usize) {
+        let mut state = self.state();
+        state.limit = limit;
+        self.spawn_workers(&mut state);
+    }
+
+    /// Takes the next piece to check as a worker would, without checking it, for tests.
+    #[cfg(test)]
+    pub(crate) fn take_next(&self) -> Option<(Arc<Shared>, u32)> {
+        pick(&mut self.state().jobs)
+    }
+
+    /// The most pieces checked at once so far.
+    #[cfg(test)]
+    pub(crate) fn peak(&self) -> usize {
+        self.peak.load(Ordering::Relaxed)
     }
 }
 
-/// The next piece to check: one the playhead or a reader needs, if any, otherwise the next in
-/// the cache file.
-fn next(shared: &Shared, pending: &Mutex<Pending>) -> Option<u32> {
-    let mut pending = pending.lock().unwrap_or_else(PoisonError::into_inner);
-    if pending.left == 0 {
-        return None;
-    }
-    let urgent = {
-        let sched = shared.sched();
-        sched
+/// Takes the next piece to check: one the playhead or a reader of any torrent needs, then one
+/// of a torrent being read, then one of the earliest added torrent. Forgets the torrents that
+/// stopped.
+fn pick(jobs: &mut Vec<Job>) -> Option<(Arc<Shared>, u32)> {
+    jobs.retain(|j| j.shared.upgrade().is_some_and(|s| !s.cancel.is_cancelled()));
+    let live: Vec<(usize, Arc<Shared>)> = jobs
+        .iter()
+        .enumerate()
+        .filter(|(_, j)| j.left > 0)
+        .filter_map(|(i, j)| Some((i, j.shared.upgrade()?)))
+        .collect();
+    for (i, shared) in &live {
+        let job = &jobs[*i];
+        let urgent = shared
+            .sched()
             .urgent_pieces()
             .iter()
             .copied()
-            .find(|&p| pending.is_waiting(p))
-    };
-    let piece = match urgent {
-        Some(piece) => piece,
-        None => loop {
-            let piece = pending.order.pop_front()?;
-            if pending.is_waiting(piece) {
-                break piece;
-            }
-        },
-    };
-    pending.take(piece);
-    Some(piece)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pending_pieces_are_taken_once() {
-        let mut pending = Pending {
-            order: VecDeque::from([2, 0]),
-            waiting: vec![true, false, true],
-            left: 2,
-            unchecked: 2,
-        };
-        assert!(pending.take(2));
-        assert!(!pending.take(2));
-        assert!(!pending.take(1));
-        assert!(!pending.take(9));
-        assert_eq!(pending.left, 1);
+            .find(|&p| job.is_waiting(p));
+        if let Some(piece) = urgent {
+            jobs[*i].take(piece);
+            return Some((Arc::clone(shared), piece));
+        }
     }
+    let read = live.iter().filter(|(_, s)| s.sched().has_interests());
+    for (i, shared) in read.chain(&live) {
+        if let Some(piece) = jobs[*i].take_next() {
+            return Some((Arc::clone(shared), piece));
+        }
+    }
+    None
 }

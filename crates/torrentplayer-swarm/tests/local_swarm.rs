@@ -373,10 +373,12 @@ async fn a_complete_torrent_added_after_a_restart_downloads_nothing() {
     let torrent = swarm
         .add(f.torrent.meta().clone(), vec![f.seeder_addr])
         .unwrap();
+    // The engine was shut down cleanly: its pieces count at once and are checked as read.
+    assert!(torrent.have_pieces().iter().all(|h| *h));
     torrent.select_file(0).unwrap();
     read_whole_file(&torrent, &f.data).await;
     println!(
-        "{} MiB checked in {:?} after the restart",
+        "{} MiB read (and checked) in {:?} after the restart",
         LEN >> 20,
         started.elapsed()
     );

@@ -512,6 +512,22 @@ impl Scheduler {
         &self.urgent_order
     }
 
+    /// Whether a playhead or reader is open.
+    pub(crate) fn has_interests(&self) -> bool {
+        !self.interests.is_empty()
+    }
+
+    /// Forgets a verified piece whose stored copy turned out to be bad when read (a piece
+    /// trusted from an earlier session): it is downloaded again.
+    pub(crate) fn lose(&mut self, piece: u32) {
+        if let Some(slot) = self.have.get_mut(piece as usize)
+            && *slot
+        {
+            *slot = false;
+            self.have_count -= 1;
+        }
+    }
+
     /// Holds back `piece` from requests while the copy kept in the piece store from an earlier
     /// session is checked; [`Scheduler::on_verified`] reports the result (`NotStored` if the
     /// copy is bad, so the piece is downloaded again and nobody is blamed).

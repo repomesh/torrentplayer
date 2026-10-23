@@ -22,13 +22,24 @@ it. This keeps disk use and swarm load proportional to what is actually watched.
 
 The engine stores verified pieces in an append-only cache file per torrent (`pieces.dat`) and
 appends where each one is to an index next to it (`pieces.idx`), so pieces downloaded before a
-restart are used again. When a torrent is added, its stored pieces are checked against the
-torrent's SHA-1 hashes in the background, on up to four threads, pieces the player is waiting for
-first; each piece becomes available (to the player, and to peers if sharing is on) as soon as it
-passes, and is not requested from peers meanwhile. A piece that fails is downloaded again. The
+restart are used again.
+
+When the app quits, the engine flushes each cache that changed to disk and appends a clean marker
+to its index, naming the cache file's length and modification time. If the next session finds
+the marker last in the index and the cache file unchanged, the stored pieces count as downloaded
+at once, with no check up front: each is checked against the torrent's SHA-1 hash when it is first
+read for playback or for a peer, and only then are its bytes used. A piece that fails then is
+downloaded again, and the next session checks the whole cache.
+
+After a crash (or a cache changed since), every stored piece is checked in the background when
+the torrent is added; each becomes available (to the player, and to peers if sharing is on) as
+soon as it passes, and is not requested from peers meanwhile. The engine checks on two threads
+at most, whatever the number of torrents, so a long queue does not compete with playback for the
+disk: first the pieces a player is waiting for, then the rest of the torrents being played, then
+the other torrents in the order they were added. A piece that fails is downloaded again. The
 index is never trusted on its own: a torn or damaged record, or one pointing past the end of the
-cache file (after a crash or power loss), is skipped. A cache file with more unused bytes than the
-whole torrent (pieces stored again over many sessions) starts empty instead of being compacted.
+cache file, is skipped. A cache file with more unused bytes than the whole torrent (pieces stored
+again over many sessions) starts empty instead of being compacted.
 
 A torrent with nothing to download (paused, complete, or with every selected file downloaded and
 nothing playing) re-plans once a second instead of ten times; selecting a file, playing, seeking, or
