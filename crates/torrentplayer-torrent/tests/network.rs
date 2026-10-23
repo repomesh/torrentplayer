@@ -135,8 +135,9 @@ fn through(proxy: &TestProxy) -> NetworkConfig {
     }
 }
 
-/// An HTTP tracker that knows no peers and counts announces.
-async fn empty_tracker() -> (SocketAddr, Arc<AtomicUsize>) {
+/// An HTTP tracker that knows no peers, asks to be announced to again after `interval`
+/// seconds, and counts announces.
+async fn empty_tracker(interval: u32) -> (SocketAddr, Arc<AtomicUsize>) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let hits = Arc::new(AtomicUsize::new(0));
@@ -153,13 +154,13 @@ async fn empty_tracker() -> (SocketAddr, Arc<AtomicUsize>) {
                         Ok(n) => request.extend_from_slice(&buf[..n]),
                     }
                 }
-                let body = b"d8:intervali60e5:peers0:e";
+                let body = format!("d8:intervali{interval}e5:peers0:e");
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(head.as_bytes()).await;
-                let _ = stream.write_all(body).await;
+                let _ = stream.write_all(body.as_bytes()).await;
             });
         }
     });
@@ -203,7 +204,7 @@ async fn magnets_through_librqbit_use_only_the_proxy() {
     let proxy = TestProxy::start(Some(("torrentplayer-test", "hunter2")))
         .await
         .unwrap();
-    let (tracker, announces) = empty_tracker().await;
+    let (tracker, announces) = empty_tracker(60).await;
     let udp_tracker = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let net = Network::start(through(&proxy), options()).await.unwrap();
     net.settled(Duration::from_secs(5)).await;
@@ -261,6 +262,78 @@ async fn magnets_through_librqbit_use_only_the_proxy() {
         udp.await.is_err(),
         "a UDP tracker was contacted outside the proxy"
     );
+    engine.shutdown().await;
+    net.shutdown();
+}
+
+/// librqbit could reach HTTP trackers only through a `socks5://` proxy URL, whose client
+/// resolves host names with the system resolver, and it kept announcing whatever the
+/// "proxy trackers" setting later said. In a protected mode TorrentPlayer announces to them
+/// itself, through the proxy with the host name unresolved, and librqbit never does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn protected_modes_resolve_tracker_names_through_the_proxy_and_librqbit_never_announces() {
+    let seed = seeder().await;
+    let relay = RecordingRelay::start(seed.addr).await.unwrap();
+    let proxy = TestProxy::start(Some(("torrentplayer-test", "hunter2")))
+        .await
+        .unwrap();
+    // Asks to be announced to every second: librqbit would, if it had the tracker.
+    let (tracker, announces) = empty_tracker(1).await;
+    let net = Network::start(through(&proxy), options()).await.unwrap();
+    net.settled(Duration::from_secs(5)).await;
+    let dir = tempfile::tempdir().unwrap();
+    let engine = StreamEngine::start_with_network(
+        StreamEngineConfig {
+            download_dir: dir.path().to_path_buf(),
+            choice: EngineChoice::Rqbit,
+            public_discovery: true,
+            download_limit_bps: None,
+            upload_limit_bps: None,
+            peer_limit: 40,
+            dht_state_dir: None,
+        },
+        Some(net.clone()),
+    )
+    .await
+    .unwrap();
+    // By name: the proxy sees the name only if nothing resolved it here first.
+    let named = format!("localhost:{}", tracker.port());
+    let magnet = format!(
+        "magnet:?xt=urn:btih:{}&dn=lecture&tr=http%3A%2F%2F{named}%2Fannounce",
+        seed.info_hash
+    );
+    engine
+        .add_with_peers(
+            TorrentSource::parse_link(&magnet).unwrap(),
+            vec![relay.addr()],
+        )
+        .await
+        .unwrap();
+    let targets: HashSet<String> = proxy.connections().into_iter().map(|c| c.target).collect();
+    assert!(
+        targets.contains(&named),
+        "the tracker's name went to the proxy unresolved: {targets:?}"
+    );
+    assert!(!targets.contains(&tracker.to_string()), "{targets:?}");
+    assert_eq!(announces.load(Ordering::SeqCst), 1, "one announce, ours");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(
+        announces.load(Ordering::SeqCst),
+        1,
+        "librqbit does not announce on its own"
+    );
+
+    // Turning "proxy trackers" off changes nothing for the running torrent: it has no
+    // trackers to stop.
+    let mut off = through(&proxy);
+    if let NetworkMode::Socks5(socks) = &mut off.mode {
+        socks.proxy_trackers = false;
+    }
+    engine.apply_network(off).await.unwrap();
+    net.settled(Duration::from_secs(5)).await;
+    assert!(!net.policy().trackers_allowed);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(announces.load(Ordering::SeqCst), 1);
     engine.shutdown().await;
     net.shutdown();
 }

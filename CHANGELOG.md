@@ -57,6 +57,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   fetch already running kept connecting to peers directly after a switch to WireGuard or
   SOCKS5, outside the tunnel or proxy and the kill switch, for up to two minutes. The torrent
   being opened fails with a message to try again.
+- In the WireGuard and SOCKS5 modes, tracker host names are no longer looked up outside the
+  tunnel or proxy. With the librqbit engine, and while fetching a magnet link's details, HTTP
+  tracker names were resolved by the system's DNS, even while the kill switch was blocking
+  traffic. TorrentPlayer now contacts those trackers itself, with the names resolved by the
+  tunnel or proxy, and librqbit contacts none, so turning "Send tracker requests through the
+  proxy" off also stops every tracker request of torrents already open.
 
 ## [0.3.0] - 2026-10-21
 

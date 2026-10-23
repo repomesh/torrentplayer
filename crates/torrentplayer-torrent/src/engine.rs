@@ -124,24 +124,23 @@ const SESSION_STOPPED: &str = "The network settings changed while this torrent w
      Try again.";
 
 /// Why a magnet link cannot be resolved in a protected mode: no peers were found through the
-/// DHT and UDP trackers of the mode, and the link lists no HTTP tracker. The hint names what
-/// usually causes it in each mode.
+/// DHT and trackers of the mode (see `protected_magnet_peers`). The hint names what usually
+/// causes it in each mode.
 fn no_magnet_peers(mode: ModeKind) -> &'static str {
     match mode {
         ModeKind::WireGuard => {
-            "No peers were found for this magnet link through the WireGuard tunnel, and it lists \
-             no HTTP tracker. Check that the tunnel is connected (its server completed a recent \
-             handshake); the DHT and UDP trackers run inside it. Or try a .torrent file or a \
-             link with an HTTP tracker."
+            "No peers were found for this magnet link through the WireGuard tunnel. Check that \
+             the tunnel is connected (its server completed a recent handshake); the DHT and \
+             trackers run inside it. Or try a .torrent file."
         }
         ModeKind::Socks5 => {
-            "No peers were found for this magnet link through the SOCKS5 proxy, and it lists no \
-             HTTP tracker. The proxy may not support UDP (UDP ASSOCIATE), which the DHT and UDP \
-             trackers need; try a .torrent file or a link with an HTTP tracker."
+            "No peers were found for this magnet link through the SOCKS5 proxy. The proxy may \
+             not support UDP (UDP ASSOCIATE), which the DHT and UDP trackers need; try a \
+             .torrent file or a link with an HTTP tracker."
         }
         ModeKind::Direct => {
-            "No peers or HTTP trackers were found for this magnet link; try a .torrent file or a \
-             link with an HTTP tracker."
+            "No peers were found for this magnet link; try a .torrent file or a link with an \
+             HTTP tracker."
         }
     }
 }
@@ -378,7 +377,8 @@ impl Engine {
                 persistence,
                 ..DhtSessionConfig::default()
             }),
-            disable_trackers: !config.enable_trackers,
+            // A protected session never contacts trackers itself (see `session_magnet`).
+            disable_trackers: !config.enable_trackers || protected,
             disable_local_service_discovery: !config.enable_local_discovery || protected,
             listen: config
                 .listen_addr
@@ -420,9 +420,9 @@ impl Engine {
         self.inner.protected
     }
 
-    /// What librqbit is given for `source`. In a protected session, magnet links lose their UDP
-    /// trackers (and every tracker if trackers are off), and `.torrent` files are refused:
-    /// their tracker lists cannot be filtered, and librqbit would contact UDP trackers directly.
+    /// What librqbit is given for `source`. In a protected session, magnet links lose every
+    /// tracker (see `Engine::session_magnet`), and `.torrent` files are refused: their tracker
+    /// lists cannot be filtered, and librqbit would contact their trackers itself.
     async fn session_source(
         &self,
         source: TorrentSource,
@@ -447,22 +447,23 @@ impl Engine {
         if !self.inner.protected {
             return Ok(link);
         }
-        let trackers_allowed = network.policy().trackers_allowed;
-        let mut url = url::Url::parse(&link).map_err(|_| SourceError::Invalid)?;
-        let pairs: Vec<(String, String)> = url
-            .query_pairs()
-            .filter(|(key, value)| {
-                key != "tr"
-                    || (trackers_allowed
-                        && (value.starts_with("http://") || value.starts_with("https://")))
-            })
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
-        if !has_peers && !pairs.iter().any(|(key, _)| key == "tr") {
+        // No trackers at all: librqbit reaches HTTP trackers through a `socks5://` proxy URL
+        // (its peer connector accepts no other), so its HTTP client would resolve their host
+        // names with the system resolver, outside the tunnel or proxy and the kill switch, and
+        // it would keep announcing whatever the tracker setting later says. The caller
+        // announces to them through the network instead and passes the peers they name (see
+        // `protected_magnet_peers`).
+        if !has_peers {
             return Err(EngineError::Unsupported(no_magnet_peers(
                 network.status().mode,
             )));
         }
+        let mut url = url::Url::parse(&link).map_err(|_| SourceError::Invalid)?;
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "tr")
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
         url.query_pairs_mut().clear().extend_pairs(pairs);
         Ok(url.into())
     }
@@ -568,14 +569,25 @@ impl Engine {
         source: TorrentSource,
         peers: Vec<SocketAddr>,
     ) -> Result<Option<Resolved>, EngineError> {
+        // A protected session was given the magnet link without its trackers; the torrent
+        // still lists them for the engine it is handed to, which contacts them safely.
+        let trackers = match &source {
+            TorrentSource::Magnet(link) if self.inner.protected => magnet_trackers(link),
+            _ => Vec::new(),
+        };
         self.operation(async {
             let first = self.session_source(source, !peers.is_empty()).await?;
             let AddTorrentResponse::ListOnly(listed) = self.list_only(first, peers).await? else {
                 return Ok(None);
             };
             validate_metadata(&listed.info)?;
+            let torrent_bytes = if trackers.is_empty() {
+                listed.torrent_bytes
+            } else {
+                with_trackers(&listed.torrent_bytes, &trackers)?
+            };
             Ok(Some(Resolved {
-                torrent_bytes: listed.torrent_bytes,
+                torrent_bytes,
                 seen_peers: listed.seen_peers,
             }))
         })
@@ -884,6 +896,40 @@ impl Engine {
     }
 }
 
+/// The `http`, `https`, and `udp` trackers (`tr`) of a magnet link, without duplicates.
+fn magnet_trackers(link: &str) -> Vec<url::Url> {
+    let Ok(url) = url::Url::parse(link) else {
+        return Vec::new();
+    };
+    let mut trackers: Vec<url::Url> = Vec::new();
+    for (_, value) in url.query_pairs().filter(|(key, _)| key == "tr") {
+        if let Ok(tracker) = url::Url::parse(&value)
+            && matches!(tracker.scheme(), "http" | "https" | "udp")
+            && !trackers.contains(&tracker)
+        {
+            trackers.push(tracker);
+        }
+    }
+    trackers
+}
+
+/// `torrent` (a `.torrent` file) with `trackers` as its tracker list instead of its own. The
+/// info dictionary, and so the info hash, is kept byte for byte.
+fn with_trackers(torrent: &[u8], trackers: &[url::Url]) -> Result<bytes::Bytes, EngineError> {
+    let parsed = librqbit::torrent_from_bytes(torrent)
+        .map_err(|e| EngineError::InvalidTorrent(format!("{e:#}")))?;
+    let mut out = b"d13:announce-listl".to_vec();
+    for tracker in trackers {
+        // One tier per tracker, all tried, as for a magnet link's.
+        let tracker = tracker.as_str();
+        out.extend_from_slice(format!("l{}:{tracker}e", tracker.len()).as_bytes());
+    }
+    out.extend_from_slice(b"e4:info");
+    out.extend_from_slice(parsed.info.raw_bytes.as_ref());
+    out.push(b'e');
+    Ok(out.into())
+}
+
 /// A `.torrent` file whose lengths librqbit can be given (see
 /// [`torrentplayer_swarm::check_lengths`]): its own checks panic on some invalid ones.
 fn checked_torrent(bytes: bytes::Bytes) -> Result<bytes::Bytes, EngineError> {
@@ -958,5 +1004,31 @@ mod tests {
         assert!(socks5.contains("UDP ASSOCIATE"));
         assert!(!socks5.contains("WireGuard"));
         assert!(!PROTECTED_TORRENT_FILE.contains("  "), "no stray spaces");
+    }
+
+    #[test]
+    fn handed_over_metadata_lists_the_magnet_links_trackers() {
+        let link = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c\
+                    &tr=http%3A%2F%2Ftracker.example%2Fannounce&tr=udp%3A%2F%2Fu.example%3A1337\
+                    &tr=wss%3A%2F%2Fw.example&tr=http%3A%2F%2Ftracker.example%2Fannounce";
+        let trackers = magnet_trackers(link);
+        let names: Vec<&str> = trackers.iter().map(url::Url::as_str).collect();
+        assert_eq!(
+            names,
+            ["http://tracker.example/announce", "udp://u.example:1337"]
+        );
+
+        let mut torrent =
+            b"d8:announce14:http://old/ann4:infod6:lengthi4e4:name5:a.mp412:piece lengthi16384e\
+              6:pieces20:"
+                .to_vec();
+        torrent.extend_from_slice(&[7u8; 20]);
+        torrent.extend_from_slice(b"ee");
+        let before = torrentplayer_swarm::Metainfo::from_bytes(&torrent).unwrap();
+        let after =
+            torrentplayer_swarm::Metainfo::from_bytes(&with_trackers(&torrent, &trackers).unwrap())
+                .unwrap();
+        assert_eq!(after.info_hash, before.info_hash);
+        assert_eq!(after.trackers, trackers);
     }
 }

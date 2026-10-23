@@ -30,6 +30,7 @@ mod reader;
 pub mod sched;
 mod store;
 
+pub mod http_tracker;
 mod torrent;
 pub mod udp_tracker;
 mod webseed;

@@ -1916,18 +1916,25 @@ fn remove_stale_preloads(dir: &Path) {
     }
 }
 
-/// Peers for a magnet link from scoped DHT and UDP trackers through a protected network mode
-/// (WireGuard or a SOCKS5 relay). librqbit's unbound UDP stays disabled there, so TorrentPlayer
-/// finds peers with its own scoped sockets and hands them to whichever engine fetches the
-/// metadata. Empty in direct mode (librqbit uses its own DHT and trackers), while the mode
-/// blocks traffic, or with `public_discovery` off.
+/// Peers for a magnet link from scoped DHT, UDP trackers, and HTTP trackers through a protected
+/// network mode (WireGuard or a SOCKS5 relay). librqbit's unbound UDP stays disabled there,
+/// and it contacts no trackers (its HTTP client would resolve their names with the system
+/// resolver), so TorrentPlayer finds peers itself, through the mode, and hands them to
+/// whichever engine fetches the metadata. HTTP trackers are announced to through the network's
+/// bridge, which passes their host names unresolved to the tunnel or proxy. Returns the first
+/// source's peers, or waits for the others while one finds none. Empty in direct mode
+/// (librqbit uses its own DHT and trackers), while the mode blocks traffic, or with
+/// `public_discovery` off.
 pub async fn protected_magnet_peers(
     network: &torrentplayer_net::Network,
     link: &str,
     public_discovery: bool,
 ) -> Vec<SocketAddr> {
+    use futures_util::StreamExt as _;
+    use futures_util::stream::FuturesUnordered;
+
     let policy = network.policy();
-    if policy.udp_allowed || !policy.bound_udp_allowed || !policy.traffic_allowed {
+    if policy.udp_allowed || !policy.traffic_allowed || !public_discovery {
         return Vec::new();
     }
     let Some(info_hash) = magnet_info_hash(link).and_then(|h| hex_hash(&h)) else {
@@ -1941,34 +1948,35 @@ pub async fn protected_magnet_peers(
         .filter(|(key, _)| key == "tr")
         .filter_map(|(_, value)| url::Url::parse(&value).ok())
         .collect();
-    let tracker_peers = async {
-        if !public_discovery || !policy.trackers_allowed {
-            return Vec::new();
+    let deadline = Duration::from_secs(12);
+    let mut sources: FuturesUnordered<BoxFuture<'_, Vec<SocketAddr>>> = FuturesUnordered::new();
+    if policy.trackers_allowed {
+        sources.push(Box::pin(torrentplayer_swarm::http_tracker::announce_all(
+            network, &trackers, info_hash, deadline,
+        )));
+        if policy.bound_udp_allowed {
+            sources.push(Box::pin(torrentplayer_swarm::udp_tracker::announce_all(
+                Some(network),
+                &trackers,
+                info_hash,
+                deadline,
+            )));
         }
-        torrentplayer_swarm::udp_tracker::announce_all(
-            Some(network),
-            &trackers,
-            info_hash,
-            Duration::from_secs(12),
-        )
-        .await
-    };
-    let dht_peers = async {
-        if !public_discovery || !policy.dht_allowed {
-            return Vec::new();
-        }
-        torrentplayer_swarm::dht_bootstrap_peers(
+    }
+    if policy.dht_allowed && policy.bound_udp_allowed {
+        sources.push(Box::pin(torrentplayer_swarm::dht_bootstrap_peers(
             network.clone(),
             info_hash,
-            Duration::from_secs(12),
-        )
-        .await
-    };
-    tokio::pin!(tracker_peers, dht_peers);
-    let peers = tokio::select! {
-        peers = &mut tracker_peers => if peers.is_empty() { dht_peers.await } else { peers },
-        peers = &mut dht_peers => if peers.is_empty() { tracker_peers.await } else { peers },
-    };
+            deadline,
+        )));
+    }
+    let mut peers = Vec::new();
+    while let Some(found) = sources.next().await {
+        if !found.is_empty() {
+            peers = found;
+            break;
+        }
+    }
     info!(
         peers = peers.len(),
         "Peer discovery bootstrap completed through the protected network"
