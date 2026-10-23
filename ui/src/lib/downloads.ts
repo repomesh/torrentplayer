@@ -74,7 +74,8 @@ export function describeDownload(d: ItemDownload): string | null {
       break;
     }
     case 'complete':
-      parts.push('Downloaded');
+      // Finished torrents keep sharing until the user pauses or removes them.
+      parts.push(d.uploading ? 'Downloaded · seeding' : 'Downloaded');
       break;
     case 'connecting':
       parts.push(
@@ -90,7 +91,7 @@ export function describeDownload(d: ItemDownload): string | null {
     case 'queued':
       parts.push(
         d.waitReason === 'playback'
-          ? 'Paused while the video playing catches up'
+          ? 'Waiting for playback: the video playing needs the bandwidth'
           : d.waitReason === 'limit'
             ? 'Waiting: your limit of downloads at once'
             : 'Waiting',
@@ -106,6 +107,7 @@ export function describeDownload(d: ItemDownload): string | null {
       }
       break;
     case 'paused':
+      // Only the user pauses; nothing resumes it but the user.
       parts.push('Paused');
       if (pct !== null && d.downloaded > 0) {
         parts.push(pct);
@@ -151,11 +153,12 @@ export function isMoving(d: ItemDownload): boolean {
   return MOVING.has(d.state);
 }
 
-/** Whether the pause button applies: the item can still download and is not being watched. */
+/**
+ * Whether the pause button applies: anything but the video being watched. Pausing stops both
+ * downloading and sharing, so it applies to finished and skipped items too.
+ */
 export function canPause(d: ItemDownload | undefined): boolean {
-  return (
-    d === undefined || (d.state !== 'complete' && d.state !== 'watching' && d.state !== 'skipped')
-  );
+  return d?.state !== 'watching';
 }
 
 /**
@@ -196,7 +199,7 @@ export function describeLink(link: LinkUse): string | null {
   if (link.playbackNeedBps !== null) {
     parts.push(
       link.pressure === 'starving'
-        ? 'queue paused for playback'
+        ? 'queue waiting for playback'
         : link.pressure === 'guarded'
           ? 'playback first'
           : 'playback has enough',

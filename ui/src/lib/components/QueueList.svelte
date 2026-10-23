@@ -10,7 +10,10 @@
    * up, Enter plays, Space ticks, Delete removes, Alt+↑/↓ moves a torrent.
    *
    * Queued videos download in the background: each row shows its speed, peers, progress, and
-   * time left, and can be paused (a torrent row pauses all of its queued videos).
+   * time left, and can be paused (a torrent row pauses all of its queued videos). Nothing is
+   * paused, skipped, or removed automatically: a pause stops downloading and uploading until
+   * the user resumes it. Only the video playing can hold downloads back ("Waiting for
+   * playback"), which never changes the user's pauses.
    */
   import { tick } from 'svelte';
   import type { FileSummary } from '../bindings/FileSummary';
@@ -269,27 +272,24 @@
   }
 
   /**
-   * An item's download as shown: pausing or resuming shows at once, before the backend's next
-   * report (about a second later).
+   * An item's download as shown: pausing, skipping, and undoing either show at once, before the
+   * backend's next report (about a second later). The user's pause shows first, as there.
    */
   function withPause(item: QueueItem, d: ItemDownload | undefined): ItemDownload | undefined {
-    // Skipping and including again show at once too.
-    if (d !== undefined && item.skipped && d.state !== 'skipped' && d.state !== 'watching') {
-      return { ...d, state: 'skipped', downloadBps: 0, etaSecs: null };
-    }
-    if (d !== undefined && !item.skipped && d.state === 'skipped') {
-      return { ...d, state: 'queued' };
-    }
-    if (d === undefined || !canPause(d)) {
+    if (d === undefined || d.state === 'watching') {
       return d;
     }
-    if (item.paused && d.state !== 'paused') {
-      return { ...d, state: 'paused', downloadBps: 0, etaSecs: null };
+    if (item.paused) {
+      return d.state === 'paused'
+        ? d
+        : { ...d, state: 'paused', downloadBps: 0, uploadBps: 0, etaSecs: null };
     }
-    if (!item.paused && d.state === 'paused') {
-      return { ...d, state: 'queued' };
+    if (item.skipped) {
+      return d.state === 'skipped' || d.state === 'complete'
+        ? d
+        : { ...d, state: 'skipped', downloadBps: 0, etaSecs: null };
     }
-    return d;
+    return d.state === 'paused' || d.state === 'skipped' ? { ...d, state: 'queued' } : d;
   }
 
   /** Whether every queued video of a torrent is paused. */
@@ -599,10 +599,12 @@
         tabindex="-1"
         disabled={!canPause(download)}
         aria-label={item.paused
-          ? `Resume downloading ${rowTitle(row)}`
-          : `Pause downloading ${rowTitle(row)}`}
+          ? `Resume downloading and uploading ${rowTitle(row)}`
+          : `Pause downloading and uploading ${rowTitle(row)}`}
         aria-pressed={item.paused}
-        title={item.paused ? 'Resume downloading' : 'Pause downloading (playing it still works)'}
+        title={item.paused
+          ? 'Resume downloading and uploading'
+          : 'Pause downloading and uploading until you resume (playing it still works)'}
         onclick={(event: MouseEvent) => {
           event.stopPropagation();
           onTogglePause([item.id], !item.paused);
@@ -736,10 +738,12 @@
                 class="icon"
                 tabindex="-1"
                 aria-label={paused
-                  ? `Resume downloading ${groupName(group)}`
-                  : `Pause downloading ${groupName(group)}`}
+                  ? `Resume downloading and uploading ${groupName(group)}`
+                  : `Pause downloading and uploading ${groupName(group)}`}
                 aria-pressed={paused}
-                title={paused ? 'Resume downloading its videos' : 'Pause downloading its videos'}
+                title={paused
+                  ? 'Resume downloading and uploading its videos'
+                  : 'Pause downloading and uploading its videos until you resume'}
                 onclick={() => {
                   onTogglePause(
                     group.items.map((i) => i.id),

@@ -219,14 +219,14 @@
           <button
             type="button"
             disabled={queue.items.length === 0}
-            title="Background downloading only; playing a video still downloads it"
+            title="Stops downloading and uploading in the background until you resume; playing a video still works"
             onclick={() => {
               onTogglePause(
                 queue.items.map((i) => i.id),
                 anyRunning,
               );
               closeMenu();
-            }}>{anyRunning ? 'Pause all downloads' : 'Resume all downloads'}</button
+            }}>{anyRunning ? 'Pause all (download and upload)' : 'Resume all'}</button
           >
         {/if}
         <button

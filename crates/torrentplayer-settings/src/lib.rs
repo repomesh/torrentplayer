@@ -24,8 +24,8 @@ pub use model::{
     EngineSetting, FieldError, HardwareDecoding, IncomingPeersSettings, Ipv6Policy,
     LISTEN_PORT_MIN, LogLevel, MAX_DOWNLOADS, MAX_RATE_KIB, MAX_TEXT, NetworkHold, NetworkMode,
     NetworkSettings, PEER_LIMIT_RANGE, PlaybackSettings, RESULTS_RANGE, SCHEMA_VERSION,
-    SEED_RATIO_RANGE, SEED_TIME_RANGE_MINUTES, SPEED_RANGE, SearchSettings, SearchSources,
-    Settings, Socks5Settings, StorageSettings, WireGuardSettings, is_network_path,
+    SPEED_RANGE, SearchSettings, SearchSources, Settings, Socks5Settings, StorageSettings,
+    WireGuardSettings, is_network_path,
 };
 pub use patch::{MAX_PATCH_BYTES, PatchError, apply_patch};
 pub use secrets::{

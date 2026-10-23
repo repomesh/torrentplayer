@@ -21,10 +21,6 @@ pub const MAX_RATE_KIB: u32 = 1024 * 1024;
 pub const PEER_LIMIT_RANGE: (u32, u32) = (5, 500);
 /// Most queued videos downloading at once that can be chosen; 0 means no limit.
 pub const MAX_DOWNLOADS: u32 = 100;
-/// Seed ratio target; 0 means "keep seeding while TorrentPlayer runs".
-pub const SEED_RATIO_RANGE: (f64, f64) = (0.0, 100.0);
-/// Time to keep seeding after playback, in minutes; 0 means no limit, otherwise up to one year.
-pub const SEED_TIME_RANGE_MINUTES: (u32, u32) = (0, 525_600);
 /// Cache size limit in GB.
 pub const CACHE_LIMIT_RANGE_GB: (u32, u32) = (1, 100_000);
 /// Automatic clean-up age in days.
@@ -138,7 +134,7 @@ pub struct StorageSettings {
     pub cleanup_after_days: Option<u32>,
 }
 
-/// Bandwidth limits and seeding behavior.
+/// Bandwidth limits and background downloads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", default)]
 #[ts(export)]
@@ -147,12 +143,6 @@ pub struct BandwidthSettings {
     pub download_limit_kib: u32,
     /// Upload limit in KiB/s; 0 means unlimited.
     pub upload_limit_kib: u32,
-    /// Keep seeding lectures after watching them.
-    pub seed_after_watching: bool,
-    /// Stop seeding a torrent at this upload/download ratio; 0 keeps seeding while TorrentPlayer runs.
-    pub seed_ratio_target: f64,
-    /// Stop seeding this many minutes after watching; 0 has no time limit.
-    pub seed_time_limit_minutes: u32,
     /// Maximum connected peers per torrent.
     pub peer_limit: u32,
     /// Most queued videos downloading in the background at once; 0 means no limit.
@@ -164,9 +154,6 @@ impl Default for BandwidthSettings {
         Self {
             download_limit_kib: 0,
             upload_limit_kib: 0,
-            seed_after_watching: true,
-            seed_ratio_target: 2.0,
-            seed_time_limit_minutes: 0,
             peer_limit: 40,
             max_downloads: 0,
         }
@@ -548,14 +535,6 @@ impl Settings {
                     self.bandwidth.upload_limit_kib = 0;
                     true
                 }
-                "bandwidth.seedRatioTarget" => {
-                    self.bandwidth.seed_ratio_target = defaults.bandwidth.seed_ratio_target;
-                    true
-                }
-                "bandwidth.seedTimeLimitMinutes" => {
-                    self.bandwidth.seed_time_limit_minutes = 0;
-                    true
-                }
                 "bandwidth.peerLimit" => {
                     self.bandwidth.peer_limit = defaults.bandwidth.peer_limit;
                     true
@@ -692,20 +671,6 @@ impl BandwidthSettings {
             if value > MAX_RATE_KIB {
                 errors.push(FieldError::new(field, "The largest limit is 1 GiB/s."));
             }
-        }
-        if !in_range(self.seed_ratio_target, SEED_RATIO_RANGE) {
-            errors.push(FieldError::new(
-                "bandwidth.seedRatioTarget",
-                "Choose a ratio between 0 and 100 (0 keeps seeding).",
-            ));
-        }
-        if !(SEED_TIME_RANGE_MINUTES.0..=SEED_TIME_RANGE_MINUTES.1)
-            .contains(&self.seed_time_limit_minutes)
-        {
-            errors.push(FieldError::new(
-                "bandwidth.seedTimeLimitMinutes",
-                "Choose up to 525600 minutes (one year), or 0 for no time limit.",
-            ));
         }
         if !(PEER_LIMIT_RANGE.0..=PEER_LIMIT_RANGE.1).contains(&self.peer_limit) {
             errors.push(FieldError::new(
@@ -938,8 +903,6 @@ mod tests {
         let mut s = Settings::default();
         s.playback.default_speed = 9.0;
         s.bandwidth.peer_limit = 1;
-        s.bandwidth.seed_ratio_target = f64::NAN;
-        s.bandwidth.seed_time_limit_minutes = 525_601;
         s.search.results_per_search = 5;
         s.network.socks5.port = 0;
         let fields: Vec<String> = s
@@ -952,8 +915,6 @@ mod tests {
             fields,
             [
                 "playback.defaultSpeed",
-                "bandwidth.seedRatioTarget",
-                "bandwidth.seedTimeLimitMinutes",
                 "bandwidth.peerLimit",
                 "search.resultsPerSearch",
                 "network.socks5.port"
@@ -1128,7 +1089,6 @@ mod tests {
         let json = serde_json::to_value(Settings::default()).unwrap();
         assert_eq!(json["network"]["mode"], "direct");
         assert_eq!(json["bandwidth"]["peerLimit"], 40);
-        assert_eq!(json["bandwidth"]["seedTimeLimitMinutes"], 0);
         assert_eq!(json["bandwidth"]["maxDownloads"], 0, "no limit by default");
         assert_eq!(json["advanced"]["logLevel"], "info");
         assert_eq!(

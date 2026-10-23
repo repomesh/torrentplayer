@@ -256,14 +256,9 @@ pub fn migrate(mut doc: Map<String, Value>) -> Map<String, Value> {
                 network.remove("killSwitch");
             }
         }
-        if version < 3
-            && let Some(Value::Object(bandwidth)) = doc.get_mut("bandwidth")
-        {
-            // Older files predate the optional time target: keep their ratio-only behavior.
-            bandwidth
-                .entry("seedTimeLimitMinutes")
-                .or_insert_with(|| Value::from(0));
-        }
+        // Version 3 added `bandwidth.seedTimeLimitMinutes`; it and the other seeding targets
+        // were removed in 0.3.1 without a step: serde ignores fields it does not know, so they
+        // are dropped on the next save.
         if version < 4
             && let Some(Value::Object(network)) = doc.get_mut("network")
         {
@@ -655,19 +650,31 @@ mod tests {
     }
 
     #[test]
-    fn version_2_files_keep_ratio_only_seeding() {
+    fn removed_seeding_and_autoplay_settings_load_and_are_dropped() {
         let (_dir, store) = store();
         fs::create_dir_all(store.dir()).unwrap();
         fs::write(
             store.path(),
-            r#"{"version":2,"bandwidth":{"seedAfterWatching":true,"seedRatioTarget":3.5}}"#,
+            r#"{"version":5,"playback":{"autoplayNext":false,"defaultSpeed":1.5},
+               "bandwidth":{"seedAfterWatching":true,"seedRatioTarget":3.5,
+               "seedTimeLimitMinutes":30,"uploadLimitKib":100}}"#,
         )
         .unwrap();
         let loaded = store.load();
-        assert!((loaded.settings.bandwidth.seed_ratio_target - 3.5).abs() < f64::EPSILON);
-        assert_eq!(loaded.settings.bandwidth.seed_time_limit_minutes, 0);
+        assert!((loaded.settings.playback.default_speed - 1.5).abs() < f64::EPSILON);
+        assert_eq!(loaded.settings.bandwidth.upload_limit_kib, 100);
         assert_eq!(loaded.settings.version, SCHEMA_VERSION);
         assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        store.save(&loaded.settings).unwrap();
+        let saved = fs::read_to_string(store.path()).unwrap();
+        for removed in [
+            "autoplayNext",
+            "seedAfterWatching",
+            "seedRatioTarget",
+            "seedTimeLimitMinutes",
+        ] {
+            assert!(!saved.contains(removed), "{removed}");
+        }
     }
 
     #[test]

@@ -206,7 +206,7 @@ export function getSettings(): Promise<SettingsView> {
 
 /** The backend event carrying the new {@link Settings} after every saved change. */
 export const SETTINGS_CHANGED_EVENT = 'settings-changed';
-/** Event (no payload) sent when a torrent starts seeding after its playback ended. */
+/** Event (no payload) sent when a playback ends and its torrent keeps sharing in the background. */
 export const SEEDING_STARTED_EVENT = 'seeding-started';
 
 /**

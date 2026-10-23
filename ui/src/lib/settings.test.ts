@@ -33,8 +33,6 @@ describe('validate', () => {
     expect(validate('bandwidth.peerLimit', 40.5)).not.toBeNull();
     expect(validate('bandwidth.maxDownloads', 0)).toBeNull();
     expect(validate('bandwidth.maxDownloads', 101)).toMatch(/0 for no limit/);
-    expect(validate('bandwidth.seedTimeLimitMinutes', 0)).toBeNull();
-    expect(validate('bandwidth.seedTimeLimitMinutes', 525_601)).toMatch(/one year/);
     expect(validate('advanced.ffmpegDir', null)).toBeNull();
     expect(validate('advanced.ffmpegDir', 'C:\\ffmpeg\\bin')).toBeNull();
     expect(validate('advanced.ffmpegDir', 'ffmpeg')).toMatch(/full path/);
@@ -126,9 +124,7 @@ describe('availability', () => {
     expect(availability('advanced.engine')).toBe('restart');
     expect(availability('storage.downloadDir')).toBe('restart');
     expect(availability('bandwidth.peerLimit')).toBe('restart');
-    expect(availability('bandwidth.seedAfterWatching')).toBe('live');
-    expect(availability('bandwidth.seedRatioTarget')).toBe('live');
-    expect(availability('bandwidth.seedTimeLimitMinutes')).toBe('live');
+    expect(availability('bandwidth.maxDownloads')).toBe('live');
     expect(availability('storage.cacheLimitGb')).toBe('live');
     expect(availability('storage.cleanupAfterDays')).toBe('live');
     expect(availability('search.sources.internetArchive')).toBe('later');

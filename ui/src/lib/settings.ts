@@ -23,8 +23,6 @@ export type SettingsSection =
 export const LIMITS = {
   speed: [0.5, 3],
   rateKib: [0, 1024 * 1024],
-  seedRatio: [0, 100],
-  seedTimeMinutes: [0, 525_600],
   peerLimit: [5, 500],
   maxDownloads: [0, 100],
   cacheLimitGb: [1, 100_000],
@@ -119,15 +117,6 @@ const RULES: Record<string, Check> = {
   ),
   'bandwidth.downloadLimitKib': range(LIMITS.rateKib, 'The largest limit is 1 GiB/s.'),
   'bandwidth.uploadLimitKib': range(LIMITS.rateKib, 'The largest limit is 1 GiB/s.'),
-  'bandwidth.seedRatioTarget': range(
-    LIMITS.seedRatio,
-    'Choose a ratio between 0 and 100 (0 keeps seeding).',
-    false,
-  ),
-  'bandwidth.seedTimeLimitMinutes': range(
-    LIMITS.seedTimeMinutes,
-    'Choose up to 525600 minutes (one year), or 0 for no time limit.',
-  ),
   'bandwidth.peerLimit': range(LIMITS.peerLimit, 'Choose between 5 and 500 peers.'),
   'bandwidth.maxDownloads': range(
     LIMITS.maxDownloads,
@@ -237,7 +226,7 @@ const RESTART = new Set(['storage.downloadDir', 'advanced.engine', 'bandwidth.pe
 
 const LATER = new Set([
   // Player features not built yet (the default speed, resume positions, the debug overlay key,
-  // and the queue's autoplay and ordering apply now).
+  // and the queue's ordering apply now).
   'playback.hardwareDecoding',
   // Search sources and filters not built yet (the adult filter and preloading apply now).
   'search.sources.emberglow',

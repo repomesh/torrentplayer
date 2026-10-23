@@ -57,7 +57,7 @@ export function followVpnHint(onNetwork: (network: NetworkSettings) => void): ()
   );
 }
 
-/** Calls `onStart` when a torrent starts seeding after its playback ended. */
+/** Calls `onStart` when a playback ends and its torrent keeps sharing in the background. */
 export function followSeedingStarted(onStart: () => void): () => void {
   return follow<null>(SEEDING_STARTED_EVENT, () => {
     onStart();

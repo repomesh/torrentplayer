@@ -29,6 +29,7 @@ function d(over: Partial<ItemDownload> = {}): ItemDownload {
     etaSecs: 240,
     startable: true,
     limited: false,
+    uploading: false,
     waitReason: null,
     error: null,
     ...over,
@@ -69,10 +70,14 @@ describe('download status', () => {
       'Waiting: your limit of downloads at once',
     );
     expect(describeDownload(d({ state: 'queued', waitReason: 'playback' }))).toBe(
-      'Paused while the video playing catches up · 37%',
+      'Waiting for playback: the video playing needs the bandwidth · 37%',
     );
     expect(describeDownload(d({ state: 'connecting', peersSeen: 0 }))).toBe('Finding peers… · 37%');
     expect(describeDownload(d({ state: 'complete' }))).toBe('Downloaded');
+    // A finished torrent keeps sharing: it reads as seeding, never as paused.
+    expect(describeDownload(d({ state: 'complete', uploading: true }))).toBe(
+      'Downloaded · seeding',
+    );
     expect(describeDownload(d({ state: 'skipped' }))).toBe('37% downloaded');
     expect(describeDownload(d({ state: 'skipped', downloaded: 0 }))).toBeNull();
     expect(describeDownload(d({ state: 'failed', error: 'No peers.' }))).toBe(
@@ -105,7 +110,9 @@ describe('download status', () => {
     expect(progressOf(d())).toBeCloseTo(0.37);
     expect(progressOf(d({ length: null }))).toBeNull();
     expect(canPause(undefined)).toBe(true);
-    expect(canPause(d({ state: 'complete' }))).toBe(false);
+    // Pausing stops sharing too, so finished and skipped items can be paused.
+    expect(canPause(d({ state: 'complete' }))).toBe(true);
+    expect(canPause(d({ state: 'skipped' }))).toBe(true);
     expect(canPause(d({ state: 'watching' }))).toBe(false);
     expect(canPause(d({ state: 'paused' }))).toBe(true);
   });

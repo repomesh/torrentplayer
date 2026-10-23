@@ -55,6 +55,10 @@ startable: boolean,
  */
 limited: boolean, 
 /**
+ * Its torrent shares with other peers now: running, with upload on.
+ */
+uploading: boolean, 
+/**
  * Why a queued item is not downloading now, if it is waiting.
  */
 waitReason: WaitReason | null, 
