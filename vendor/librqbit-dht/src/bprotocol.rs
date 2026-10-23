@@ -168,6 +168,9 @@ struct RawMessage<BufT, Args = IgnoredAny, Resp = IgnoredAny> {
     version: Option<BufT>,
     #[serde(rename = "ip", skip_serializing_if = "Option::is_none")]
     ip: Option<CompactSocketAddr>,
+    /// Added for TorrentPlayer: BEP 43 read-only flag (`"ro": 1`) on queries.
+    #[serde(rename = "ro", default, skip_serializing_if = "Option::is_none")]
+    read_only: Option<u8>,
 }
 
 pub struct Node<A> {
@@ -405,6 +408,8 @@ impl<BufT: ByteBufT> core::fmt::Debug for MessageKind<BufT> {
     }
 }
 
+// Modified for TorrentPlayer: the DHT sends through `serialize_message_as`; the tests use this.
+#[cfg(test)]
 pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
     writer: &mut W,
     transaction_id: BufT,
@@ -412,7 +417,21 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
     ip: Option<SocketAddr>,
     kind: MessageKind<BufT>,
 ) -> crate::Result<()> {
+    serialize_message_as(writer, transaction_id, version, ip, kind, false)
+}
+
+/// Added for TorrentPlayer. [`serialize_message`], with queries marked read-only (BEP 43) when
+/// `read_only`: nodes that cannot be reached must not end up in other nodes' routing tables.
+pub fn serialize_message_as<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
+    writer: &mut W,
+    transaction_id: BufT,
+    version: Option<BufT>,
+    ip: Option<SocketAddr>,
+    kind: MessageKind<BufT>,
+    read_only: bool,
+) -> crate::Result<()> {
     let ip = ip.map(Compact);
+    let ro = read_only.then_some(1);
     match kind {
         MessageKind::Error(e) => {
             let msg: RawMessage<BufT, (), ()> = RawMessage {
@@ -423,6 +442,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 method_name: None,
                 version,
                 ip,
+                read_only: None,
                 arguments: None,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
@@ -436,6 +456,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 method_name: Some(BufT::from(b"get_peers")),
                 arguments: Some(req),
                 ip,
+                read_only: ro,
                 version,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
@@ -449,6 +470,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 method_name: Some(BufT::from(b"find_node")),
                 arguments: Some(req),
                 ip,
+                read_only: ro,
                 version,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
@@ -462,6 +484,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 method_name: None,
                 arguments: None,
                 ip,
+                read_only: None,
                 version,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
@@ -475,6 +498,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 method_name: Some(BufT::from(b"ping")),
                 arguments: Some(ping),
                 ip,
+                read_only: ro,
                 version,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
@@ -488,6 +512,7 @@ pub fn serialize_message<'a, W: Write, BufT: ByteBufT + From<&'a [u8]>>(
                 method_name: Some(BufT::from(b"announce_peer")),
                 arguments: Some(announce),
                 ip,
+                read_only: ro,
                 version,
             };
             Ok(bencode::bencode_serialize_to_writer(msg, writer)?)
@@ -677,6 +702,47 @@ mod tests {
             write("error-serialized-again", buf2.as_slice());
             panic!("results don't match, dumped to /tmp/error-serialized-*.bin",)
         }
+    }
+
+    /// Added for TorrentPlayer: BEP 43.
+    #[test]
+    fn read_only_queries_carry_ro() {
+        let query = || {
+            bprotocol::MessageKind::GetPeersRequest(bprotocol::GetPeersRequest {
+                id: librqbit_core::hash_id::Id20::new([1; 20]),
+                info_hash: librqbit_core::hash_id::Id20::new([2; 20]),
+                want: None,
+            })
+        };
+        let serialize = |kind, read_only| {
+            let mut buf = Vec::new();
+            bprotocol::serialize_message_as(&mut buf, ByteBuf(b"aa"), None, None, kind, read_only)
+                .unwrap();
+            buf
+        };
+        let read_only = serialize(query(), true);
+        let mut expected = b"d1:ad2:id20:".to_vec();
+        expected.extend([1; 20]);
+        expected.extend(b"9:info_hash20:");
+        expected.extend([2; 20]);
+        expected.extend(b"e1:q9:get_peers2:roi1e1:t2:aa1:y1:qe");
+        assert_eq!(read_only, expected, "keys stay sorted");
+        assert!(bprotocol::deserialize_message::<ByteBuf>(&read_only).is_ok());
+        assert!(
+            !serialize(query(), false)
+                .windows(7)
+                .any(|w| w == b"2:roi1e")
+        );
+        let response = bprotocol::MessageKind::Response(bprotocol::Response {
+            id: librqbit_core::hash_id::Id20::new([1; 20]),
+            ..Default::default()
+        });
+        assert!(
+            !serialize(response, true)
+                .windows(7)
+                .any(|w| w == b"2:roi1e"),
+            "only queries are marked"
+        );
     }
 
     #[test]

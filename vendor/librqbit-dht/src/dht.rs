@@ -4,7 +4,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc,
-        atomic::{AtomicU16, Ordering},
+        atomic::{AtomicBool, AtomicU16, Ordering},
     },
     task::Poll,
     time::{Duration, Instant},
@@ -673,6 +673,10 @@ pub struct DhtState {
     cancellation_token: CancellationToken,
 
     pub(crate) peer_store: PeerStore,
+
+    /// Added for TorrentPlayer: queries say the node is read-only (BEP 43); see
+    /// [`DhtState::set_read_only`].
+    read_only: AtomicBool,
 }
 
 impl DhtState {
@@ -698,6 +702,7 @@ impl DhtState {
             rate_limiter: make_rate_limiter(),
             peer_store,
             cancellation_token,
+            read_only: AtomicBool::new(false),
         }
     }
 
@@ -1291,12 +1296,14 @@ impl DhtWorker {
                     trace!("{}: sending {:?}", addr, &message);
                 }
                 buf.clear();
-                bprotocol::serialize_message(
+                // Modified for TorrentPlayer: our own queries carry the read-only flag.
+                bprotocol::serialize_message_as(
                     &mut buf,
                     message.transaction_id,
                     message.version,
                     message.ip,
                     message.kind,
+                    our_tid.is_some() && self.dht.read_only.load(Ordering::Relaxed),
                 )
                 .unwrap();
                 if let Err(e) = socket.send_to(&buf, addr).await {
@@ -1421,6 +1428,8 @@ pub struct DhtConfig<'a> {
     pub peer_store: Option<PeerStore>,
     pub cancellation_token: Option<CancellationToken>,
     pub bind_device: Option<&'a BindDevice>,
+    /// Added for TorrentPlayer: start read-only (BEP 43); see [`DhtState::set_read_only`].
+    pub read_only: bool,
 }
 
 impl DhtState {
@@ -1467,7 +1476,7 @@ impl DhtState {
             let token = config.cancellation_token.take().unwrap_or_default();
 
             let (in_tx, in_rx) = unbounded_channel();
-            let state = Arc::new(Self::new_internal(
+            let mut state = Self::new_internal(
                 peer_id,
                 in_tx,
                 config.routing_table,
@@ -1475,7 +1484,10 @@ impl DhtState {
                 listen_addr,
                 config.peer_store.unwrap_or_else(|| PeerStore::new(peer_id)),
                 token,
-            ));
+            );
+            // Added for TorrentPlayer.
+            state.read_only = AtomicBool::new(config.read_only);
+            let state = Arc::new(state);
 
             spawn_with_cancel(
                 debug_span!("dht"),
@@ -1515,6 +1527,13 @@ impl DhtState {
         announce_port: Option<u16>,
     ) -> RequestPeersStream {
         RequestPeersStream::new(self.clone(), info_hash, announce_port, true)
+    }
+
+    /// Added for TorrentPlayer. Marks the node read-only (BEP 43) or not, from its next query
+    /// on: other nodes do not add a read-only node to their routing tables, so they do not
+    /// send it queries it cannot receive (no port forwarding) or should not answer.
+    pub fn set_read_only(&self, read_only: bool) {
+        self.read_only.store(read_only, Ordering::Relaxed);
     }
 
     pub fn listen_addr(&self) -> SocketAddr {

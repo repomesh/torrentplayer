@@ -32,4 +32,11 @@ bootstraps, and gives up on an address family whose table stays empty. Announcin
 (`announce_port`) works as in `get_peers`, with the given port (`implied_port` 0).
 `get_peers` is unchanged for librqbit.
 
+Read-only queries (`src/bprotocol.rs`, `serialize_message_as` and the `ro` field of `RawMessage`;
+`src/dht.rs`, `DhtState::set_read_only` and `DhtConfig::read_only`; marked "Added/Modified for
+TorrentPlayer"): a read-only node (BEP 43) adds `"ro": 1` to its queries, so other nodes keep
+it out of their routing tables and do not send it queries it cannot receive. torrentplayer-swarm
+turns it on unless it announces a listening port; librqbit's node is unchanged (off). Replies
+never carry the flag, and incoming queries are answered as before.
+
 Drop this copy once upstream supports scoped transports and tolerates these errors.
