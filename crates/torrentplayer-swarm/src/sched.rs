@@ -339,8 +339,9 @@ struct Peer {
     /// `cancel`. While any are pending its queue is not really empty, so no round-trip sample is
     /// taken (it would measure the drain of the cancelled data, not the round trip).
     cancelled_pending: u32,
-    /// The blocks `(piece, block)` behind the most recent cancels (at most [`MAX_CANCELLED`]):
-    /// their data is still accepted. Data for any other block it was not asked for is dropped.
+    /// The blocks `(piece, block)` behind the most recent cancels and releases (at most
+    /// [`MAX_CANCELLED`]): their data is still accepted. Data for any other block it was not
+    /// asked for is dropped.
     cancelled: VecDeque<(u32, u32)>,
     /// When the peer last delivered a block or had requests cancelled.
     last_activity: Option<Instant>,
@@ -351,6 +352,13 @@ impl Peer {
     fn cancelled(&mut self, piece: u32, block: u32, now: Instant) {
         self.cancelled_pending = self.cancelled_pending.saturating_add(1);
         self.last_activity = Some(now);
+        self.released(piece, block);
+    }
+
+    /// Records that the request for `block` of `piece` was given up without a cancel (the
+    /// peer choked us, which discards requests, or left): its data is still accepted if it
+    /// comes, but none is expected.
+    fn released(&mut self, piece: u32, block: u32) {
         if self.cancelled.len() >= MAX_CANCELLED {
             self.cancelled.pop_front();
         }
@@ -646,11 +654,14 @@ impl Scheduler {
         }
     }
 
+    /// Releases a peer's requests to other peers. Their data is still accepted if it arrives
+    /// anyway, as from a peer that finishes requests it had already started after choking us.
     fn release_outstanding(&mut self, key: PeerKey) {
         let Some(peer) = self.peers.get_mut(&key) else {
             return;
         };
         for o in std::mem::take(&mut peer.outstanding) {
+            peer.released(o.piece, o.block);
             if let Some(progress) = self.progress.get_mut(&o.piece) {
                 release_holder(&mut progress.blocks[o.block as usize], key);
             }
@@ -1200,16 +1211,28 @@ impl Scheduler {
             return 0;
         };
         // A piece that failed its hash check is downloaded again from one peer, so that its
-        // next check says whose data was wrong. Another peer takes over only once that one has
-        // stopped: it left, was choked, holds none of the piece's blocks, or is snubbed.
+        // next check says whose data was wrong. Another peer takes over once that one has
+        // stopped (it left, was choked, holds none of the piece's blocks, or is snubbed), or,
+        // for an urgent piece, once `key` is much faster and that one would deliver a block
+        // late: a peer that keeps sending a little data must not hold up playback. Each block's
+        // sender is still recorded, so smart ban names the right peers after a handover.
         let mut takeover = None;
         if suspect {
             if let Some(owner) = progress.owner.filter(|&o| o != key) {
-                let holds = progress.blocks.iter().any(|b| {
-                    matches!(b, BlockState::Requested(holders) if holders.iter().any(|(k, _)| *k == owner))
-                });
+                let mut holds = false;
+                let mut slow = false;
+                for (i, b) in progress.blocks.iter().enumerate() {
+                    if let BlockState::Requested(holders) = b
+                        && holders.iter().any(|(k, _)| *k == owner)
+                    {
+                        holds = true;
+                        #[allow(clippy::cast_possible_truncation)]
+                        let block = i as u32;
+                        slow |= late(owner, block);
+                    }
+                }
                 let working = peers.get(&owner).is_some_and(|p| !p.choked);
-                if working && holds && !snubbed(owner) {
+                if working && holds && !snubbed(owner) && !slow {
                     return 0;
                 }
                 takeover = Some(owner);
@@ -1282,8 +1305,6 @@ impl Scheduler {
         let Some(peer) = self.peers.get_mut(&key) else {
             return outcome;
         };
-        peer.rate.add(data.len() as u64);
-        self.total_rate.add(data.len() as u64);
         if !begin.is_multiple_of(BLOCK_LEN) || piece >= self.meta.piece_count() {
             return outcome;
         }
@@ -1310,6 +1331,11 @@ impl Scheduler {
             peer.cancelled.remove(at);
             peer.cancelled_pending = peer.cancelled_pending.saturating_sub(1);
         }
+        // Only data the peer was asked for counts towards its rate: flooding us with blocks
+        // nobody asked for must not make a peer look fast, which earns deeper queues and
+        // urgent blocks taken from other peers.
+        peer.rate.add(data.len() as u64);
+        self.total_rate.add(data.len() as u64);
         peer.last_progress = Some(now);
         peer.last_activity = Some(now);
         // A request sent to an empty queue waits behind nothing, so its latency is the round
@@ -1657,6 +1683,17 @@ mod tests {
             if i % 10 == 1 && i < 200 {
                 s.add_peer(key);
                 for block in 0..4 {
+                    // Requested, or it would not count.
+                    s.peers
+                        .get_mut(&key)
+                        .unwrap()
+                        .outstanding
+                        .push(Outstanding {
+                            piece: i,
+                            block,
+                            at: t0,
+                            ahead: 1,
+                        });
                     s.on_block_at(key, i, block * BLOCK_LEN, &[0; BLOCK_LEN as usize], t0);
                     delivered += u64::from(BLOCK_LEN);
                 }
@@ -2688,5 +2725,79 @@ mod tests {
             peer.cancelled.front(),
             Some(&(1000 - u32::try_from(MAX_CANCELLED).unwrap(), 0))
         );
+    }
+
+    #[test]
+    fn a_much_faster_peer_takes_an_urgent_failed_piece_from_a_slow_owner() {
+        let (fast, slow): (PeerKey, PeerKey) = (1, 2);
+        let mut s = sched(1000, small_queues());
+        seed(&mut s, fast);
+        seed(&mut s, slow);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        assert!(s.is_critical());
+        // Piece 0, which the player is waiting for, failed before.
+        s.remember_suspect(0, &[slow; 4], &[[0xAA; 20]; 4]);
+        let t0 = Instant::now();
+        let owned = s.fill(slow, t0);
+        assert!(owned.iter().all(|r| r.piece == 0) && owned.len() == 4);
+
+        // The owner sends correct data just often enough not to count as snubbed, at 16 KiB/s:
+        // four seconds for this 64 KiB piece (minutes for a 4 MiB one).
+        deliver(&mut s, slow, owned[0]);
+        s.peers.get_mut(&slow).unwrap().last_progress = Some(t0 + Duration::from_millis(900));
+        s.peers.get_mut(&slow).unwrap().rate = rate(16.0 * 1024.0);
+        let at = t0 + Duration::from_secs(1);
+
+        // A peer not much faster leaves it alone.
+        s.peers.get_mut(&fast).unwrap().rate = rate(24.0 * 1024.0);
+        let similar = s.fill(fast, at);
+        assert!(!similar.is_empty());
+        assert!(similar.iter().all(|r| r.piece != 0), "{similar:?}");
+
+        // A much faster one takes over the blocks the owner still holds.
+        s.peers.get_mut(&fast).unwrap().rate = rate(4.0 * 1024.0 * 1024.0);
+        let rescue = s.fill(fast, at);
+        let zero: Vec<Request> = rescue.iter().copied().filter(|r| r.piece == 0).collect();
+        assert_eq!(zero, owned[1..], "{rescue:?}");
+        // And keeps the piece: the slow peer gets no more of it.
+        assert!(s.fill(slow, at).iter().all(|r| r.piece != 0));
+        let (piece, _) = send_all(&mut s, fast, &zero, 0).expect("complete");
+        assert_eq!(piece, 0);
+        // Every block's sender is known for smart ban.
+        assert_eq!(s.verifying[&0], vec![slow, fast, fast, fast]);
+    }
+
+    #[test]
+    fn data_for_requests_released_by_a_choke_is_still_accepted() {
+        let mut s = sched(10, small_queues());
+        seed(&mut s, 1);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let asked = s.fill(1, Instant::now());
+        s.on_choke(1);
+        // The peer finishes what it had started anyway.
+        assert!(
+            send_all(&mut s, 1, &asked, 0).is_some(),
+            "piece 0 completes"
+        );
+        assert_eq!(s.stats().wasted_bytes, 0);
+        assert_eq!(s.peers[&1].cancelled_pending, 0, "none was expected");
+    }
+
+    #[test]
+    fn data_nobody_asked_for_does_not_count_towards_the_rate() {
+        let mut s = sched(10, small_queues());
+        seed(&mut s, 1);
+        let t0 = Instant::now();
+        s.tick(t0, false);
+        for piece in 0..10 {
+            let r = block_request(&s.meta, piece, 0);
+            deliver(&mut s, 1, r);
+        }
+        s.tick(t0 + Duration::from_secs(1), false);
+        assert!(!s.peers[&1].rate.measured);
+        assert!(s.stats().download_bps < 1.0);
+        assert_eq!(s.stats().wasted_bytes, 10 * u64::from(BLOCK_LEN));
     }
 }
