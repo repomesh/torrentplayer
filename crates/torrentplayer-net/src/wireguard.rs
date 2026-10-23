@@ -294,6 +294,11 @@ impl Parser {
                     let entry = if let Ok(ip) = item.parse::<IpAddr>() {
                         ip.to_string()
                     } else if is_host_name(item) {
+                        // Kept for the summary; the tunnel uses only the server addresses.
+                        self.warnings.push(format!(
+                            "line {n}: DNS search domain {item} was ignored; TorrentPlayer looks \
+                             up full host names only"
+                        ));
                         item.to_ascii_lowercase()
                     } else {
                         return Err(line_error(n, "DNS entries must be IP addresses or domains"));
@@ -375,6 +380,12 @@ impl Parser {
                     })?;
                     (secs != 0).then_some(secs)
                 };
+                if peer.persistent_keepalive.is_none() {
+                    self.warnings.push(format!(
+                        "line {n}: PersistentKeepalive off was ignored; TorrentPlayer keeps the \
+                         tunnel open with a keepalive every 25 seconds"
+                    ));
+                }
             }
             _ => self
                 .warnings
@@ -569,8 +580,12 @@ PersistentKeepalive = 25
         assert_eq!(peer.endpoint, "vpn.example.com:51820");
         assert_eq!(peer.allowed_ips, ["0.0.0.0/0", "::/0"]);
         assert_eq!(peer.persistent_keepalive, Some(25));
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("PostUp"), "{warnings:?}");
+        assert_eq!(warnings.len(), 2);
+        assert!(
+            warnings[0].contains("search domain corp.example"),
+            "{warnings:?}"
+        );
+        assert!(warnings[1].contains("PostUp"), "{warnings:?}");
     }
 
     #[test]
@@ -592,7 +607,9 @@ PersistentKeepalive = 25
             "[interface]\nprivatekey={PRIVATE}\naddress=10.0.0.2\n[PEER]\npublickey={PUBLIC}\n\
              allowedips=10.0.0.0/8\nendpoint=[2001:db8::1]:51820\npersistentkeepalive=off\n"
         );
-        let (config, _) = WireGuardConfig::parse(&text).unwrap();
+        let (config, warnings) = WireGuardConfig::parse(&text).unwrap();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("PersistentKeepalive off was ignored"));
         assert_eq!(config.interface.addresses, ["10.0.0.2/32"]);
         assert_eq!(config.peers[0].endpoint, "[2001:db8::1]:51820");
         assert_eq!(config.peers[0].persistent_keepalive, None);

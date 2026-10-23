@@ -73,6 +73,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   next address, and the name is resolved again whenever the tunnel is restarted (after 6 minutes
   without a session or an answer), so a server that moved is found again. Before, only the first
   address was used, and an IPv6 address listed first never connected on an IPv4-only network.
+- WireGuard configurations whose DNS line includes a search domain (for example `DNS = 10.64.0.1,
+  corp.example`) can be imported and connect; the search domain is ignored, and the import says so.
+  The import also says when `ListenPort` is ignored (TorrentPlayer uses a random local port) and
+  when `PersistentKeepalive = off` is (the tunnel keeps a 25-second keepalive).
 
 ## [0.3.0] - 2026-10-21
 

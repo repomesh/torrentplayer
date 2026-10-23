@@ -145,14 +145,6 @@ pub(crate) fn validate(config: &WireGuardConfig) -> Result<(), NetError> {
     }
     if config
         .interface
-        .dns
-        .iter()
-        .any(|ip| ip.parse::<IpAddr>().is_err())
-    {
-        return Err(invalid("WireGuard DNS servers must be IP addresses"));
-    }
-    if config
-        .interface
         .mtu
         .is_some_and(|mtu| !(576..=9000).contains(&mtu))
     {
@@ -214,6 +206,10 @@ impl Tunnel {
                                 .map_err(|_| invalid("invalid WireGuard AllowedIPs"))
                         })
                         .collect::<Result<_, _>>()?,
+                    // Always on, 25 s unless set: without it the NAT mapping that lets the server
+                    // reach this tunnel (forwarded ports, the server's own traffic) lapses
+                    // while the tunnel is idle, and idle probes can be minutes apart. "Off" is
+                    // reported as ignored when the configuration is imported.
                     persistent_keepalive: Some(
                         peer.persistent_keepalive.filter(|n| *n > 0).unwrap_or(25),
                     ),
@@ -221,15 +217,14 @@ impl Tunnel {
             },
             interface_options(),
         )?;
+        // Search domains (the `DNS` entries that are names) are ignored: host names are
+        // always looked up in full.
         let dns: Vec<IpAddr> = config
             .interface
             .dns
             .iter()
-            .map(|ip| {
-                ip.parse()
-                    .map_err(|_| invalid("invalid WireGuard DNS server"))
-            })
-            .collect::<Result<_, _>>()?;
+            .filter_map(|entry| entry.parse().ok())
+            .collect();
         let allowed = peer
             .allowed_ips
             .iter()
@@ -2035,6 +2030,19 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dns_search_domains_are_ignored() {
+        // A provider configuration with a search domain was accepted on import but refused
+        // when the tunnel started ("WireGuard DNS servers must be IP addresses").
+        let (server, mut config) = pair();
+        config.interface.dns = vec!["10.44.0.1".into(), "corp.example".into()];
+        validate(&config).unwrap();
+        let tunnel = Tunnel::start(&config, None).await.unwrap();
+        assert_eq!(tunnel.0.dns, ["10.44.0.1".parse::<IpAddr>().unwrap()]);
+        tunnel.close();
+        server.close();
     }
 
     #[tokio::test]

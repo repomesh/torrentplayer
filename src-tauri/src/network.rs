@@ -362,6 +362,16 @@ pub(crate) async fn recheck_network(
     Ok(state.network.status())
 }
 
+/// What the app adds to the parser's warnings: the tunnel always uses a random local port.
+fn summary(config: &WireGuardConfig, mut warnings: Vec<String>) -> WireGuardSummary {
+    if let Some(port) = config.interface.listen_port {
+        warnings.push(format!(
+            "ListenPort {port} was ignored; TorrentPlayer uses a random local port"
+        ));
+    }
+    config.summary(warnings)
+}
+
 /// Parses and checks the text of a WireGuard configuration file, returning what it contains
 /// without its keys. Nothing is saved: the settings import stores the parts it needs.
 #[tauri::command]
@@ -374,7 +384,7 @@ pub(crate) fn validate_wireguard_config(mut text: String) -> Result<WireGuardSum
             NetworkMode::WireGuard(config.clone())
                 .validate()
                 .map_err(IpcError::from)?;
-            Ok(config.summary(warnings))
+            Ok(summary(&config, warnings))
         }
         Err(error) => Err(IpcError::invalid(format!(
             "This WireGuard configuration is invalid: {error}."
@@ -440,7 +450,7 @@ fn parse_import(text: &str, name: Option<String>) -> Result<ParsedImport, IpcErr
         settings,
         private_key,
         preshared_key,
-        summary: config.summary(warnings),
+        summary: summary(&config, warnings),
     })
 }
 
@@ -692,6 +702,28 @@ mod tests {
         let json = serde_json::to_string(&summary).unwrap();
         assert!(!json.contains(private));
         assert!(json.contains("vpn.example.com:51820"));
+    }
+
+    #[test]
+    fn provider_quirks_import_with_warnings() {
+        // A DNS search domain made the import fail; ListenPort was listed but never used.
+        let text = "[Interface]\nPrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=\n\
+             Address = 10.0.0.2/32\nDNS = 10.0.0.1, corp.example\nListenPort = 51820\n[Peer]\n\
+             PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\n\
+             AllowedIPs = 0.0.0.0/0\nEndpoint = vpn.example.com:51820\n";
+        let summary = validate_wireguard_config(text.to_owned()).unwrap();
+        let warnings = summary.warnings.join("\n");
+        assert!(
+            warnings.contains("search domain corp.example"),
+            "{warnings}"
+        );
+        assert!(
+            warnings.contains("ListenPort 51820 was ignored"),
+            "{warnings}"
+        );
+        let parsed = parse_import(text, None).unwrap();
+        assert_eq!(parsed.settings.dns, ["10.0.0.1", "corp.example"]);
+        assert_eq!(parsed.summary.warnings, summary.warnings);
     }
 
     #[test]
