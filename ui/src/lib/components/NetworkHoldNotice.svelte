@@ -3,7 +3,7 @@
   /*
    * The notice shown while traffic is held (see `src/lib/networkHold.ts`): why, whether traffic
    * is paused, and a button that dismisses it for good. `onOpen`, if given, adds a button to
-   * Settings → Network; `onClose` one that only hides it for now.
+   * Settings → Network & VPN; `onClose` one that only hides it for now.
    */
   import type { NetworkHold } from '../bindings/NetworkHold';
   import { holdNotice } from '../networkHold';
@@ -15,7 +15,7 @@
     held: boolean;
     /** Dismisses the notice for good. */
     onDismiss: () => void;
-    /** Opens Settings → Network. */
+    /** Opens Settings → Network & VPN. */
     onOpen?: (() => void) | undefined;
     /** Hides the notice until it is shown again. */
     onClose?: () => void;

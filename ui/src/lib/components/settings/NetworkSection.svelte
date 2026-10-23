@@ -227,7 +227,7 @@
 </script>
 
 <section class="card" aria-labelledby="network-title">
-  <h3 id="network-title">VPN and network</h3>
+  <h3 id="network-title">Network &amp; VPN</h3>
 
   {#if removedNotice && n.hold}
     <div class="vpn-hint">

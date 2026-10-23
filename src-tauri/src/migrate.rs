@@ -44,6 +44,38 @@ pub(crate) fn from_old_identifier(folders: &[&Path]) -> usize {
     moved
 }
 
+/// Copies `settings.json` into `config` when an old-identifier folder still has it and `config`
+/// does not: [`from_old_identifier`] could not move it, for example because an old copy of the
+/// app still had it open. Starting from defaults instead would connect directly, even for a
+/// WireGuard or SOCKS5 user. The old file stays where it is.
+///
+/// # Errors
+///
+/// Returns the copy's error when a file was left behind and could not be copied either; the
+/// caller then holds traffic.
+pub(crate) fn settings_left_behind(config: &Path) -> std::io::Result<()> {
+    let target = config.join(torrentplayer_settings::FILE_NAME);
+    if target.exists() {
+        return Ok(());
+    }
+    for name in OLD_IDENTIFIERS {
+        let old = config
+            .with_file_name(name)
+            .join(torrentplayer_settings::FILE_NAME);
+        if old.is_file() {
+            fs::create_dir_all(config)?;
+            if let Err(error) = fs::copy(&old, &target) {
+                // A partial copy would load as a damaged file; the next start tries again.
+                let _ = fs::remove_file(&target);
+                return Err(error);
+            }
+            tracing::info!("copied the settings left in the old folder");
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
 /// Moves `old` to `new` as described in the module documentation. Returns how many entries
 /// moved (a whole folder counts as one).
 pub(crate) fn migrate(old: &Path, new: &Path) -> usize {
@@ -144,6 +176,37 @@ mod tests {
                 Some(local.join("downloads").to_string_lossy().to_lowercase())
             );
         }
+    }
+
+    #[test]
+    fn settings_left_in_the_old_folder_are_copied_not_lost() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("io.torrentplayer.desktop");
+        let old = root.path().join(OLD_IDENTIFIERS[0]);
+        fs::create_dir_all(&old).unwrap();
+        // Nothing left behind: no file appears.
+        settings_left_behind(&config).unwrap();
+        assert!(!config.join("settings.json").exists());
+
+        fs::write(
+            old.join("settings.json"),
+            r#"{"network":{"mode":"socks5"}}"#,
+        )
+        .unwrap();
+        settings_left_behind(&config).unwrap();
+        assert_eq!(
+            fs::read_to_string(config.join("settings.json")).unwrap(),
+            r#"{"network":{"mode":"socks5"}}"#
+        );
+        assert!(old.join("settings.json").exists(), "the old file stays");
+
+        // A settings file already in place is never replaced.
+        fs::write(config.join("settings.json"), "{}").unwrap();
+        settings_left_behind(&config).unwrap();
+        assert_eq!(
+            fs::read_to_string(config.join("settings.json")).unwrap(),
+            "{}"
+        );
     }
 
     #[test]

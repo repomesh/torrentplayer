@@ -41,7 +41,7 @@ describe('the removed VPN adapter mode notice', () => {
 describe('the unreadable settings notice', () => {
   it('says traffic is held and where to choose a connection', () => {
     expect(UNREADABLE_NOTICE).toContain('could not be read, so TorrentPlayer is not connecting');
-    expect(UNREADABLE_NOTICE).toContain('Settings → VPN and network');
+    expect(UNREADABLE_NOTICE).toContain('Settings → Network & VPN');
     expect(UNREADABLE_HELD).toMatch(/paused until you choose a connection/);
     expect(holdNotice('settingsUnreadable', true)).toEqual({
       text: UNREADABLE_NOTICE,

@@ -19,9 +19,9 @@ use serde_json::Value;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::watch;
 use torrentplayer_settings::{
-    EngineSetting, KEYRING_SERVICE, KeyringStore, LEGACY_KEYRING_SERVICE, LogLevel, PatchError,
-    SecretError, SecretKey, SecretStatus, SecretStore, SecretString, Settings, SettingsStore,
-    WireGuardSettings, Zeroize as _, apply_patch,
+    EngineSetting, KEYRING_SERVICE, KeyringStore, LEGACY_KEYRING_SERVICE, LogLevel, NetworkHold,
+    PatchError, SecretError, SecretKey, SecretStatus, SecretStore, SecretString, Settings,
+    SettingsStore, WireGuardSettings, Zeroize as _, apply_patch,
 };
 use torrentplayer_torrent::{ENGINE_ENV_VAR, EngineChoice, StreamEngineConfig};
 use ts_rs::TS;
@@ -98,14 +98,32 @@ impl SettingsState {
 
     /// At start-up, before anything uses the download folder: points `storage.downloadDir` at
     /// `dir`, where the chosen folder moved with the app's data (see
-    /// [`crate::migrate::relocated`]), and saves that.
+    /// [`crate::migrate::relocated`]), and saves that, unless the file could not be used (it
+    /// stays as it is until the user confirms a connection; the move is found again next time).
     pub(crate) fn move_download_dir(&mut self, dir: &Path) {
         let mut settings = self.current();
         settings.storage.download_dir = Some(dir.to_string_lossy().into_owned());
-        if let Err(error) = self.store.save(&settings) {
+        if settings.network.hold == Some(NetworkHold::SettingsUnreadable) {
+            tracing::debug!("not saving the moved download folder while settings are held");
+        } else if let Err(error) = self.store.save(&settings) {
             tracing::warn!(%error, "could not save the moved download folder");
         }
         tracing::info!("the download folder moved with the app's data");
+        self.startup = settings.clone();
+        self.changes.send_replace(settings);
+    }
+
+    /// At start-up: holds traffic as for an unreadable settings file, with `warning` shown on
+    /// the Settings page. Used when the settings from before the rename could not be carried
+    /// over (see [`crate::migrate::settings_left_behind`]), so the defaults would otherwise
+    /// connect directly.
+    pub(crate) fn hold_unreadable(&mut self, warning: String) {
+        let mut settings = self.current();
+        settings.network.hold = Some(NetworkHold::SettingsUnreadable);
+        self.load_warnings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(warning);
         self.startup = settings.clone();
         self.changes.send_replace(settings);
     }
@@ -193,6 +211,24 @@ impl SettingsState {
     /// The download folder used by the running engine.
     pub(crate) fn active_download_dir(&self) -> PathBuf {
         self.download_dir(&self.startup)
+    }
+
+    /// The FFmpeg folder setting, unless it lies inside a download folder: one saved before
+    /// 0.3.1 refused that is ignored (FFmpeg there could come from a torrent), and FFmpeg is
+    /// looked for as if no folder were set.
+    pub(crate) fn ffmpeg_dir(&self) -> Option<String> {
+        let settings = self.current();
+        let downloads = [
+            self.download_dir(&settings),
+            self.active_download_dir(),
+            self.default_download_dir.clone(),
+        ];
+        let dir = settings.advanced.ffmpeg_dir;
+        if check_ffmpeg_dir(dir.as_deref(), &downloads).is_err() {
+            tracing::warn!("ignoring an FFmpeg folder inside the download folder");
+            return None;
+        }
+        dir
     }
 
     fn view(&self) -> SettingsView {
@@ -979,6 +1015,32 @@ mod tests {
             key(secrets.as_ref(), SecretKey::WireGuardPresharedKey),
             None
         );
+    }
+
+    #[test]
+    fn an_ffmpeg_folder_saved_inside_the_download_folder_is_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("config");
+        let inside = root.path().join("downloads").join("ffmpeg");
+        let outside = root.path().join("tools");
+        for (dir, used) in [(&inside, None), (&outside, outside.to_str())] {
+            // Written by 0.3.0, which did not refuse a folder inside the download folder.
+            fs::create_dir_all(&config).unwrap();
+            fs::write(
+                config.join("settings.json"),
+                serde_json::json!({ "version": 4, "advanced": { "ffmpegDir": dir } }).to_string(),
+            )
+            .unwrap();
+            assert_eq!(state(root.path()).ffmpeg_dir().as_deref(), used);
+        }
+        // Held traffic from a failed carry-over: the defaults, and the notice.
+        let mut held = state(root.path());
+        held.hold_unreadable("left behind".into());
+        assert_eq!(
+            held.current().network.hold,
+            Some(NetworkHold::SettingsUnreadable)
+        );
+        assert!(held.view().warnings.iter().any(|w| w == "left behind"));
     }
 
     #[test]

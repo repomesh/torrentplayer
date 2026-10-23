@@ -202,7 +202,9 @@ impl From<&Quality> for QualityDto {
             },
             audio: q.audio.map(|a| a.label().to_owned()),
             audio_plays: q.audio.map(|_| q.silent_audio().is_none()),
-            audio_converted: q.converted_audio().is_some(),
+            // As in the ranking reason: a file that needs the full player plays nothing here.
+            audio_converted: q.playability() != Playability::NeedsFullPlayer
+                && q.converted_audio().is_some(),
         }
     }
 }
@@ -563,6 +565,14 @@ mod tests {
             ..Quality::parse("Film 2024 AAC mp4", None, None)
         });
         assert_eq!((aac.audio_plays, aac.audio_converted), (Some(true), false));
+
+        // A file the built-in player cannot open is not "converted to stereo" either.
+        let avi = QualityDto::from(&Quality {
+            converts_audio: true,
+            ..Quality::parse("Film 2024 DTS avi", None, None)
+        });
+        assert_eq!(avi.playable, PlayabilityDto::NeedsFullPlayer);
+        assert!(!avi.audio_converted);
     }
 
     /// Progress of a search for "sintel" that has found `titles` (with seeders).

@@ -151,9 +151,9 @@ export function isIpcError(value: unknown): value is IpcError {
 /** What to add to network errors so they say what happened and what to do. */
 const ERROR_HINTS: Partial<Record<IpcError['kind'], string>> = {
   'kill-switch':
-    'Nothing was sent. Traffic resumes by itself when the VPN or proxy works again (see Settings → Network).',
+    'Nothing was sent. Traffic resumes by itself when the VPN or proxy works again (see Settings → Network & VPN).',
   'network-unavailable':
-    'Check your internet connection, or the VPN or proxy in Settings → Network.',
+    'Check your internet connection, or the VPN or proxy in Settings → Network & VPN.',
 };
 
 /** A user-facing message for any rejection from an IPC call. */

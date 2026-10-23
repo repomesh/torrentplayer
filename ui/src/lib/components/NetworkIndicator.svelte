@@ -4,9 +4,9 @@
    * The network indicator, from the backend's real state: gray when direct, green when traffic
    * goes through the proxy or WireGuard tunnel, yellow while that is being checked, red when the
    * kill switch pauses traffic or the settings cannot work. Beside it, the public address the
-   * internet sees (unless turned off in Settings → Network), hidden until the eye button reveals
+   * internet sees (unless turned off in Settings → Network & VPN), hidden until the eye button reveals
    * it (remembered); the tooltip has the mode, endpoint, public IPv4 and IPv6, uptime, and latest
-   * events; clicking opens Settings → Network. In Direct mode, a "VPN recommended" button opens
+   * events; clicking opens Settings → Network & VPN. In Direct mode, a "VPN recommended" button opens
    * the VPN note (see `src/lib/vpnHint.ts`) until it is dismissed. While traffic is held after an
    * update from the removed VPN adapter mode or because the settings could not be read, a button
    * naming why opens that notice instead (see `src/lib/networkHold.ts`), open from the start,
@@ -22,7 +22,7 @@
   import VpnHint from './VpnHint.svelte';
 
   interface Props {
-    /** Opens Settings → Network. Without it the indicator is not clickable. */
+    /** Opens Settings → Network & VPN. Without it the indicator is not clickable. */
     onOpen?: () => void;
   }
 

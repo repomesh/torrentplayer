@@ -4,7 +4,7 @@
  * The notice shown while `network.hold` is set: the backend loaded settings without knowing the
  * connection the user chose, so while the mode is Direct it holds all traffic. That happens
  * after an update from the VPN adapter mode (removed in 0.3.0), and when `settings.json` (or its
- * network settings) could not be read. The notice shows in Settings → VPN and network and beside
+ * network settings) could not be read. The notice shows in Settings → Network & VPN and beside
  * the status bar's network indicator until it is dismissed, which clears the hold and lets
  * Direct connect.
  */
@@ -23,11 +23,11 @@ export const REMOVED_MODE_HELD =
 
 /** The settings could not be read, and traffic is held (Direct mode). */
 export const UNREADABLE_NOTICE =
-  'Your network settings could not be read, so TorrentPlayer is not connecting. Check Settings → VPN and network: choose your VPN or proxy again, or connect directly.';
+  'Your network settings could not be read, so TorrentPlayer is not connecting. Check Settings → Network & VPN: choose your VPN or proxy again, or connect directly.';
 
 /** The settings could not be read, and another mode has been chosen since. */
 export const UNREADABLE_CHOSEN =
-  'Your network settings could not be read when TorrentPlayer started. Check that the connection in Settings → VPN and network is the one you want.';
+  'Your network settings could not be read when TorrentPlayer started. Check that the connection in Settings → Network & VPN is the one you want.';
 
 /** Added while traffic is held (Direct mode) after the settings could not be read. */
 export const UNREADABLE_HELD =

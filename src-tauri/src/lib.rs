@@ -119,11 +119,24 @@ pub fn run() -> anyhow::Result<()> {
             // Settings live in the config folder; downloads default to Downloads\TorrentPlayer.
             let folders = Folders::resolve(app)?;
             let earlier_default = folders.local_data.join("downloads");
+            // A settings file an old copy of the app kept open did not move with its folder:
+            // copy it, or hold traffic rather than connect directly with the defaults.
+            let left_behind = migrate::settings_left_behind(&folders.config);
             let mut settings = settings::SettingsState::load(
                 folders.config.clone(),
                 folders.downloads.clone(),
                 log,
             );
+            if let Err(error) = left_behind {
+                tracing::warn!(%error, "could not copy the settings from before the rename");
+                settings.hold_unreadable(
+                    "Your settings from before the rename to TorrentPlayer could not be copied \
+                     (is an older copy of the app still running?), so TorrentPlayer is not \
+                     connecting. Close the older app and restart TorrentPlayer, or choose a \
+                     connection in Settings → Network & VPN."
+                        .to_owned(),
+                );
+            }
             // A download folder chosen inside the app's data folder moved with it in
             // `Folders::resolve`; follow it, or the engine would recreate the old folder.
             if let Some(chosen) = settings.current().storage.download_dir

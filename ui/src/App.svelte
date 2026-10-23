@@ -1056,6 +1056,8 @@
     const { queue: after, removed } = removeItem(queue, id);
     queue = after;
     const wasPlaying = nowPlaying?.queueId === id;
+    // The stream identifies this playback: another video played since must not take the item.
+    const playingStream = wasPlaying ? nowPlaying?.stream : undefined;
     if (nowPlaying && wasPlaying) {
       nowPlaying = { ...nowPlaying, queueId: null };
     }
@@ -1064,7 +1066,13 @@
         // Puts the item back, keeping what changed while the toast was up.
         undo: () => {
           queue = restoreRemoved(queue, removed, mainFile);
-          if (wasPlaying && nowPlaying?.queueId === null && queue.items.includes(removed.item)) {
+          if (
+            wasPlaying &&
+            nowPlaying !== null &&
+            nowPlaying.stream === playingStream &&
+            nowPlaying.queueId === null &&
+            queue.items.includes(removed.item)
+          ) {
             nowPlaying = { ...nowPlaying, queueId: id };
           }
         },

@@ -34,6 +34,18 @@ impl Latest {
     pub(crate) fn cancel(&self) {
         self.0.send_modify(|g| *g = g.wrapping_add(1));
     }
+
+    /// The current operation's number: [`Latest::begin`] and [`Latest::cancel`] change it, so
+    /// an operation that read it right after its own `begin` can check with
+    /// [`Latest::is_current`] that nothing stopped it since.
+    pub(crate) fn generation(&self) -> u64 {
+        *self.0.borrow()
+    }
+
+    /// Whether no operation began, and nothing was cancelled, since `generation` was read.
+    pub(crate) fn is_current(&self, generation: u64) -> bool {
+        *self.0.borrow() == generation
+    }
 }
 
 #[cfg(test)]

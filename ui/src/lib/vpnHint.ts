@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 /**
- * The note that recommends a VPN in Direct mode: in Settings → Network, beside the status bar's
+ * The note that recommends a VPN in Direct mode: in Settings → Network & VPN, beside the status bar's
  * network indicator, and once per run when seeding starts. Dismissing it anywhere hides it
  * everywhere (`network.vpnHintDismissed`); every place follows the saved settings.
  */

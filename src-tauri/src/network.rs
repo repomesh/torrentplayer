@@ -47,11 +47,11 @@ const PUBLIC_IP_TIMEOUT: Duration = Duration::from_secs(25);
 /// Why traffic is held after settings that used the removed VPN adapter mode were moved to
 /// Direct, until the user confirms (see [`config_from_settings`]).
 pub(crate) const VPN_ADAPTER_HOLD: &str =
-    "the VPN adapter mode was removed; confirm the change in Settings → Network";
+    "the VPN adapter mode was removed; confirm the change in Settings → Network & VPN";
 /// Why traffic is held after `settings.json` (or its network settings) could not be read, so
 /// the mode the user chose is unknown, until the user confirms a mode.
 pub(crate) const SETTINGS_UNREADABLE_HOLD: &str =
-    "the network settings could not be read; choose a connection in Settings → VPN and network";
+    "the network settings could not be read; choose a connection in Settings → Network & VPN";
 
 /// Managed state: the network manager.
 #[derive(Clone)]

@@ -539,6 +539,23 @@ describe('one file of one torrent is queued once (issue #55)', () => {
     expect(resolveTorrent(queue, { source: 'x', infoHash: HASH }, single).queue).toBe(queue);
   });
 
+  it('keeps a torrent together once its link items get their hash', () => {
+    const other = {
+      ...item('o', 0, 'aa'.repeat(20)),
+      source: `magnet:?xt=urn:btih:${'aa'.repeat(20)}`,
+    };
+    const before: Queue = {
+      ...emptyQueue(),
+      items: [link('a', 1), other, item('m', 2)],
+    };
+    const { queue } = resolveTorrent(
+      before,
+      { source: 'https://indexer.example/download/42.torrent', infoHash: HASH },
+      single,
+    );
+    expect(ids(queue)).toEqual(['a', 'm', 'o']);
+  });
+
   it('dedupes queues saved by older versions', () => {
     const saved = {
       items: [item('a', 1), { ...item('b', 1, null) }, item('c', 2)],

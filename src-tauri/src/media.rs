@@ -54,7 +54,7 @@ pub(crate) struct MediaToolsState {
 impl MediaToolsState {
     /// The tools for the current settings, looked for again when the FFmpeg folder changes.
     pub(crate) async fn tools(&self, settings: &SettingsState) -> Arc<FfmpegTools> {
-        let dir = settings.current().advanced.ffmpeg_dir;
+        let dir = settings.ffmpeg_dir();
         if let Some((found_for, tools)) = &*self.lock()
             && *found_for == dir
         {

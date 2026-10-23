@@ -492,7 +492,9 @@ export function resolveTorrent(
       : item,
   );
   const filled = items.some((item, i) => item !== queue.items[i]);
-  const result = mergeDuplicates(filled ? { ...queue, items } : queue, mainFile);
+  // Filled hashes change those items' group (their link to the hash): gather it again.
+  const regrouped = filled ? { ...queue, items: keepGroupsTogether(items) } : queue;
+  const result = mergeDuplicates(regrouped, mainFile);
   return { queue: result.queue, merged: result.merged };
 }
 

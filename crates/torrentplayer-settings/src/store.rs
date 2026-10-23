@@ -236,7 +236,7 @@ fn unusable_warning(problem: &str, kept: bool) -> String {
     };
     format!(
         "{problem}, so TorrentPlayer is not connecting until you choose a connection in \
-         Settings → VPN and network. {kept}"
+         Settings → Network & VPN. {kept}"
     )
 }
 
