@@ -127,6 +127,8 @@ fn fast_options() -> NetworkOptions {
         retry_interval: Duration::from_millis(100),
         check_timeout: Duration::from_secs(2),
         connect_timeout: Duration::from_secs(5),
+        // Sockets stay on loopback, where every test server is.
+        loopback_only: true,
         ..NetworkOptions::default()
     }
 }

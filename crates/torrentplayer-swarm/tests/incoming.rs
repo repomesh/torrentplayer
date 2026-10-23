@@ -71,13 +71,15 @@ fn fast_options() -> NetworkOptions {
         retry_interval: Duration::from_millis(100),
         check_timeout: Duration::from_secs(2),
         connect_timeout: Duration::from_secs(5),
+        // Sockets stay on loopback, where every test server is.
+        loopback_only: true,
         ..NetworkOptions::default()
     }
 }
 
 /// A port nothing listens on right now.
 fn free_port() -> u16 {
-    let probe = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     probe.local_addr().unwrap().port()
 }
 

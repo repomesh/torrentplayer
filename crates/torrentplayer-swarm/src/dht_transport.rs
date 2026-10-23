@@ -223,7 +223,10 @@ mod tests {
                 allow_ipv6: true,
                 hold: None,
             },
-            NetworkOptions::default(),
+            NetworkOptions {
+                loopback_only: true,
+                ..NetworkOptions::default()
+            },
         )
         .await
         .unwrap();

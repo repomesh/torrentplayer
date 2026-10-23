@@ -189,6 +189,19 @@ async fn collect_peers(
     peers
 }
 
+/// Where a socket to `target` opened without a network manager binds: every interface, or
+/// loopback for a loopback target. Real announces go only to public addresses (see
+/// `announce_addresses`); tests announce to trackers on loopback.
+fn local_for(target: SocketAddr) -> SocketAddr {
+    let ip: IpAddr = match (target.ip().is_loopback(), target.is_ipv4()) {
+        (false, true) => Ipv4Addr::UNSPECIFIED.into(),
+        (false, false) => Ipv6Addr::UNSPECIFIED.into(),
+        (true, true) => Ipv4Addr::LOCALHOST.into(),
+        (true, false) => Ipv6Addr::LOCALHOST.into(),
+    };
+    SocketAddr::new(ip, 0)
+}
+
 async fn announce_to(
     network: Option<&Network>,
     target: SocketAddr,
@@ -201,13 +214,8 @@ async fn announce_to(
             .map_err(|e| e.to_string())?;
         (socket, Some(lease))
     } else {
-        let any = if target.is_ipv4() {
-            SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
-        } else {
-            SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))
-        };
         (
-            UdpSocket::bind(any)
+            UdpSocket::bind(local_for(target))
                 .await
                 .map_err(|e| e.to_string())?
                 .into(),
@@ -439,9 +447,15 @@ mod tests {
             allow_ipv6: false,
             hold: None,
         };
-        let net = Network::start(cfg.clone(), NetworkOptions::default())
-            .await
-            .unwrap();
+        let net = Network::start(
+            cfg.clone(),
+            NetworkOptions {
+                loopback_only: true,
+                ..NetworkOptions::default()
+            },
+        )
+        .await
+        .unwrap();
         net.settled(Duration::from_secs(3)).await;
         let url = Url::parse("udp://tracker.invalid:6969/announce").unwrap();
         let request = AnnounceRequest {
@@ -578,6 +592,15 @@ mod tests {
             collect_peers(answers, Duration::from_millis(30)).await,
             vec![expected]
         );
+    }
+
+    #[test]
+    fn sockets_without_a_network_manager_bind_every_interface() {
+        let local = |s: &str| local_for(s.parse().unwrap()).to_string();
+        assert_eq!(local("8.8.8.8:6969"), "0.0.0.0:0");
+        assert_eq!(local("[2001:4860::8888]:6969"), "[::]:0");
+        assert_eq!(local("127.0.0.1:6969"), "127.0.0.1:0");
+        assert_eq!(local("[::1]:6969"), "[::1]:0");
     }
 
     #[tokio::test]

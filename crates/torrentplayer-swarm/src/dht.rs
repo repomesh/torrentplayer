@@ -598,10 +598,18 @@ mod tests {
         assert!(saved.is_none());
     }
 
+    /// Network options whose sockets stay on loopback, where the test proxy is.
+    fn loopback_options() -> torrentplayer_net::NetworkOptions {
+        torrentplayer_net::NetworkOptions {
+            loopback_only: true,
+            ..torrentplayer_net::NetworkOptions::default()
+        }
+    }
+
     #[tokio::test]
     async fn protected_dht_bootstraps_and_finds_peers_through_a_proxy_without_local_dns() {
         use torrentplayer_net::{
-            Network, NetworkConfig, NetworkMode, NetworkOptions, Socks5Config, socks5::Target,
+            Network, NetworkConfig, NetworkMode, Socks5Config, socks5::Target,
             test_util::TestUdpProxy,
         };
         let proxy = TestUdpProxy::start(|target, bytes| {
@@ -643,7 +651,7 @@ mod tests {
                 allow_ipv6: false,
                 hold: None,
             },
-            NetworkOptions::default(),
+            loopback_options(),
         )
         .await
         .unwrap();
