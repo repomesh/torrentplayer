@@ -100,6 +100,9 @@ The rules are enforced by tooling, so in most cases you only need to run the for
   `// SAFETY:` comment, and adding new unsafe code needs maintainer sign-off.
 - Async code uses Tokio. Do not block async threads (use `spawn_blocking`), do not hold locks
   across `.await`, and use bounded channels.
+- Tests open sockets on loopback only (`127.0.0.1`, `::1`), never on every interface (`0.0.0.0`,
+  `[::]`): Windows asks whether to let each newly built test binary through the firewall. Start
+  test networks with `NetworkOptions::loopback_only` set.
 - Keep pure logic (sorting, parsing, prioritization) in crates without Tauri or FFI
   dependencies so it is easy to test.
 
