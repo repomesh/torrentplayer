@@ -12,6 +12,7 @@
     peersSeen,
     bufferedSecs,
     health,
+    stalled,
     fileDownloaded,
     fileLength,
     etaSecs,
@@ -19,8 +20,13 @@
 
   const complete = $derived(fileLength > 0 && fileDownloaded >= fileLength);
   const left = $derived(formatEta(etaSecs));
+  // While stalled the buffer is not enough to play, whatever it holds.
   const ahead = $derived(
-    bufferedSecs === null ? '—' : `${Math.floor(Math.max(0, bufferedSecs)).toString()}s ahead`,
+    stalled
+      ? 'Buffering'
+      : bufferedSecs === null
+        ? '—'
+        : `${Math.floor(Math.max(0, bufferedSecs)).toString()}s ahead`,
   );
 </script>
 

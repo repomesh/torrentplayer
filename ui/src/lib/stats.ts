@@ -46,6 +46,8 @@ export interface StatusInfo {
   peersSeen: number;
   bufferedSecs: number | null;
   health: Health;
+  /** Playback waits for data. */
+  stalled: boolean;
   fileDownloaded: number;
   fileLength: number;
   etaSecs: number | null;

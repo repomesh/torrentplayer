@@ -110,6 +110,7 @@
   const AUDIO_SAMPLE_MS = 500;
   /** The "Continuing from…" chip leaves after this long, or at the first play, pause, or seek. */
   const RESUME_CHIP_MS = 8000;
+  const START_HINT = 'Press Space or the play button to start';
   /** A seek hold is released this long after `seeked` even if no frame was seen painted. */
   const SEEK_HOLD_MAX_MS = 1000;
 
@@ -199,16 +200,6 @@
   let overControls = $state(false);
   let scrubbing = $state(false);
   let menuOpen = $state(false);
-  const controlsVisible = $derived(
-    recentlyActive ||
-      paused ||
-      overControls ||
-      scrubbing ||
-      menuOpen ||
-      subtitleMenuOpen ||
-      !firstFrameSeen ||
-      settingsSection !== null,
-  );
 
   const timer = new PlaybackTimer();
   const gate = new SeekGate();
@@ -230,6 +221,8 @@
   let statsTimer: ReturnType<typeof setInterval> | undefined;
   let stopNetwork: (() => void) | undefined;
   let lastPoll = 0;
+  let noPeersSince: number | null = null;
+  let noPeersMs = $state(0);
 
   const bufferedSecs = $derived(
     stats === null
@@ -248,6 +241,7 @@
           peersSeen: stats.peersSeen,
           bufferedSecs,
           health: bufferHealth(bufferedSecs, stalled),
+          stalled,
           fileDownloaded: stats.fileDownloaded,
           fileLength: stats.fileLength,
           etaSecs: etaSeconds(stats.fileLength - stats.fileDownloaded, smoothedDown),
@@ -259,20 +253,43 @@
       firstFrameSeen,
       stalled,
       hasData: stats !== null && (stats.fileDownloaded > 0 || stats.bufferedBytes > 0),
-      bufferedSecs,
+      peersSeen: stats?.peersSeen ?? 0,
+      peersLive: stats?.peersLive ?? 0,
+      downloadBps: smoothedDown,
+      noPeersMs,
     }),
   );
   const seeking = $derived(seekHolding && firstFrameSeen);
 
+  const controlsVisible = $derived(
+    recentlyActive ||
+      paused ||
+      overControls ||
+      scrubbing ||
+      menuOpen ||
+      subtitleMenuOpen ||
+      !firstFrameSeen ||
+      settingsSection !== null ||
+      // The status line says why the video waits.
+      stalled ||
+      loading !== null,
+  );
+
   /**
    * The pill over the video: shown only while playback is actually blocked, saying why. When
-   * the kill switch pauses traffic, that is the reason, not "Buffering…".
+   * the kill switch blocks traffic, that is the reason, not "Buffering…".
    */
+  const blocked = $derived(seeking || loading !== null ? pausedMessage(network) : null);
   const status = $derived(
+    playbackError ?? blocked ?? (seeking ? 'Seeking…' : null) ?? loading?.text ?? null,
+  );
+  /** What screen readers hear: the same, without the figures that change every second. */
+  const spokenStatus = $derived(
     playbackError ??
-      (seeking || loading !== null ? pausedMessage(network) : null) ??
+      blocked ??
       (seeking ? 'Seeking…' : null) ??
-      loading,
+      loading?.spoken ??
+      (needsClick ? START_HINT : ''),
   );
 
   function poke(): void {
@@ -584,6 +601,14 @@
       smoothedUp = upRate.next(next.uploadBps, dt);
       stats = next;
       statsError = null;
+      // How long the video has waited with no peer connected.
+      if ((firstFrameSeen && !stalled) || next.peersLive > 0) {
+        noPeersSince = null;
+        noPeersMs = 0;
+      } else {
+        noPeersSince ??= now;
+        noPeersMs = now - noPeersSince;
+      }
     } catch (reason: unknown) {
       statsError = errorMessage(reason);
     }
@@ -1013,10 +1038,12 @@
   </div>
 
   {#if status}
-    <div class="pill" aria-live="polite">{status}</div>
+    <div class="pill" aria-hidden="true">{status}</div>
   {:else if needsClick}
-    <div class="pill">Press Space or the play button to start</div>
+    <div class="pill" aria-hidden="true">{START_HINT}</div>
   {/if}
+  <!-- Always rendered, so the first message is announced too. -->
+  <p class="sr-only" role="status">{spokenStatus}</p>
 
   {#if chip || autoMuted || audioMessage || subtitleLoading || subtitleError}
     <div class="notices">
@@ -1332,6 +1359,16 @@
     z-index: 5;
     background: var(--bg);
     cursor: auto;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .pill {

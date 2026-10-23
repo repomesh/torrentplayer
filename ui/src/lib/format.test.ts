@@ -8,6 +8,8 @@ import {
   formatPercent,
   formatRate,
   loadingMessage,
+  NO_SHARERS,
+  NO_SHARERS_MS,
 } from './format';
 
 describe('formatClock', () => {
@@ -55,25 +57,44 @@ describe('formatRate, formatPercent, formatMillis', () => {
 });
 
 describe('loadingMessage', () => {
-  const base = { firstFrameSeen: false, stalled: false, hasData: false, bufferedSecs: null };
+  const base = {
+    firstFrameSeen: false,
+    stalled: false,
+    hasData: false,
+    peersSeen: 0,
+    peersLive: 0,
+    downloadBps: 0,
+    noPeersMs: 0,
+  };
 
-  it('says peers are being found until data arrives', () => {
-    expect(loadingMessage(base)).toBe('Finding peers…');
+  it('says peers are being found until data arrives, with how many were found', () => {
+    expect(loadingMessage(base)).toEqual({ text: 'Finding peers…', spoken: 'Finding peers…' });
+    expect(loadingMessage({ ...base, peersSeen: 12 })?.text).toBe('Finding peers… (12 found)');
   });
 
-  it('says buffering once data arrives, with seconds when known', () => {
-    expect(loadingMessage({ ...base, hasData: true })).toBe('Buffering…');
-    expect(loadingMessage({ ...base, hasData: true, bufferedSecs: 4.7 })).toBe(
-      'Buffering… 4s ahead',
+  it('says buffering once data arrives, with the speed and peers, never seconds ahead', () => {
+    const buffering = { ...base, hasData: true, peersLive: 3, downloadBps: 2_400_000 };
+    expect(loadingMessage(buffering)).toEqual({
+      text: 'Buffering · ↓ 2.4 MB/s from 3 peers',
+      spoken: 'Buffering…',
+    });
+    expect(loadingMessage({ ...buffering, peersLive: 1 })?.text).toBe(
+      'Buffering · ↓ 2.4 MB/s from 1 peer',
     );
-    expect(loadingMessage({ ...base, hasData: true, bufferedSecs: 0.4 })).toBe('Buffering…');
+    expect(loadingMessage({ ...base, hasData: true })?.text).toBe('Buffering…');
   });
 
   it('is silent while playing and speaks again when stalled', () => {
-    const playing = { ...base, firstFrameSeen: true, hasData: true };
+    const playing = { ...base, firstFrameSeen: true, hasData: true, peersLive: 2 };
     expect(loadingMessage(playing)).toBeNull();
-    expect(loadingMessage({ ...playing, stalled: true, bufferedSecs: 2 })).toBe(
-      'Buffering… 2s ahead',
+    expect(loadingMessage({ ...playing, stalled: true })?.spoken).toBe('Buffering…');
+  });
+
+  it('says when nobody shares the file after a while without peers', () => {
+    expect(loadingMessage({ ...base, noPeersMs: NO_SHARERS_MS - 1 })?.text).toBe('Finding peers…');
+    expect(loadingMessage({ ...base, noPeersMs: NO_SHARERS_MS })?.text).toBe(NO_SHARERS);
+    expect(loadingMessage({ ...base, peersLive: 1, noPeersMs: NO_SHARERS_MS })?.text).toBe(
+      'Finding peers…',
     );
   });
 });
