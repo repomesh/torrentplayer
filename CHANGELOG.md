@@ -62,6 +62,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (UNC) and device paths are refused, so checking a folder can no longer make Windows send your
   sign-in credentials to another computer, and an FFmpeg folder inside the download folder is
   refused, so TorrentPlayer never runs a program that came from a torrent.
+- The queue no longer holds the same video twice when one entry was queued from a search result
+  (its main video, file not chosen yet) and the other names the file, or when two indexers list
+  the same torrent with and without its hash. Such entries merge as soon as the torrent's files
+  are known, queues saved with duplicates are cleaned up, and the "Queued" mark on search
+  results shows them. Queueing other episodes of a season pack still works. (#55)
 
 ## [0.3.0] - 2026-10-21
 

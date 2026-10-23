@@ -86,6 +86,7 @@
     putFirst,
     queueEntryState,
     remove,
+    resolveTorrent,
     restoreOrder,
     sanitizeQueue,
     setCurrent,
@@ -94,6 +95,7 @@
     setSkipped,
     upcomingCount,
     type DownloadOrder,
+    type MainFile,
     type Queue,
     type QueueItem,
   } from './lib/queue';
@@ -400,11 +402,15 @@
   );
 
   function chooseFile(torrent: TorrentSummary, file: FileSummary, queued: boolean): void {
-    const entry = findEntry(queue, {
-      source: sourceOf(torrent),
-      infoHash: torrent.infoHash,
-      fileIndex: file.index,
-    });
+    const entry = findEntry(
+      queue,
+      {
+        source: sourceOf(torrent),
+        infoHash: torrent.infoHash,
+        fileIndex: file.index,
+      },
+      mainFile,
+    );
     if (queued && !entry) {
       queue = enqueue(queue, itemsFor(torrent, [file]), lectureOrder(torrent)).queue;
     } else if (!queued && entry) {
@@ -625,7 +631,32 @@
       // A torrent opened from a file is saved as a magnet link with its trackers.
       sources[torrent.id] = source ?? torrent.magnet;
     }
+    // Its queued items learn its hash, and entries that turn out to play the same file merge.
+    const resolved = resolveTorrent(
+      queue,
+      { source: sourceOf(torrent), infoHash: torrent.infoHash },
+      mainFile,
+    );
+    queue = resolved.queue;
+    const playingId = nowPlaying?.queueId;
+    const mergedInto = playingId == null ? undefined : resolved.merged.get(playingId);
+    if (nowPlaying && mergedInto !== undefined) {
+      nowPlaying = { ...nowPlaying, queueId: mergedInto };
+    }
   }
+
+  /**
+   * The file a queued `null` file index (a search result's main video) plays in an opened
+   * torrent, so the queue can tell it is the same entry as that file; null while the torrent's
+   * files are unknown.
+   */
+  const mainFile: MainFile = (item) => {
+    const keys = torrentLoadKeys(item.source, item.infoHash);
+    const torrent = torrents.find((t) =>
+      torrentLoadKeys(sourceOf(t), t.infoHash).some((key) => keys.includes(key)),
+    );
+    return torrent === undefined ? null : (playTarget(torrent, null)?.index ?? null);
+  };
 
   function sourceOf(torrent: TorrentSummary): string {
     return sources[torrent.id] ?? torrent.magnet;
@@ -749,14 +780,14 @@
       return null;
     }
     if (where === 'first') {
-      const placed = putFirst(queue, item);
+      const placed = putFirst(queue, item, mainFile);
       queue = placed.queue;
       return placed.id;
     }
     if (where === 'group') {
-      queue = enqueue(queue, [item], lectureOrder(torrent)).queue;
+      queue = enqueue(queue, [item], lectureOrder(torrent), mainFile).queue;
     }
-    return findEntry(queue, item)?.id ?? null;
+    return findEntry(queue, item, mainFile)?.id ?? null;
   }
 
   function formatResumeTime(seconds: number): string {
@@ -941,7 +972,7 @@
     what: string,
     order?: (a: QueueItem, b: QueueItem) => number,
   ): void {
-    const { queue: after, added } = enqueue(queue, items, order);
+    const { queue: after, added } = enqueue(queue, items, order, mainFile);
     if (added === 0) {
       showToast(items.length === 1 ? 'Already in the queue' : 'Already queued');
       return;
@@ -1007,11 +1038,15 @@
 
   function isQueued(torrent: TorrentSummary, file: FileSummary): boolean {
     return (
-      findEntry(queue, {
-        source: sourceOf(torrent),
-        infoHash: torrent.infoHash,
-        fileIndex: file.index,
-      }) !== null
+      findEntry(
+        queue,
+        {
+          source: sourceOf(torrent),
+          infoHash: torrent.infoHash,
+          fileIndex: file.index,
+        },
+        mainFile,
+      ) !== null
     );
   }
 
@@ -1347,7 +1382,7 @@
         const loaded = sanitizeQueue(saved);
         persisted = loaded;
         // Anything queued while loading goes after the saved items (and is saved).
-        queue = enqueue(loaded, queue.items).queue;
+        queue = enqueue(loaded, queue.items, undefined, mainFile).queue;
       })
       .catch(() => {
         persisted = queue;
@@ -1420,6 +1455,7 @@
             queue,
             { source: result.link, infoHash: result.infoHash, fileIndex },
             playingId,
+            mainFile,
           )}
         onSearch={(id: number | null) => {
           addError = null;

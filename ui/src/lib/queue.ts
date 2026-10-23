@@ -16,6 +16,7 @@ import type { Queue } from './bindings/Queue';
 import type { FileSummary } from './bindings/FileSummary';
 import { isPlayable } from './files';
 import type { QueueItem } from './bindings/QueueItem';
+import { torrentLoadKeys } from './torrent-loads';
 
 export type { DownloadOrder, Queue, QueueItem };
 
@@ -31,16 +32,59 @@ export function newItemId(): string {
   return globalThis.crypto.randomUUID();
 }
 
-/** Whether two items play the same file of the same torrent. */
-export function sameEntry(
-  a: Pick<QueueItem, 'source' | 'infoHash' | 'fileIndex'>,
-  b: Pick<QueueItem, 'source' | 'infoHash' | 'fileIndex'>,
-): boolean {
-  const sameTorrent =
-    a.infoHash !== null && b.infoHash !== null
-      ? a.infoHash.toLowerCase() === b.infoHash.toLowerCase()
-      : a.source === b.source;
-  return sameTorrent && a.fileIndex === b.fileIndex;
+/** The parts of an item that say which torrent it belongs to. */
+type TorrentRef = Pick<QueueItem, 'source' | 'infoHash'>;
+/** The parts of an item that say which file of which torrent it plays. */
+type EntryRef = Pick<QueueItem, 'source' | 'infoHash' | 'fileIndex'>;
+
+/**
+ * What a `null` file index (a search result's "main video") plays in an item's torrent: the
+ * index of the file it resolves to when the torrent's files are known, otherwise null.
+ */
+export type MainFile = (torrent: TorrentRef) => number | null;
+
+/** For when no torrent's files are known. */
+const UNKNOWN_MAIN: MainFile = () => null;
+
+// Item keys, worked out once per item object (the queue compares every pair when merging).
+const keyCache = new WeakMap<object, string[]>();
+
+function keysOf(item: TorrentRef): string[] {
+  let keys = keyCache.get(item);
+  if (keys === undefined) {
+    keys = torrentLoadKeys(item.source, item.infoHash);
+    keyCache.set(item, keys);
+  }
+  return keys;
+}
+
+/**
+ * Whether two items belong to the same torrent: by info hash when both know it, otherwise by
+ * the hash in a magnet link, or by the link itself.
+ */
+export function sameTorrent(a: TorrentRef, b: TorrentRef): boolean {
+  if (a.infoHash !== null && b.infoHash !== null) {
+    return a.infoHash.toLowerCase() === b.infoHash.toLowerCase();
+  }
+  const keys = keysOf(a);
+  return keysOf(b).some((key) => keys.includes(key));
+}
+
+/**
+ * Whether two items play the same file of the same torrent. A `null` file index plays the
+ * torrent's main video, so it matches that file's index once `mainFile` knows it (and only
+ * then: in a season pack, episode 3 is not the main video).
+ */
+export function sameEntry(a: EntryRef, b: EntryRef, mainFile: MainFile = UNKNOWN_MAIN): boolean {
+  if (!sameTorrent(a, b)) {
+    return false;
+  }
+  if (a.fileIndex === b.fileIndex) {
+    return true;
+  }
+  const main = mainFile(a) ?? mainFile(b);
+  const first = a.fileIndex ?? main;
+  return first !== null && first === (b.fileIndex ?? main);
 }
 
 /** Index of the cursor, or -1 if there is none (or it was removed). */
@@ -63,9 +107,16 @@ export function nextItem(queue: Queue): QueueItem | null {
   return queue.items.slice(currentIndex(queue) + 1).find((i) => !i.skipped) ?? null;
 }
 
-/** Which torrent an item belongs to: its info hash, or its link when the hash is unknown. */
-export function groupKey(item: Pick<QueueItem, 'infoHash' | 'source'>): string {
-  return item.infoHash === null ? `link:${item.source}` : item.infoHash.toLowerCase();
+/**
+ * Which torrent an item belongs to: its info hash, the hash in its magnet link, or its link
+ * when the hash is unknown.
+ */
+export function groupKey(item: TorrentRef): string {
+  if (item.infoHash !== null) {
+    return item.infoHash.toLowerCase();
+  }
+  const hash = keysOf(item).find((key) => key.startsWith('hash:'));
+  return hash === undefined ? `link:${item.source}` : hash.slice('hash:'.length);
 }
 
 /**
@@ -73,16 +124,18 @@ export function groupKey(item: Pick<QueueItem, 'infoHash' | 'source'>): string {
  * An item of a torrent already in the queue joins its group: after the group's last item, or,
  * with `order`, before the first item of the group that `order` puts after it (for example in
  * lecture order). Other items go at the end. Returns the new queue and how many were added.
+ * `mainFile` tells which file a `null` file index plays (see {@link sameEntry}).
  */
 export function enqueue(
   queue: Queue,
   items: readonly QueueItem[],
   order?: (a: QueueItem, b: QueueItem) => number,
+  mainFile: MainFile = UNKNOWN_MAIN,
 ): { queue: Queue; added: number } {
   const next = [...queue.items];
   let added = 0;
   for (const item of items) {
-    if (next.length >= MAX_QUEUE_ITEMS || next.some((i) => sameEntry(i, item))) {
+    if (next.length >= MAX_QUEUE_ITEMS || next.some((i) => sameEntry(i, item, mainFile))) {
       continue;
     }
     const key = groupKey(item);
@@ -144,9 +197,10 @@ export function keepGroupsTogether(items: readonly QueueItem[]): QueueItem[] {
 /** The queued item for this file of this torrent, if any. */
 export function findEntry(
   queue: Queue,
-  entry: Pick<QueueItem, 'source' | 'infoHash' | 'fileIndex'>,
+  entry: EntryRef,
+  mainFile: MainFile = UNKNOWN_MAIN,
 ): QueueItem | null {
-  return queue.items.find((i) => sameEntry(i, entry)) ?? null;
+  return queue.items.find((i) => sameEntry(i, entry, mainFile)) ?? null;
 }
 
 /** How an entry already in the queue relates to playback. */
@@ -155,10 +209,11 @@ export type QueueEntryState = 'playing' | 'upNext' | 'queued';
 /** The visible queue state for an entry, or `null` when it is not queued. */
 export function queueEntryState(
   queue: Queue,
-  entry: Pick<QueueItem, 'source' | 'infoHash' | 'fileIndex'>,
+  entry: EntryRef,
   playingId: string | null,
+  mainFile: MainFile = UNKNOWN_MAIN,
 ): QueueEntryState | null {
-  const item = findEntry(queue, entry);
+  const item = findEntry(queue, entry, mainFile);
   if (item === null) {
     return null;
   }
@@ -173,8 +228,12 @@ export function queueEntryState(
  * its torrent's other items follow it, then everything else in order. Returns the entry's id,
  * or null (and the same queue) when the queue is full.
  */
-export function putFirst(queue: Queue, item: QueueItem): { queue: Queue; id: string | null } {
-  const existing = findEntry(queue, item);
+export function putFirst(
+  queue: Queue,
+  item: QueueItem,
+  mainFile: MainFile = UNKNOWN_MAIN,
+): { queue: Queue; id: string | null } {
+  const existing = findEntry(queue, item, mainFile);
   if (existing === null && queue.items.length >= MAX_QUEUE_ITEMS) {
     return { queue, id: null };
   }
@@ -336,8 +395,66 @@ export function clearPlayed(queue: Queue): Queue {
 }
 
 /**
+ * Merges items that play the same file of the same torrent (see {@link sameEntry}) into the
+ * first of them, which keeps its place and takes the other's file index, info hash, and
+ * progress (played if either was; skipped or paused only if both were). The cursor follows a
+ * merged item. Returns the queue (the same object if nothing merged) and, for each removed
+ * item, the id of the item it was merged into.
+ */
+export function mergeDuplicates(
+  queue: Queue,
+  mainFile: MainFile = UNKNOWN_MAIN,
+): { queue: Queue; merged: Map<string, string> } {
+  const kept: QueueItem[] = [];
+  const merged = new Map<string, string>();
+  for (const item of queue.items) {
+    const at = kept.findIndex((k) => sameEntry(k, item, mainFile));
+    const twin = kept[at];
+    if (twin === undefined) {
+      kept.push(item);
+      continue;
+    }
+    kept[at] = {
+      ...twin,
+      fileIndex: twin.fileIndex ?? item.fileIndex,
+      infoHash: twin.infoHash ?? item.infoHash,
+      played: twin.played || item.played,
+      skipped: twin.skipped && item.skipped,
+      paused: twin.paused && item.paused,
+    };
+    merged.set(item.id, twin.id);
+  }
+  if (merged.size === 0) {
+    return { queue, merged };
+  }
+  const current = queue.current === null ? null : (merged.get(queue.current) ?? queue.current);
+  return { queue: { ...queue, items: kept, current }, merged };
+}
+
+/**
+ * Once a torrent's details are known (`torrent`, with the link it was opened from): fills in
+ * the info hash of its items that lacked one (a result offered only as a download link), and
+ * merges the items that turn out to play the same file. See {@link mergeDuplicates}.
+ */
+export function resolveTorrent(
+  queue: Queue,
+  torrent: { source: string; infoHash: string },
+  mainFile: MainFile,
+): { queue: Queue; merged: Map<string, string> } {
+  const infoHash = torrent.infoHash.toLowerCase();
+  const items = queue.items.map((item) =>
+    item.infoHash === null && sameTorrent(item, { source: torrent.source, infoHash: null })
+      ? { ...item, infoHash }
+      : item,
+  );
+  const filled = items.some((item, i) => item !== queue.items[i]);
+  const result = mergeDuplicates(filled ? { ...queue, items } : queue, mainFile);
+  return { queue: result.queue, merged: result.merged };
+}
+
+/**
  * A queue read back from the backend, checked again on this side: items without the fields
- * the queue needs are dropped, duplicates removed, and a dangling cursor cleared.
+ * the queue needs are dropped, duplicates merged, and a dangling cursor cleared.
  */
 export function sanitizeQueue(value: unknown): Queue {
   if (typeof value !== 'object' || value === null || !('items' in value)) {
@@ -351,11 +468,14 @@ export function sanitizeQueue(value: unknown): Queue {
     skipped: (i.skipped as boolean | undefined) ?? false,
     played: (i.played as boolean | undefined) ?? false,
   }));
-  const { queue } = enqueue(emptyQueue(), valid);
-  const current = 'current' in value && typeof value.current === 'string' ? value.current : null;
+  const saved = 'current' in value && typeof value.current === 'string' ? value.current : null;
+  // Older versions could queue one file twice (a search result's main video, then the same
+  // file by its index; or one link with and one without the hash).
+  const merged = mergeDuplicates({ ...emptyQueue(), items: valid, current: saved }).queue;
+  const { queue } = enqueue(emptyQueue(), merged.items);
   const order: DownloadOrder =
     'order' in value && value.order === 'fastest' ? 'fastest' : 'inOrder';
-  return setCurrent({ ...queue, order }, current);
+  return setCurrent({ ...queue, order }, merged.current);
 }
 
 function isQueueItem(value: unknown): value is QueueItem {
