@@ -44,7 +44,7 @@ const TICK: Duration = Duration::from_secs(1);
 const REAPPLY: Duration = Duration::from_secs(10);
 /// Cache policy checks are deliberately much less frequent than download planning: they walk
 /// the download folder and also run immediately after playback reaches the end.
-const CACHE_CHECK: Duration = Duration::from_secs(60);
+const CACHE_CHECK: Duration = Duration::from_secs(10 * 60);
 /// Give up adding a torrent after this long, and wait this long before trying it again.
 const ADD_TIMEOUT: Duration = Duration::from_secs(60);
 const RETRY_ADD_AFTER: Duration = Duration::from_secs(60);
@@ -545,7 +545,7 @@ impl Runtime {
         // Torrents of the queue, as far as they are added.
         for item in &queue.items {
             let run = self.torrents.entry(group_of(item)).or_default();
-            if run.id.is_none_or(|id| engine.info(id).is_err()) {
+            if run.id.is_none_or(|id| !engine.contains(id)) {
                 run.id = item
                     .info_hash
                     .as_deref()
@@ -601,10 +601,10 @@ impl Runtime {
         // the meter sees the whole link).
         let mut measured: HashMap<TorrentId, Measured> = HashMap::new();
         for id in engine.torrent_ids() {
-            let Ok(stats) = engine.stats(id).await else {
+            // One read of the pieces present per torrent per tick serves its stats too.
+            let Ok((stats, have)) = engine.stats_and_have(id).await else {
                 continue;
             };
-            let have = engine.have_pieces(id).await.unwrap_or_default();
             measured.insert(id, Measured { stats, have });
         }
         let total_bps: u64 = measured.values().map(|m| m.stats.download_bps).sum();

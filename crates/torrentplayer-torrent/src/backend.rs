@@ -1292,33 +1292,66 @@ impl StreamEngine {
     pub async fn stats(&self, id: TorrentId) -> Result<TorrentStats, EngineError> {
         match self.handle(id)? {
             Handle::Rqbit(inner) => self.rqbit().await?.stats(inner),
+            Handle::Swarm(torrent) => self.swarm_stats(id, &torrent, &torrent.have_pieces()),
+        }
+    }
+
+    /// [`Self::stats`] and [`Self::have_pieces`] together, reading the pieces present once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the torrent is unknown.
+    pub async fn stats_and_have(
+        &self,
+        id: TorrentId,
+    ) -> Result<(TorrentStats, Vec<bool>), EngineError> {
+        match self.handle(id)? {
+            Handle::Rqbit(inner) => {
+                let rqbit = self.rqbit().await?;
+                Ok((rqbit.stats(inner)?, rqbit.have_pieces(inner)?))
+            }
             Handle::Swarm(torrent) => {
-                let s = torrent.stats();
-                let info = self.info(id)?;
                 let have = torrent.have_pieces();
-                let to_u32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
-                // Rates are non-negative and far below u64::MAX.
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let (download_bps, upload_bps) =
-                    (s.download_bps.max(0.0) as u64, s.upload_bps.max(0.0) as u64);
-                Ok(TorrentStats {
-                    state: if torrent.is_paused() {
-                        TorrentState::Paused
-                    } else {
-                        TorrentState::Live
-                    },
-                    download_bps,
-                    upload_bps,
-                    uploaded_bytes: s.uploaded_bytes,
-                    peers_live: to_u32(s.peers_live),
-                    peers_connecting: to_u32(s.peers_connecting),
-                    peers_seen: to_u32(s.peers_seen),
-                    file_progress: file_progress(&info, &have),
-                    progress_bytes: s.downloaded_bytes,
-                    error: None,
-                })
+                Ok((self.swarm_stats(id, &torrent, &have)?, have))
             }
         }
+    }
+
+    /// Whether a torrent with this id is added. Cheaper than [`Self::info`] as a check.
+    #[must_use]
+    pub fn contains(&self, id: TorrentId) -> bool {
+        self.torrents().contains_key(&id)
+    }
+
+    fn swarm_stats(
+        &self,
+        id: TorrentId,
+        torrent: &Torrent,
+        have: &[bool],
+    ) -> Result<TorrentStats, EngineError> {
+        let s = torrent.stats();
+        let info = self.info(id)?;
+        let to_u32 = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        // Rates are non-negative and far below u64::MAX.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let (download_bps, upload_bps) =
+            (s.download_bps.max(0.0) as u64, s.upload_bps.max(0.0) as u64);
+        Ok(TorrentStats {
+            state: if torrent.is_paused() {
+                TorrentState::Paused
+            } else {
+                TorrentState::Live
+            },
+            download_bps,
+            upload_bps,
+            uploaded_bytes: s.uploaded_bytes,
+            peers_live: to_u32(s.peers_live),
+            peers_connecting: to_u32(s.peers_connecting),
+            peers_seen: to_u32(s.peers_seen),
+            file_progress: file_progress(&info, have),
+            progress_bytes: s.downloaded_bytes,
+            error: None,
+        })
     }
 
     /// Stops every torrent. An unplayed preload's cache is deleted.
