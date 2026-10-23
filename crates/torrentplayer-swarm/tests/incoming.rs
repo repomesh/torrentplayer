@@ -188,6 +188,68 @@ async fn seed(mut stream: TcpStream, data: Arc<Vec<u8>>) {
     }
 }
 
+/// Plays a seeder like [`seed`] that lacks the `held` pieces until `reveal` fires, then
+/// announces them (`have`) and serves them too.
+async fn seed_holding_back(
+    stream: TcpStream,
+    data: Arc<Vec<u8>>,
+    held: Vec<u32>,
+    reveal: tokio::sync::oneshot::Receiver<()>,
+) {
+    let pieces = LEN.div_ceil(PIECE as usize);
+    let mut bits = vec![0u8; pieces.div_ceil(8)];
+    for piece in (0..pieces).filter(|p| !held.contains(&u32::try_from(*p).unwrap())) {
+        bits[piece / 8] |= 0x80 >> (piece % 8);
+    }
+    let (mut reader, writer) = stream.into_split();
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
+    let mut hello = frame(5, &bits);
+    hello.extend(frame(1, &[]));
+    if writer.lock().await.write_all(&hello).await.is_err() {
+        return;
+    }
+    let announce = Arc::clone(&writer);
+    tokio::spawn(async move {
+        if reveal.await.is_ok() {
+            let haves: Vec<u8> = held
+                .iter()
+                .flat_map(|piece| frame(4, &piece.to_be_bytes()))
+                .collect();
+            let _ = announce.lock().await.write_all(&haves).await;
+        }
+    });
+    loop {
+        let mut len = [0u8; 4];
+        if reader.read_exact(&mut len).await.is_err() {
+            return;
+        }
+        let len = u32::from_be_bytes(len) as usize;
+        if len == 0 {
+            continue;
+        }
+        let mut body = vec![0u8; len];
+        if reader.read_exact(&mut body).await.is_err() {
+            return;
+        }
+        if body[0] == 6 {
+            let field = |at: usize| u32::from_be_bytes(body[at..at + 4].try_into().unwrap());
+            let (piece, begin, length) = (field(1), field(5), field(9));
+            let start = piece as usize * PIECE as usize + begin as usize;
+            let mut payload = body[1..9].to_vec();
+            payload.extend_from_slice(&data[start..start + length as usize]);
+            if writer
+                .lock()
+                .await
+                .write_all(&frame(7, &payload))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
 fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
     let len = u32::try_from(payload.len() + 1).unwrap();
     [&len.to_be_bytes()[..], &[id], payload].concat()
@@ -342,9 +404,18 @@ async fn a_peer_sending_bad_data_is_banned_and_refused_when_it_comes_back() {
     wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
     let torrent = swarm.add(meta, Vec::new()).unwrap();
 
-    // A thin swarm: one honest seeder and one attacker, both connected before playback.
+    // A thin swarm: one honest seeder and one attacker, both connected before playback. The
+    // seeder lacks the first pieces at first, so the attacker alone is asked for them: with
+    // both holding every piece, the seeder (as fast as the attacker on loopback) could deliver
+    // the whole file before any of the attacker's data was used, and nothing would show it.
     let (honest, _) = connect_as_peer(port, info_hash).await.unwrap();
-    let honest = tokio::spawn(seed(honest, Arc::new(data.clone())));
+    let (reveal, revealed) = tokio::sync::oneshot::channel();
+    let honest = tokio::spawn(seed_holding_back(
+        honest,
+        Arc::new(data.clone()),
+        vec![0, 1, 2],
+        revealed,
+    ));
     let (attacker, _) = connect_as_peer(port, info_hash).await.unwrap();
     let attacker = tokio::spawn(attack(attacker));
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -355,13 +426,17 @@ async fn a_peer_sending_bad_data_is_banned_and_refused_when_it_comes_back() {
     .await
     .expect("both peers are live");
 
-    // Pieces the attacker spoiled are fetched again and verify, so playback gets every byte.
-    let all = read_all(&torrent).await;
-    assert!(all == data, "downloaded bytes differ from the seeded file");
+    // Its pieces fail their check; it alone sent them, so it is banned on the second.
+    let reading = torrent.clone();
+    let all = tokio::spawn(async move { read_all(&reading).await });
     tokio::time::timeout(Duration::from_secs(10), attacker)
         .await
         .expect("the attacker is disconnected")
         .unwrap();
+    // The pieces it spoiled are fetched again from the seeder, so playback gets every byte.
+    reveal.send(()).unwrap();
+    let all = all.await.unwrap();
+    assert!(all == data, "downloaded bytes differ from the seeded file");
     assert_eq!(torrent.stats().peers_live, 1, "the honest seeder stays");
     // Coming back from another port does not help.
     assert!(connect_as_peer(port, info_hash).await.is_none());
