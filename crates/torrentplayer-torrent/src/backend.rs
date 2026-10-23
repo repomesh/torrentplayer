@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::net::{Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -510,7 +510,7 @@ impl StreamEngine {
         let network = self.network.as_ref()?;
         let port = network.incoming_port()?;
         Some((
-            SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)),
+            SocketAddr::new(rqbit_listen_ip(network.loopback_only()), port),
             network.incoming_config().upnp,
         ))
     }
@@ -2312,11 +2312,28 @@ impl MediaSource for SwarmMedia {
     }
 }
 
+/// The address librqbit's listener opens: every interface, IPv6 and IPv4 (librqbit makes
+/// `[::]` dual-stack), or IPv4 loopback when the network manager keeps sockets there for tests
+/// ([`torrentplayer_net::NetworkOptions::loopback_only`]).
+fn rqbit_listen_ip(loopback_only: bool) -> IpAddr {
+    if loopback_only {
+        Ipv4Addr::LOCALHOST.into()
+    } else {
+        Ipv6Addr::UNSPECIFIED.into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const HASH: &str = "dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c";
+
+    #[test]
+    fn librqbit_listens_on_every_interface_outside_tests() {
+        assert_eq!(rqbit_listen_ip(false), IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(rqbit_listen_ip(true), IpAddr::V4(Ipv4Addr::LOCALHOST));
+    }
 
     #[test]
     fn thumbnails_stay_within_the_overall_limit() {

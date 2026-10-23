@@ -115,6 +115,8 @@ fn options() -> NetworkOptions {
     NetworkOptions {
         health_interval: Duration::from_millis(200),
         retry_interval: Duration::from_millis(100),
+        // Sockets stay on loopback, where every test server is.
+        loopback_only: true,
         ..NetworkOptions::default()
     }
 }
@@ -625,7 +627,7 @@ async fn librqbit_listens_for_incoming_peers_only_in_direct_mode() {
     )
     .await
     .unwrap();
-    let port = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0))
+    let port = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
         .unwrap()
         .local_addr()
         .unwrap()
