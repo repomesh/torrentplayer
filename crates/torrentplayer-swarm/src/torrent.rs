@@ -30,7 +30,7 @@ use crate::sched::{
     BlockDigest, Interest, InterestId, InterestKind, PeerKey, PieceCheck, Request, Scheduler,
     SchedulerConfig,
 };
-use crate::store::PieceStore;
+use crate::store::{CacheFile, PieceStore};
 use crate::wire::{self, HANDSHAKE_LEN, Outgoing};
 
 /// How often the driver re-plans, refills queues, and checks timeouts.
@@ -66,8 +66,17 @@ const MAX_UPLOAD_READS: usize = 256;
 /// Incoming connections sending their handshake at once, across the engine; more are closed.
 const MAX_INBOUND_HANDSHAKES: usize = 32;
 
-/// The engine's torrents by info hash, for routing incoming connections.
-type Registry = Arc<Mutex<HashMap<[u8; 20], Weak<Shared>>>>;
+/// The engine's torrents by info hash.
+type Registry = Arc<Mutex<HashMap<[u8; 20], Registered>>>;
+
+/// A torrent's entry in the [`Registry`].
+struct Registered {
+    /// The latest instance, for routing incoming connections.
+    shared: Weak<Shared>,
+    /// Its piece cache file, which every live instance of the torrent shares: an earlier
+    /// instance may outlive a later one.
+    cache_file: Weak<CacheFile>,
+}
 
 /// Engine settings.
 // Independent switches, each read by a different part of the engine.
@@ -386,11 +395,16 @@ impl Swarm {
         // create the cache file.
         let mut torrents = self.torrents.lock().unwrap_or_else(PoisonError::into_inner);
         // A previous instance still in use (by a reader finishing a request) keeps reading the
-        // cache file: append to it instead of truncating it under that reader.
-        let store = match torrents.get(&meta.info_hash).and_then(Weak::upgrade) {
-            Some(previous) => previous.store.share(meta.piece_count()),
+        // cache file: append to it instead of truncating it under that reader. Any earlier
+        // instance counts, not only the latest, which may be gone while an older one is not.
+        let shared_store = torrents
+            .get(&meta.info_hash)
+            .and_then(|t| PieceStore::share(&t.cache_file, meta.piece_count()));
+        let store = match shared_store {
+            Some(store) => store,
             None => PieceStore::create(&dir, meta.piece_count())?,
         };
+        let cache_file = store.cache_file();
         let shared = Arc::new(Shared {
             sched: Mutex::new(Scheduler::new(
                 Arc::clone(&meta),
@@ -428,8 +442,14 @@ impl Swarm {
             downloaded_web: AtomicU64::new(0),
             cancel: self.cancel.child_token(),
         });
-        torrents.retain(|_, t| t.strong_count() > 0);
-        torrents.insert(meta.info_hash, Arc::downgrade(&shared));
+        torrents.retain(|_, t| t.cache_file.strong_count() > 0);
+        torrents.insert(
+            meta.info_hash,
+            Registered {
+                shared: Arc::downgrade(&shared),
+                cache_file,
+            },
+        );
         drop(torrents);
         shared.add_candidates(peers);
         if let Some(node) = &self.dht {
@@ -1712,7 +1732,7 @@ async fn accept_incoming(
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&hash)
-                    .and_then(Weak::upgrade)
+                    .and_then(|t| t.shared.upgrade())
             });
             if let Some(shared) = shared {
                 crate::peer::accept(shared, stream, addr, lease, theirs).await;
@@ -2106,5 +2126,41 @@ mod tests {
         let mut blames = HashMap::new();
         assert!(blame(&mut blames, &[(1, 3), (2, 1)]).is_empty());
         assert_eq!(blame(&mut blames, &[(1, 4), (2, 1)]), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn a_re_add_keeps_the_cache_of_any_live_earlier_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = SwarmConfig::new(dir.path().to_path_buf());
+        cfg.enable_trackers = false;
+        cfg.enable_web_seeds = false;
+        let swarm = Swarm::start(cfg).await.unwrap();
+        let mut bytes =
+            b"d4:infod6:lengthi16384e4:name5:a.mp412:piece lengthi16384e6:pieces20:".to_vec();
+        bytes.extend_from_slice(&[0; 20]);
+        bytes.extend_from_slice(b"ee");
+        let meta = Metainfo::from_bytes(&bytes).unwrap();
+
+        // A is still read from (a stream request finishing) while B is added, stopped and gone.
+        let a = swarm.add(meta.clone(), Vec::new()).unwrap();
+        a.shared.store.write_piece(0, b"piece of a").unwrap();
+        let b = swarm.add(meta.clone(), Vec::new()).unwrap();
+        b.stop();
+        let gone = Arc::downgrade(&b.shared);
+        drop(b);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while gone.strong_count() > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the stopped instance is dropped");
+
+        // Adding C must not truncate the cache file under A.
+        let _c = swarm.add(meta, Vec::new()).unwrap();
+        let mut buf = [0u8; 10];
+        a.shared.store.read(0, 0, &mut buf).unwrap();
+        assert_eq!(&buf, b"piece of a");
+        swarm.shutdown();
     }
 }

@@ -13,7 +13,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock, Weak};
 
 /// Stores verified pieces for one torrent.
 #[derive(Debug)]
@@ -25,7 +25,7 @@ pub(crate) struct PieceStore {
 
 /// The cache file, which instances of the same torrent may share (see [`PieceStore::share`]).
 #[derive(Debug)]
-struct CacheFile {
+pub(crate) struct CacheFile {
     file: File,
     /// Where the next piece is appended.
     next: AtomicU64,
@@ -50,15 +50,22 @@ impl PieceStore {
         })
     }
 
-    /// An empty store that appends to the same cache file as `self`. For a torrent added again
-    /// while its previous instance is still in use (a reader finishing a request): truncating
-    /// the file under that reader would hand it zeros or other pieces' bytes. The previous
-    /// instance's pieces stay in the file until it is next created.
-    pub(crate) fn share(&self, piece_count: u32) -> Self {
-        Self {
-            file: Arc::clone(&self.file),
+    /// The cache file, without keeping it open: [`PieceStore::share`] can use it for as long
+    /// as any store does.
+    pub(crate) fn cache_file(&self) -> Weak<CacheFile> {
+        Arc::downgrade(&self.file)
+    }
+
+    /// An empty store that appends to `file` (see [`PieceStore::cache_file`]), if a store still
+    /// uses it. For a torrent added again while an earlier instance is still in use (a reader
+    /// finishing a request): truncating the file under that reader would hand it zeros or
+    /// other pieces' bytes. The earlier instances' pieces stay in the file until it is next
+    /// created.
+    pub(crate) fn share(file: &Weak<CacheFile>, piece_count: u32) -> Option<Self> {
+        Some(Self {
+            file: file.upgrade()?,
             index: RwLock::new(vec![None; piece_count as usize]),
-        }
+        })
     }
 
     /// Appends a verified piece. Blocking: call from a blocking thread.
@@ -194,7 +201,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let old = PieceStore::create(dir.path(), 4).unwrap();
         old.write_piece(0, b"old piece").unwrap();
-        let new = old.share(4);
+        let file = old.cache_file();
+        let new = PieceStore::share(&file, 4).unwrap();
         new.write_piece(0, b"new piece").unwrap();
 
         let mut buf = [0u8; 9];
@@ -209,6 +217,17 @@ mod tests {
             new.read(1, 0, &mut buf).unwrap_err().kind(),
             io::ErrorKind::NotFound,
             "the new instance starts empty"
+        );
+
+        // The file is shared for as long as any store uses it, not only the first.
+        drop(old);
+        let third = PieceStore::share(&new.cache_file(), 4).unwrap();
+        drop(new);
+        assert!(PieceStore::share(&file, 4).is_some());
+        drop(third);
+        assert!(
+            PieceStore::share(&file, 4).is_none(),
+            "closed with the last store"
         );
     }
 }
