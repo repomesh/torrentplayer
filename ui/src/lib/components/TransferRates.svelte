@@ -2,11 +2,11 @@
 <script lang="ts">
   /*
    * The app's total download and upload speed, for the status bar: every torrent added up,
-   * as the background downloader measures it each second (`queue_downloads`).
+   * as the background downloader measures it each second (`link_use`).
    */
   import { onMount } from 'svelte';
   import { describeRates, type LinkUse } from '../downloads';
-  import { queueDownloads } from '../ipc';
+  import { linkUse } from '../ipc';
 
   /** How often the totals are read. */
   const REFRESH_MS = 2000;
@@ -16,10 +16,10 @@
   onMount(() => {
     let stopped = false;
     const refresh = (): void => {
-      queueDownloads().then(
-        (snapshot) => {
+      linkUse().then(
+        (totals) => {
           if (!stopped) {
-            link = snapshot.link;
+            link = totals;
           }
         },
         () => undefined,

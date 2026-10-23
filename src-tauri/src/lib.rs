@@ -235,6 +235,7 @@ pub fn run() -> anyhow::Result<()> {
             queue::preload_next,
             queue::queue_readiness,
             downloads::queue_downloads,
+            commands::link_use,
             library::library_items,
             preview::preview_file,
             preview::stop_preview,

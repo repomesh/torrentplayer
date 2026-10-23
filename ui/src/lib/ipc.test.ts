@@ -98,3 +98,21 @@ describe('errorMessage', () => {
     expect(ipc.errorMessage(42)).toBe('Something went wrong.');
   });
 });
+
+describe('linkUse', () => {
+  it('reads only the connection totals', async () => {
+    const link = {
+      capacityBps: 0,
+      usedBps: 1024,
+      uploadBps: 0,
+      playbackNeedBps: null,
+      pressure: 'relaxed',
+      maxActive: null,
+      active: 1,
+    };
+    invoke.mockResolvedValue(link);
+
+    await expect(ipc.linkUse()).resolves.toEqual(link);
+    expect(invoke).toHaveBeenCalledWith('link_use');
+  });
+});

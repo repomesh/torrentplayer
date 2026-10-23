@@ -33,6 +33,7 @@
     "allow-preload-next",
     "allow-queue-readiness",
     "allow-queue-downloads",
+    "allow-link-use",
     "allow-library-items",
     "allow-preview-file",
     "allow-stop-preview",

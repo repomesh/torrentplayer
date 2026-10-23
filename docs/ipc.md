@@ -735,6 +735,19 @@ the queue downloads in its own order. The UI asks every second while the queue i
 | Errors     | none                                                                                                                                                                                                |
 | Permission | `allow-queue-downloads`                                                                                                                                                                             |
 
+#### `link_use`
+
+Only the `link` part of `queue_downloads`, for the status bar's total download and upload
+speed, so the bar does not receive every queue item. Never starts the engine. The UI asks
+every 2 s.
+
+|            |                                                                        |
+| ---------- | ---------------------------------------------------------------------- |
+| Arguments  | none                                                                   |
+| Returns    | [`LinkUse`](../ui/src/lib/bindings/LinkUse.ts) (see `queue_downloads`) |
+| Errors     | none                                                                   |
+| Permission | `allow-link-use`                                                       |
+
 #### `preview_file`
 
 A preview of one file of an added torrent, for the file explorer. One runs at a time: a newer

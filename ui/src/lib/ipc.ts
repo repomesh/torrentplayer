@@ -484,6 +484,13 @@ export function queueDownloads(): Promise<DownloadsSnapshot> {
   return invoke<DownloadsSnapshot>('queue_downloads');
 }
 
+import type { LinkUse } from './bindings/LinkUse';
+
+/** Only the connection totals of {@link queueDownloads}, for the status bar. */
+export function linkUse(): Promise<LinkUse> {
+  return invoke<LinkUse>('link_use');
+}
+
 // --- File explorer ------------------------------------------------------------------------
 
 import type { FilePreviewDto } from './bindings/FilePreviewDto';

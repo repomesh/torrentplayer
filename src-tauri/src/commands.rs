@@ -655,6 +655,19 @@ pub(crate) async fn stop_stream(
     Ok(())
 }
 
+/// The connection totals from the downloader's latest snapshot, for the status bar, without
+/// sending every queue item (`queue_downloads`). Never starts the engine.
+#[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri passes managed state by value"
+)]
+pub(crate) fn link_use(
+    downloads: State<'_, crate::downloads::DownloadsState>,
+) -> crate::downloads::LinkUse {
+    crate::downloads::queue_downloads(downloads).link
+}
+
 /// Plain single-line text for the library. Torrent metadata is untrusted and can be much longer
 /// than a useful label.
 fn library_text(value: &str) -> String {
