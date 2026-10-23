@@ -225,8 +225,8 @@ export type Availability = 'live' | 'restart' | 'later';
 const RESTART = new Set(['storage.downloadDir', 'advanced.engine', 'bandwidth.peerLimit']);
 
 const LATER = new Set([
-  // Player features not built yet (the default speed, resume positions, the debug overlay key,
-  // and the queue's ordering apply now).
+  // Player features not built yet (the default speed, resume positions, and the debug overlay
+  // key apply now).
   'playback.hardwareDecoding',
   // Search sources and filters not built yet (the adult filter and preloading apply now).
   'search.sources.emberglow',

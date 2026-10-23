@@ -264,7 +264,6 @@ mod tests {
                 played: false,
             }],
             current: Some("a".into()),
-            order: torrentplayer_library::DownloadOrder::Fastest,
         };
         state.save(&queue).unwrap();
         assert_eq!(state.load(), queue);
@@ -315,7 +314,6 @@ mod tests {
         let queue = Queue {
             items: Vec::new(),
             current: Some("gone".into()),
-            ..Queue::default()
         };
         let error = queue.validate().unwrap_err();
         assert_eq!(

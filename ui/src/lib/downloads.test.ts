@@ -7,7 +7,6 @@ import {
   describeDownload,
   describeLink,
   describeRates,
-  fastestItem,
   formatEta,
   progressOf,
   toneOf,
@@ -117,16 +116,10 @@ describe('download status', () => {
     expect(canPause(d({ state: 'paused' }))).toBe(true);
   });
 
-  it('points out an item that downloads clearly fastest', () => {
-    const items = [
-      d({ id: 'a', downloadBps: 1_000_000 }),
-      d({ id: 'b', downloadBps: 4_000_000 }),
-      d({ id: 'c', state: 'paused', downloadBps: 9_000_000 }),
-    ];
-    expect(fastestItem(items)).toBe('b');
-    expect(fastestItem([d({ id: 'a' }), d({ id: 'b', downloadBps: 2_500_000 })])).toBeNull();
-    expect(fastestItem([d()])).toBeNull();
+  it('finds items by id', () => {
+    const items = [d({ id: 'a', downloadBps: 1_000_000 }), d({ id: 'b', downloadBps: 4_000_000 })];
     expect(byId({ items, link }).get('b')?.downloadBps).toBe(4_000_000);
+    expect(byId(null).size).toBe(0);
   });
 
   it('summarizes the connection', () => {

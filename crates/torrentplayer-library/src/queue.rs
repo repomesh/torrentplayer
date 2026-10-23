@@ -82,21 +82,6 @@ pub struct Queue {
     /// Id of the item playing or last played; the next item follows it. `null` starts at the
     /// first item.
     pub current: Option<String>,
-    /// How spare bandwidth is shared between items.
-    #[serde(default)]
-    pub order: DownloadOrder,
-}
-
-/// How spare bandwidth is shared between queued items that download in the background.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export)]
-pub enum DownloadOrder {
-    /// In queue order (for courses and series watched in sequence).
-    #[default]
-    InOrder,
-    /// Torrents that download fastest first; each torrent's own files stay in queue order.
-    Fastest,
 }
 
 /// Why a queue was refused. Messages start with the field's path (`items[2]: …`).
@@ -267,7 +252,6 @@ struct QueueFileRef<'a> {
     version: u32,
     items: &'a [QueueItem],
     current: Option<&'a str>,
-    order: DownloadOrder,
 }
 
 /// The result of [`QueueStore::load`].
@@ -369,11 +353,8 @@ impl QueueStore {
             .and_then(Value::as_str)
             .filter(|c| ids.contains(*c))
             .map(str::to_owned);
-        // An unknown order (from a newer version) falls back to the default.
-        queue.order = doc
-            .remove("order")
-            .and_then(|v| serde_json::from_value(v).ok())
-            .unwrap_or_default();
+        // `order` (in order or fastest first, removed in 0.3.1) is ignored and dropped on the
+        // next save: the queue always downloads in queue order.
         for warning in &warnings {
             tracing::warn!(%warning, "queue loaded with a problem");
         }
@@ -393,7 +374,6 @@ impl QueueStore {
             version: QUEUE_VERSION,
             items: &queue.items,
             current: queue.current.as_deref(),
-            order: queue.order,
         })?;
         json.push(b'\n');
         create_private_dir(&self.dir)?;
@@ -481,7 +461,6 @@ mod tests {
         Queue {
             items: ids.iter().map(|id| item(id)).collect(),
             current: current.map(str::to_owned),
-            order: DownloadOrder::InOrder,
         }
     }
 
@@ -508,30 +487,51 @@ mod tests {
     }
 
     #[test]
-    fn keeps_item_state_and_the_download_order() {
+    fn keeps_item_state() {
         let dir = tempfile::tempdir().unwrap();
         let store = QueueStore::new(dir.path());
         let mut saved = queue(&["a", "b"], None);
         saved.items[1].paused = true;
         saved.items[0].played = true;
-        saved.order = DownloadOrder::Fastest;
         store.save(&saved).unwrap();
         assert_eq!(store.load().queue, saved);
         let json: Value = serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
-        assert_eq!(json["order"], "fastest");
         assert_eq!(json["items"][1]["paused"], true);
         assert_eq!(json["items"][0]["played"], true);
 
-        // Files from before these existed: nothing paused, in queue order.
+        // Files from before these existed: nothing paused.
         let mut old = json;
         old["items"][1].as_object_mut().unwrap().remove("paused");
         old["items"][0].as_object_mut().unwrap().remove("played");
-        old.as_object_mut().unwrap().remove("order");
         fs::write(store.path(), old.to_string()).unwrap();
         let loaded = store.load().queue;
         assert!(!loaded.items[1].paused);
         assert!(!loaded.items[0].played);
-        assert_eq!(loaded.order, DownloadOrder::InOrder);
+    }
+
+    #[test]
+    fn ignores_the_removed_download_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::new(dir.path());
+        let saved = queue(&["a", "b"], Some("a"));
+        store.save(&saved).unwrap();
+        // A file saved by 0.3.0 with "Fastest first" chosen.
+        let mut old: Value =
+            serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
+        old["order"] = "fastest".into();
+        fs::write(store.path(), old.to_string()).unwrap();
+        let loaded = store.load();
+        assert_eq!(loaded.queue, saved);
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        store.save(&loaded.queue).unwrap();
+        let json: Value = serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
+        assert!(json.get("order").is_none(), "dropped on save");
+        // The frontend's queue with the old field still deserializes.
+        let sent: Queue = serde_json::from_value(
+            serde_json::json!({"items": [], "current": null, "order": "fastest"}),
+        )
+        .unwrap();
+        assert_eq!(sent, Queue::default());
     }
 
     #[test]

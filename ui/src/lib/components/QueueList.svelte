@@ -71,8 +71,6 @@
     onLoadFiles?: (key: string) => void;
     /** Background downloads by item id; items not listed are unknown. */
     downloads?: ReadonlyMap<string, ItemDownload>;
-    /** The item downloading clearly fastest, if any (a hint to watch it now). */
-    fastest?: string | null;
     /** Saved watch progress, keyed by torrent info hash and file index. */
     watchProgress?: ReadonlyMap<string, LibraryItem>;
     /** Pauses or resumes background downloading of items. */
@@ -102,7 +100,6 @@
     onChooseFiles,
     onLoadFiles,
     downloads = new Map(),
-    fastest = null,
     watchProgress = new Map(),
     onTogglePause,
     onToggleSkip,
@@ -564,11 +561,6 @@
           {#if label}<span class="state">{label}</span>{/if}
           {#if label && size !== null}·{/if}
           {size === null ? '' : formatBytes(size)}
-          {#if row.item !== null && row.item.id === fastest}
-            <span class="fastest" title="Downloading fastest of the queue: it plays smoothest now"
-              >Fastest</span
-            >
-          {/if}
         </span>
       {/if}
       {#if status}
@@ -1006,15 +998,6 @@
 
   .bar.downloading > span {
     background: #e8c56a;
-  }
-
-  .fastest {
-    margin-left: 0.3rem;
-    padding: 0 0.3rem;
-    border-radius: 0.6rem;
-    background: rgb(111 191 127 / 18%);
-    color: #9fd3a8;
-    font-size: 0.68rem;
   }
 
   .pause[aria-pressed='true'] {

@@ -124,20 +124,20 @@ sources, details, and where other tools are the better fit.
 - **Live status for every item:** download and upload speed, peers, percent downloaded, and
   time left, with a bar
   that is green when it is ready to play, yellow while it downloads, and grey while it
-  waits for peers. A "Fastest" badge points out the video that would play smoothest now.
+  waits for peers.
 - **Gives back to the swarm.** The built-in engine uploads every verified piece it has. Queued
   torrents keep sharing, finished or not, until you pause or remove them, with one upload limit
   across both engines.
-- **In order or fastest first.** Series, albums, and courses download in sequence, or the fastest
-  torrents go first while each course keeps its lecture order. Pause any video, a whole
-  torrent, or everything with one click; a pause stops download and upload until you resume.
+- **In your order.** The queue downloads in the order you set, so series, albums, and courses
+  arrive in sequence; only you reorder it. Pause any video, a whole torrent, or everything with
+  one click; a pause stops download and upload until you resume.
 - **You stay in charge.** Nothing in the queue is paused, skipped, or removed for you, and the
   next video plays only when you pick it.
 
 ### A player for video and audio
 
 - A clean, cinematic player with keyboard controls (Space, ←/→ to skip, F for fullscreen, M to
-  mute, C for captions), playback speed, and auto-play of the next item in the queue.
+  mute, C for captions), playback speed, and Shift+N to play the next item in the queue.
 - **Music, podcasts, and audiobooks** (MP3, FLAC, AAC/M4A/M4B, Ogg, Opus, WAV) stream and skip
   just like video, with a "now playing" view; an album starts at its first track and its tracks
   queue in order.
@@ -319,7 +319,7 @@ what you play.
 
 **Why is a video slow to start?** Speed comes from the swarm. A torrent with few seeders or
 peers can only be as fast as they are; the queue shows each video's peers and speed so you can
-pick one that plays smoothly, or switch the queue to "Fastest first".
+pick one that plays smoothly, or move it up in the queue.
 
 **Does TorrentPlayer upload?** Yes. Both torrent engines share verified pieces while a torrent is
 active, under the global upload limit. A queued torrent keeps sharing until you pause or remove

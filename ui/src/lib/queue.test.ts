@@ -18,10 +18,8 @@ import {
   markPlayed,
   mergeDuplicates,
   moveGroup,
-  optimizeQueue,
   putFirst,
   queueEntryState,
-  restoreOrder,
   isPlayed,
   move,
   moveBy,
@@ -34,7 +32,6 @@ import {
   sameEntry,
   sanitizeQueue,
   setCurrent,
-  setOrder,
   setPaused,
   setSkipped,
   upcomingCount,
@@ -233,26 +230,19 @@ describe('background downloads', () => {
     expect(setPaused(q, ['gone'], true)).toBe(q);
   });
 
-  it('sets the download order, kept by every queue operation', () => {
-    const q = setOrder(queueFrom([item('a'), item('b')]), 'fastest');
-    expect(q.order).toBe('fastest');
-    expect(setOrder(q, 'fastest')).toBe(q);
-    expect(remove(q, 'a').order).toBe('fastest');
-    expect(moveBy(q, 'a', 1).order).toBe('fastest');
-  });
-
-  it('reads pauses and the order back, defaulting for older queues', () => {
+  it('reads pauses back, defaulting for older queues and dropping the old download order', () => {
+    // Saved by 0.3.0 with "Fastest first" chosen.
     const saved = {
       ...setPaused(queueFrom([item('a', 1), item('b', 2)]), ['b'], true),
       order: 'fastest',
     };
     const back = sanitizeQueue(JSON.parse(JSON.stringify(saved)));
     expect(back.items.map((i) => i.paused)).toEqual([false, true]);
-    expect(back.order).toBe('fastest');
+    expect(ids(back)).toEqual(['a', 'b']);
+    expect('order' in back).toBe(false);
     const old = { items: [{ ...item('a'), paused: undefined }], current: null };
     const fromOld = sanitizeQueue(JSON.parse(JSON.stringify(old)));
     expect(fromOld.items[0]?.paused).toBe(false);
-    expect(fromOld.order).toBe('inOrder');
     expect(sanitizeQueue({ items: [{ ...item('a'), paused: 'yes' }] }).items).toEqual([]);
   });
 });
@@ -325,7 +315,7 @@ function of(torrent: string, file: number): QueueItem {
 }
 
 function queueFrom(items: QueueItem[], current: string | null = null): Queue {
-  return { items, current, order: 'inOrder' };
+  return { items, current };
 }
 
 describe('groups', () => {
@@ -402,55 +392,6 @@ describe('groups', () => {
       'b2',
       'c1',
     ]);
-  });
-});
-
-describe('play ready videos first', () => {
-  const ready = (...list: string[]): ReadonlySet<string> => new Set(list);
-
-  it('moves ready torrents up, keeping every other order', () => {
-    const q = queueFrom([of('a', 1), of('b', 1), of('c', 1), of('d', 1)]);
-    const { queue, moved } = optimizeQueue(q, ready('c1', 'd1'), true);
-    expect(ids(queue)).toEqual(['c1', 'd1', 'a1', 'b1']);
-    expect(moved).toEqual(['c1', 'd1']);
-    expect(optimizeQueue(queue, ready('c1', 'd1'), true).queue, 'stable').toBe(queue);
-    expect(optimizeQueue(q, ready(), true).queue).toBe(q);
-  });
-
-  it('never moves played items, the cursor, or the rest of the torrent playing', () => {
-    const q = queueFrom(
-      [of('a', 1), of('b', 1), of('b', 2), of('b', 3), of('c', 1), of('d', 1)],
-      'b1',
-    );
-    const { queue, moved } = optimizeQueue(q, ready('a1', 'd1', 'b3'), true);
-    expect(ids(queue)).toEqual(['a1', 'b1', 'b2', 'b3', 'd1', 'c1']);
-    expect(moved).toEqual(['d1']);
-  });
-
-  it('keeps course order by default, and reorders within a torrent when it is off', () => {
-    const q = queueFrom([of('a', 1), of('b', 1), of('b', 2), of('b', 3)]);
-    // b3 is ready but b1 is not: with course order kept, b stays behind a.
-    expect(ids(optimizeQueue(q, ready('b3'), true).queue)).toEqual(['a1', 'b1', 'b2', 'b3']);
-    const loose = optimizeQueue(q, ready('b3'), false);
-    expect(ids(loose.queue)).toEqual(['b3', 'b1', 'b2', 'a1']);
-    expect(loose.moved).toEqual(['b3']);
-
-    const playing = queueFrom([of('a', 1), of('a', 2), of('a', 3), of('b', 1)], 'a1');
-    expect(ids(optimizeQueue(playing, ready('a3'), false).queue)).toEqual(['a1', 'a3', 'a2', 'b1']);
-    expect(ids(optimizeQueue(playing, ready('a3'), true).queue)).toEqual(['a1', 'a2', 'a3', 'b1']);
-  });
-
-  it('undoes a reordering, keeping what changed since', () => {
-    const before = queueFrom([of('a', 1), of('b', 1), of('c', 1)], 'a1');
-    const { queue: after } = optimizeQueue(before, ready('c1'), true);
-    expect(ids(after)).toEqual(['a1', 'c1', 'b1']);
-    expect(restoreOrder(after, before)).toEqual(before);
-
-    // Since then: b1 was removed and a2 and d1 were queued.
-    const changed = enqueue(remove(after, 'b1'), [of('a', 2), of('d', 1)]).queue;
-    const undone = restoreOrder(changed, before);
-    expect(ids(undone)).toEqual(['a1', 'a2', 'c1', 'd1']);
-    expect(undone.current).toBe('a1');
   });
 });
 
@@ -586,7 +527,6 @@ describe('one file of one torrent is queued once (issue #55)', () => {
     const saved = {
       items: [item('a', 1), { ...item('b', 1, null) }, item('c', 2)],
       current: 'b',
-      order: 'inOrder',
     };
     const queue = sanitizeQueue(saved);
     expect(queue.items.map((i) => i.id)).toEqual(['a', 'c']);

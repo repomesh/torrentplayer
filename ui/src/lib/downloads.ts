@@ -162,21 +162,6 @@ export function canPause(d: ItemDownload | undefined): boolean {
 }
 
 /**
- * The item downloading fastest, when at least two download and it is clearly ahead (half as
- * fast again as the next): a hint that it would play smoothest now.
- */
-export function fastestItem(items: readonly ItemDownload[]): string | null {
-  const moving = items
-    .filter((d) => d.state === 'downloading' && d.downloadBps > 0)
-    .sort((a, b) => b.downloadBps - a.downloadBps);
-  const [first, second] = moving;
-  if (first === undefined || second === undefined) {
-    return null;
-  }
-  return first.downloadBps >= second.downloadBps * 1.5 ? first.id : null;
-}
-
-/**
  * A summary of the connection: `Connection ≈ 12 MB/s · 9.8 MB/s in use · 3 downloading`, plus
  * how playback is doing when a video plays.
  */

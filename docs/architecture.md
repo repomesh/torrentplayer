@@ -158,7 +158,7 @@ time. Every view stays reachable from the rail.
   Resume or Start over when `playback.resumePosition` is on.
 - **One queue, in Playing.** The playlist panel beside the player is the queue (there is no
   separate Queue page); Playing is reachable with nothing playing, showing a placeholder. Its
-  ⋯ menu holds "Play ready videos first", "Keep course order", "Clear played", and "Clear all".
+  ⋯ menu holds "Pause all", "Clear played", and "Clear all".
 - **Torrent groups as a tree** (`QueueList.svelte`, an ARIA treeview). A torrent's queued files
   stay together (`groupKey`: the info hash, or the link) and new files join their group in
   lecture order. A torrent with several videos is a node whose videos (all of them once its
@@ -175,12 +175,9 @@ time. Every view stays reachable from the rail.
   video's first frame only when its start and end are downloaded, and metadata for anything
   else; it never renders HTML or PDF and never opens files. Pictures and text are fetched at
   background priority, capped, and a newer selection stops the previous wait.
-- **Play ready videos first** (`playback.optimizeQueue`, off by default). Every 4 s while the
-  queue is shown, `queue_readiness` reports which items are downloaded or have their start
-  and end. When that set changes, `optimizeQueue` moves ready torrents (and, without "Keep
-  course order", ready files within a torrent) ahead of the rest. It never moves played items,
-  the video playing, or the rest of its torrent, and keeps every other order; a toast offers
-  Undo (`restoreOrder`).
+- **Readiness.** Every 4 s while the queue is shown, `queue_readiness` reports which items are
+  downloaded or have their start and end, for the queue's "Ready" labels. The queue's order
+  changes only when the user moves items.
 - **Background downloads** (`src-tauri/src/downloads.rs`, `torrentplayer_torrent::bandwidth`). Queued
   items download without pressing Play, all at once unless the user sets a maximum
   (`bandwidth.maxDownloads`, 0 = no limit). Once a second the downloader measures every
@@ -190,9 +187,8 @@ time. Every view stays reachable from the rail.
   librqbit's cannot be limited one by one), and while it is starving they pause, connections
   kept, until it recovers. Once the buffer is comfortable the limits lift. The item after the
   current one ranks first, then the rest after the current item, then items before it
-  (played, or passed over); within that "In order" follows the queue and "Fastest first"
-  prefers the fastest torrents, keeping a torrent's own files in order (`Queue.order`). This
-  ranking only matters with a maximum of downloads at once. Torrents are added four at a time so
+  (played, or passed over), each in queue order. This ranking only matters with a maximum of
+  downloads at once. Torrents are added four at a time so
   a long queue does not fetch all of its metadata at once. Items keep paused, skipped, and
   completed state independently (`QueueItem.paused`, `.skipped`, `.played`), and only the user
   sets `paused` and `skipped`. Paused, skipped, finished, and waiting items' files are

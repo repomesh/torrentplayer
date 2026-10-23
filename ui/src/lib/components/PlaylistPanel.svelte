@@ -7,15 +7,8 @@
   import type { FileSummary } from '../bindings/FileSummary';
   import type { LibraryItem } from '../bindings/LibraryItem';
   import type { ReadinessState } from '../bindings/ReadinessState';
-  import { byId, describeLink, fastestItem, type DownloadsSnapshot } from '../downloads';
-  import {
-    currentIndex,
-    groupKey,
-    upcomingCount,
-    type DownloadOrder,
-    type Queue,
-    type QueueItem,
-  } from '../queue';
+  import { byId, describeLink, type DownloadsSnapshot } from '../downloads';
+  import { currentIndex, groupKey, upcomingCount, type Queue, type QueueItem } from '../queue';
   import QueueList from './QueueList.svelte';
 
   interface Props {
@@ -41,11 +34,6 @@
     onPlayFile: (key: string, file: FileSummary) => void;
     onToggleFile: (key: string, file: FileSummary, queued: boolean) => void;
     onLoadFiles: (key: string) => void;
-    /** "Play ready videos first" (`playback.optimizeQueue`) and `playback.keepCourseOrder`. */
-    optimize: boolean;
-    keepCourseOrder: boolean;
-    onOptimize: (on: boolean) => void;
-    onKeepCourseOrder: (on: boolean) => void;
     /** Empties the queue (with Undo). */
     onClear: () => void;
     /** Background downloads of the queue (`queue_downloads`), once known. */
@@ -56,8 +44,6 @@
     onTogglePause?: (ids: readonly string[], paused: boolean) => void;
     /** Skips (unticks) or restores items. */
     onToggleSkip?: (ids: readonly string[], skipped: boolean) => void;
-    /** Sets how spare bandwidth is shared between items. */
-    onOrder?: (order: DownloadOrder) => void;
   }
 
   let {
@@ -80,21 +66,15 @@
     onPlayFile,
     onToggleFile,
     onLoadFiles,
-    optimize,
-    keepCourseOrder,
-    onOptimize,
-    onKeepCourseOrder,
     onClear,
     downloads = null,
     watchProgress = new Map(),
     onTogglePause,
     onToggleSkip,
-    onOrder,
   }: Props = $props();
 
   const linkLine = $derived(downloads ? describeLink(downloads.link) : null);
   const byItem = $derived(byId(downloads));
-  const fastest = $derived(queue.order === 'fastest' ? fastestItem(downloads?.items ?? []) : null);
   const anyRunning = $derived(queue.items.some((i) => !i.paused));
 
   const upcoming = $derived(upcomingCount(queue));
@@ -193,28 +173,6 @@
           }
         }}
       >
-        <label title="Move videos that are ready to play ahead of those still downloading">
-          <input
-            type="checkbox"
-            checked={optimize}
-            onchange={(event: Event) => {
-              onOptimize((event.currentTarget as HTMLInputElement).checked);
-            }}
-          />
-          Play ready videos first
-        </label>
-        <label class:off={!optimize} title="Files of one torrent keep their order">
-          <input
-            type="checkbox"
-            checked={keepCourseOrder}
-            disabled={!optimize}
-            onchange={(event: Event) => {
-              onKeepCourseOrder((event.currentTarget as HTMLInputElement).checked);
-            }}
-          />
-          Keep each torrent's order
-        </label>
-        <hr />
         {#if onTogglePause}
           <button
             type="button"
@@ -267,25 +225,10 @@
       </dialog>
     {/if}
 
-    {#if queue.items.length > 0 && onOrder}
-      <div class="downloads">
-        <div class="order" role="radiogroup" aria-label="Download the queue">
-          {#each [['inOrder', 'In order', 'Next items first, in queue order (series, albums, courses)'], ['fastest', 'Fastest first', 'Videos whose torrents download fastest first; a course keeps its order']] as [value, label, hint] (value)}
-            <button
-              type="button"
-              role="radio"
-              aria-checked={queue.order === value}
-              title={hint}
-              onclick={() => {
-                onOrder(value as DownloadOrder);
-              }}>{label}</button
-            >
-          {/each}
-        </div>
-        {#if linkLine}<p class="link" title="Measured from what all torrents download together">
-            {linkLine}
-          </p>{/if}
-      </div>
+    {#if queue.items.length > 0 && linkLine}
+      <p class="link" title="Measured from what all torrents download together">
+        {linkLine}
+      </p>
     {/if}
 
     {#if playingTitle}
@@ -335,7 +278,6 @@
           {onRemoveGroup}
           {onChooseFiles}
           downloads={byItem}
-          {fastest}
           {watchProgress}
           {onTogglePause}
           {onToggleSkip}
@@ -456,37 +398,8 @@
     stroke-linejoin: round;
   }
 
-  .downloads {
-    display: grid;
-    gap: 0.35rem;
-    margin: 0 0.6rem 0.5rem;
-  }
-
-  .order {
-    display: flex;
-    padding: 0.15rem;
-    border-radius: 0.45rem;
-    background: rgb(255 255 255 / 5%);
-  }
-
-  .order button {
-    flex: 1;
-    padding: 0.25rem 0.4rem;
-    border-radius: 0.35rem;
-    font-size: 0.75rem;
-  }
-
-  .order button[aria-checked='true'] {
-    background: rgb(255 255 255 / 10%);
-    color: var(--text);
-  }
-
-  .order button:hover {
-    color: var(--text);
-  }
-
   .link {
-    margin: 0;
+    margin: 0 0.6rem 0.5rem;
     color: var(--text-muted);
     font-size: 0.72rem;
     line-height: 1.35;
@@ -556,7 +469,6 @@
     font-size: 0.85rem;
   }
 
-  .menu label,
   .menu > button {
     display: flex;
     align-items: center;
@@ -568,35 +480,13 @@
     cursor: pointer;
   }
 
-  .menu label:hover,
   .menu > button:hover:not(:disabled) {
     background: rgb(255 255 255 / 6%);
-  }
-
-  .menu label.off {
-    opacity: 0.55;
   }
 
   .menu > button:disabled {
     cursor: default;
     opacity: 0.4;
-  }
-
-  .menu input {
-    margin: 0;
-    accent-color: var(--accent);
-  }
-
-  .menu input:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
-  }
-
-  .menu hr {
-    width: 100%;
-    margin: 0.2rem 0;
-    border: none;
-    border-top: 1px solid rgb(255 255 255 / 6%);
   }
 
   .confirm {

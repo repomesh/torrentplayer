@@ -30,7 +30,6 @@
     addTorrentLink,
     devAutoplay,
     errorMessage,
-    getSettings,
     loadQueue,
     preloadNext,
     preloadStatus,
@@ -40,7 +39,6 @@
     startStream,
     stopStream,
     streamStats,
-    updateSettings,
     type DownloadsSnapshot,
     type LibraryItem,
     type PreloadStatusDto,
@@ -80,7 +78,6 @@
     moveGroup,
     newItemId,
     nextItem,
-    optimizeQueue,
     playbackEnded,
     putFirst,
     queueEntryState,
@@ -88,14 +85,11 @@
     removeItem,
     restoreRemoved,
     resolveTorrent,
-    restoreOrder,
     sanitizeQueue,
     setCurrent,
-    setOrder,
     setPaused,
     setSkipped,
     upcomingCount,
-    type DownloadOrder,
     type MainFile,
     type Queue,
     type QueueItem,
@@ -197,7 +191,7 @@
   const nextStatus = $derived(next ? preloadLabel(nextPreload, next.infoHash ?? '') : null);
   const playingId = $derived(nowPlaying?.queueId ?? null);
 
-  // --- Queue groups, readiness, and "play ready videos first" --------------------------
+  // --- Queue groups and readiness --------------------------------------------------------
 
   /** How often readiness is asked for while the queue is shown. */
   const READINESS_MS = 4000;
@@ -205,10 +199,6 @@
 
   /** How ready queued items are to play, by item id (items in torrents not added: absent). */
   let readiness = $state.raw<ReadonlyMap<string, ReadinessState>>(new Map());
-  /** `playback.optimizeQueue` and `playback.keepCourseOrder`, re-read while the queue shows. */
-  let prefs = $state({ optimizeQueue: false, keepCourseOrder: true });
-  /** The ready items the queue was last arranged for, so it only moves when that changes. */
-  let arrangedFor = '';
   /** The torrent whose videos "Choose files…" shows. */
   let chooser = $state.raw<TorrentSummary | null>(null);
   const queueShown = $derived(view.name === 'player' && (playlistOpen || nowPlaying === null));
@@ -236,14 +226,11 @@
       fileIndex: item.fileIndex,
     }));
     try {
-      const [answers, saved] = await Promise.all([queueReadiness(items), getSettings()]);
-      prefs.optimizeQueue = saved.settings.playback.optimizeQueue;
-      prefs.keepCourseOrder = saved.settings.playback.keepCourseOrder;
+      const answers = await queueReadiness(items);
       readiness = new Map(answers.map((a) => [a.id, a.state]));
     } catch {
       return;
     }
-    arrange();
   }
 
   /** How often background downloads are read while the queue is shown. */
@@ -282,54 +269,6 @@
       clearInterval(timer);
     };
   });
-
-  /**
-   * "Play ready videos first": moves ready items up when the set of ready items changes (not
-   * on every check, so the user's own reordering stands until something new is ready).
-   */
-  function arrange(): void {
-    if (!prefs.optimizeQueue) {
-      arrangedFor = '';
-      return;
-    }
-    const ready = new Set(
-      [...readiness].filter(([, state]) => state !== 'waiting').map(([id]) => id),
-    );
-    const signature = [...ready].sort().join(' ');
-    if (signature === arrangedFor) {
-      return;
-    }
-    arrangedFor = signature;
-    const { queue: arranged, moved } = optimizeQueue(queue, ready, prefs.keepCourseOrder);
-    if (moved.length === 0) {
-      return;
-    }
-    const before = queue;
-    queue = arranged;
-    const first = queue.items.find((i) => i.id === moved[0]);
-    showToast(
-      moved.length === 1 && first
-        ? `Moved up: ${first.title} is ready to play`
-        : `Moved up: ${String(moved.length)} videos ready to play`,
-      {
-        undo: () => {
-          queue = restoreOrder(queue, before);
-        },
-      },
-    );
-  }
-
-  function setPlaybackPref(key: 'optimizeQueue' | 'keepCourseOrder', on: boolean): void {
-    prefs[key] = on;
-    arrangedFor = '';
-    updateSettings({ playback: { [key]: on } })
-      .then(() => {
-        arrange();
-      })
-      .catch((reason: unknown) => {
-        showToast(`The setting could not be saved: ${errorMessage(reason)}`, { error: true });
-      });
-  }
 
   function removeGroup(key: string): void {
     const before = queue;
@@ -1504,9 +1443,6 @@
               onToggleSkip={(ids: readonly string[], skipped: boolean) => {
                 queue = setSkipped(queue, ids, skipped);
               }}
-              onOrder={(order: DownloadOrder) => {
-                queue = setOrder(queue, order);
-              }}
               filesOf={(key: string) => torrentOf(key)?.files ?? null}
               {playingFile}
               onPlayFile={(key: string, file: FileSummary) => {
@@ -1522,14 +1458,6 @@
                 }
               }}
               onLoadFiles={(key: string) => void loadTorrent(key)}
-              optimize={prefs.optimizeQueue}
-              onOptimize={(on: boolean) => {
-                setPlaybackPref('optimizeQueue', on);
-              }}
-              keepCourseOrder={prefs.keepCourseOrder}
-              onKeepCourseOrder={(on: boolean) => {
-                setPlaybackPref('keepCourseOrder', on);
-              }}
               onClear={() => {
                 const before = queue;
                 queue = emptyQueue();

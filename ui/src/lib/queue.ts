@@ -11,20 +11,19 @@
  * a title, and a size. Never stream URLs (they carry a session token).
  */
 
-import type { DownloadOrder } from './bindings/DownloadOrder';
 import type { Queue } from './bindings/Queue';
 import type { FileSummary } from './bindings/FileSummary';
 import { isPlayable } from './files';
 import type { QueueItem } from './bindings/QueueItem';
 import { torrentLoadKeys } from './torrent-loads';
 
-export type { DownloadOrder, Queue, QueueItem };
+export type { Queue, QueueItem };
 
 /** The most items a queue holds (the backend enforces the same limit). */
 export const MAX_QUEUE_ITEMS = 500;
 
 export function emptyQueue(): Queue {
-  return { items: [], current: null, order: 'inOrder' };
+  return { items: [], current: null };
 }
 
 /** A new, unique item id. */
@@ -418,11 +417,6 @@ export function setSkipped(queue: Queue, ids: readonly string[], skipped: boolea
   };
 }
 
-/** Sets how spare bandwidth is shared between queued items. */
-export function setOrder(queue: Queue, order: DownloadOrder): Queue {
-  return queue.order === order ? queue : { ...queue, order };
-}
-
 /** Removes only items that actually reached the end; passed-over skipped items stay. */
 export function clearPlayed(queue: Queue): Queue {
   return queue.items
@@ -511,10 +505,9 @@ export function sanitizeQueue(value: unknown): Queue {
   // file by its index; or one link with and one without the hash).
   const merged = mergeDuplicates({ ...emptyQueue(), items: valid, current: saved }).queue;
   const { queue } = enqueue(emptyQueue(), merged.items);
-  const order: DownloadOrder =
-    'order' in value && value.order === 'fastest' ? 'fastest' : 'inOrder';
-  // Only the cursor is restored (if it still names an item); no item's flags change.
-  return setCurrent({ ...queue, order }, merged.current);
+  // Only the cursor is restored (if it still names an item); no item's flags change. An
+  // `order` saved by 0.3.0 is dropped: the queue always downloads in queue order.
+  return setCurrent(queue, merged.current);
 }
 
 function isQueueItem(value: unknown): value is QueueItem {
@@ -612,68 +605,6 @@ function lastIndexOf<T>(items: readonly T[], test: (item: T) => boolean): number
     }
   }
   return -1;
-}
-
-/** The items passing `test` first, then the rest; each part keeps its order. */
-function readyFirst<T>(items: readonly T[], test: (item: T) => boolean): T[] {
-  return [...items.filter(test), ...items.filter((i) => !test(i))];
-}
-
-/**
- * "Play ready videos first": moves queued items that are ready to play (`ready`, by item id)
- * ahead of those that are not, among the items still to play. Played items and the cursor
- * (the video playing) never move, and the rest of the cursor's torrent stays right after it.
- * Torrents move as whole groups, by whether their first item is ready; with
- * `keepCourseOrder` off, the ready files of a torrent also move to the front of its group.
- * Every other order is kept. Returns the queue (the same object if nothing moved) and the
- * ids of the ready items that moved up.
- */
-export function optimizeQueue(
-  queue: Queue,
-  ready: ReadonlySet<string>,
-  keepCourseOrder: boolean,
-): { queue: Queue; moved: string[] } {
-  const isReady = (item: QueueItem): boolean => ready.has(item.id);
-  const within = (items: QueueItem[]): QueueItem[] =>
-    keepCourseOrder ? items : readyFirst(items, isReady);
-  const cursor = currentIndex(queue);
-  const fixed = queue.items.slice(0, cursor + 1);
-  const rest = queue.items.slice(cursor + 1);
-  const current = queue.items[cursor];
-  const pinnedKey = current === undefined ? null : groupKey(current);
-  let pinned = 0;
-  for (const item of rest) {
-    if (groupKey(item) !== pinnedKey) {
-      break;
-    }
-    pinned += 1;
-  }
-  const groups = groupQueue({ ...queue, items: rest.slice(pinned), current: null }).map((g) =>
-    within(g.items),
-  );
-  const ordered = readyFirst(groups, (g) => g[0] !== undefined && isReady(g[0]));
-  const items = [...fixed, ...within(rest.slice(0, pinned)), ...ordered.flat()];
-  if (items.every((item, i) => item === queue.items[i])) {
-    return { queue, moved: [] };
-  }
-  const before = new Map(queue.items.map((item, i) => [item.id, i]));
-  const moved = items
-    .filter((item, i) => isReady(item) && i < (before.get(item.id) ?? i))
-    .map((item) => item.id);
-  return { queue: { ...queue, items }, moved };
-}
-
-/**
- * Undo for a reordering: puts the items back in `before`'s order. Items added since keep
- * their group (or go at the end), items removed since stay removed, and the cursor stays.
- */
-export function restoreOrder(queue: Queue, before: Queue): Queue {
-  const now = new Map(queue.items.map((item) => [item.id, item]));
-  const kept = before.items.filter((item) => now.has(item.id)).map((item) => now.get(item.id));
-  const restored = kept.filter((item): item is QueueItem => item !== undefined);
-  const known = new Set(restored.map((item) => item.id));
-  const added = queue.items.filter((item) => !known.has(item.id));
-  return { ...queue, items: keepGroupsTogether([...restored, ...added]) };
 }
 
 /** One row under a torrent in the queue's tree: a video, and its queue item if it is queued. */

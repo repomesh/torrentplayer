@@ -16,9 +16,7 @@
 //!   capacity.
 //! - **Order.** The item after the current one ranks first, so it plays at once; then the rest
 //!   of the queue after the current item; items before it (skipped or played) last. Within
-//!   that, [`DownloadOrder::InOrder`] follows the queue and [`DownloadOrder::Fastest`] prefers
-//!   torrents that have downloaded fastest (untried ones are tried), keeping each torrent's own
-//!   files in queue order (lectures stay in sequence).
+//!   that, queue order: only the user reorders the queue.
 //! - **No churn.** With a maximum, an item that started keeps downloading for [`MIN_RUN`]
 //!   unless playback needs the bandwidth, so speeds are measured over a meaningful time.
 //!
@@ -59,16 +57,6 @@ const PEAK_WINDOW: Duration = Duration::from_secs(60);
 const AVERAGE_OVER: usize = 3;
 /// A remembered capacity halves over this long without being reached again.
 const CAPACITY_HALF_LIFE: Duration = Duration::from_secs(300);
-
-/// How spare bandwidth is shared between queued items.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum DownloadOrder {
-    /// In queue order (for courses and series watched in sequence).
-    #[default]
-    InOrder,
-    /// Torrents that download fastest first, each torrent's files still in queue order.
-    Fastest,
-}
 
 /// Estimates the link's capacity from the total download rate of all torrents.
 #[derive(Debug, Clone)]
@@ -195,8 +183,6 @@ pub struct Candidate {
     pub up_next: bool,
     /// Before the current item in the queue (skipped or played): last.
     pub skipped: bool,
-    /// Its torrent's measured download rate while it was downloading, if measured.
-    pub rate_bps: Option<u64>,
 }
 
 /// How playback is doing, which decides how much the background may take.
@@ -250,13 +236,12 @@ impl Planner {
         total_bps: u64,
         foreground: Option<Foreground>,
         candidates: &[Candidate],
-        order: DownloadOrder,
         max_active: Option<usize>,
     ) -> Plan {
         self.meter.update(now, total_bps);
         self.pressure = next_pressure(self.pressure, foreground);
 
-        let ranked = rank(candidates, order);
+        let ranked = rank(candidates);
         let mut active: Vec<String> = ranked
             .iter()
             .take(max_active.unwrap_or(usize::MAX))
@@ -382,44 +367,10 @@ fn next_pressure(previous: Pressure, foreground: Option<Foreground>) -> Pressure
 }
 
 /// Candidates in priority order: up next, then the rest after the current item, then the ones
-/// before it; within each, by `order`.
-fn rank(candidates: &[Candidate], order: DownloadOrder) -> Vec<&Candidate> {
+/// before it; within each, in queue order.
+fn rank(candidates: &[Candidate]) -> Vec<&Candidate> {
     let mut ranked: Vec<&Candidate> = candidates.iter().collect();
-    match order {
-        DownloadOrder::InOrder => ranked.sort_by_key(|c| (!c.up_next, c.skipped, c.position)),
-        DownloadOrder::Fastest => {
-            // A torrent's speed is the best measured for any of its items; untried torrents
-            // count as fast as the median, so each gets a chance without displacing proven
-            // fast ones.
-            let mut speed: HashMap<&str, u64> = HashMap::new();
-            for c in candidates {
-                if let Some(rate) = c.rate_bps {
-                    let s = speed.entry(c.group.as_str()).or_default();
-                    *s = (*s).max(rate);
-                }
-            }
-            let mut known: Vec<u64> = speed.values().copied().collect();
-            known.sort_unstable();
-            let untried = known.get(known.len() / 2).copied().unwrap_or(u64::MAX);
-            let group_speed =
-                |c: &Candidate| speed.get(c.group.as_str()).copied().unwrap_or(untried);
-            // Each torrent's files stay in queue order: rank a torrent by its first item.
-            let mut first: HashMap<&str, usize> = HashMap::new();
-            for c in candidates {
-                let p = first.entry(c.group.as_str()).or_insert(c.position);
-                *p = (*p).min(c.position);
-            }
-            ranked.sort_by_key(|c| {
-                (
-                    !c.up_next,
-                    c.skipped,
-                    std::cmp::Reverse(group_speed(c)),
-                    first[c.group.as_str()],
-                    c.position,
-                )
-            });
-        }
-    }
+    ranked.sort_by_key(|c| (!c.up_next, c.skipped, c.position));
     ranked
 }
 
@@ -431,20 +382,19 @@ mod tests {
 
     const MIB: u64 = 1024 * 1024;
 
-    fn candidate(id: &str, group: &str, position: usize, rate: Option<u64>) -> Candidate {
+    fn candidate(id: &str, group: &str, position: usize) -> Candidate {
         Candidate {
             id: id.into(),
             group: group.into(),
             position,
             up_next: false,
             skipped: false,
-            rate_bps: rate,
         }
     }
 
     fn many(n: usize) -> Vec<Candidate> {
         (0..n)
-            .map(|i| candidate(&i.to_string(), &i.to_string(), i, None))
+            .map(|i| candidate(&i.to_string(), &i.to_string(), i))
             .collect()
     }
 
@@ -486,35 +436,14 @@ mod tests {
     #[test]
     fn in_order_puts_up_next_first_and_skipped_items_last() {
         let mut c = vec![
-            candidate("skipped", "s", 0, None),
-            candidate("a", "x", 2, None),
-            candidate("b", "y", 3, None),
-            candidate("next", "z", 4, None),
+            candidate("skipped", "s", 0),
+            candidate("a", "x", 2),
+            candidate("b", "y", 3),
+            candidate("next", "z", 4),
         ];
         c[0].skipped = true;
         c[3].up_next = true;
-        assert_eq!(
-            ids(&rank(&c, DownloadOrder::InOrder)),
-            ["next", "a", "b", "skipped"]
-        );
-    }
-
-    #[test]
-    fn fastest_prefers_fast_torrents_and_keeps_lectures_in_order() {
-        let mut c = vec![
-            candidate("slow", "s", 0, Some(MIB / 4)),
-            candidate("lecture2", "fast", 2, Some(8 * MIB)),
-            candidate("lecture1", "fast", 1, Some(8 * MIB)),
-            candidate("new", "n", 3, None),
-            candidate("old", "o", 4, Some(20 * MIB)),
-        ];
-        c[4].skipped = true;
-        // The untried torrent counts as the median of the known ones (8 MiB/s), so it follows
-        // the fast course but beats the slow one; a skipped item is last even if fastest.
-        assert_eq!(
-            ids(&rank(&c, DownloadOrder::Fastest)),
-            ["lecture1", "lecture2", "new", "slow", "old"]
-        );
+        assert_eq!(ids(&rank(&c)), ["next", "a", "b", "skipped"]);
     }
 
     #[test]
@@ -522,13 +451,13 @@ mod tests {
         let t0 = Instant::now();
         let c = many(12);
         let mut p = Planner::default();
-        let plan = p.plan(t0, MIB, None, &c, DownloadOrder::InOrder, None);
+        let plan = p.plan(t0, MIB, None, &c, None);
         assert_eq!(plan.active.len(), 12);
         assert!(plan.limits.is_empty());
         assert!(!plan.pause_background);
 
         let mut capped = Planner::default();
-        let plan = capped.plan(t0, MIB, None, &c, DownloadOrder::InOrder, Some(3));
+        let plan = capped.plan(t0, MIB, None, &c, Some(3));
         assert_eq!(plan.active, ["0", "1", "2"]);
     }
 
@@ -546,7 +475,6 @@ mod tests {
             10 * MIB,
             Some(watching(15.0, 2 * MIB)),
             &c,
-            DownloadOrder::InOrder,
             None,
         );
         assert_eq!(plan.pressure, Pressure::Guarded);
@@ -565,14 +493,7 @@ mod tests {
         let mut p = Planner::default();
         let t0 = Instant::now();
         let c = many(5);
-        let plan = p.plan(
-            t0,
-            MIB,
-            Some(watching(3.0, MIB / 2)),
-            &c,
-            DownloadOrder::InOrder,
-            None,
-        );
+        let plan = p.plan(t0, MIB, Some(watching(3.0, MIB / 2)), &c, None);
         assert_eq!(plan.pressure, Pressure::Starving);
         assert!(plan.pause_background);
         assert_eq!(plan.active.len(), 5, "still active, only paused");
@@ -582,7 +503,6 @@ mod tests {
             MIB,
             Some(watching(60.0, 2 * MIB)),
             &c,
-            DownloadOrder::InOrder,
             None,
         );
         assert_eq!(plan.pressure, Pressure::Relaxed);
@@ -596,16 +516,7 @@ mod tests {
         let t0 = Instant::now();
         let c = many(3);
         let starving = Some(watching(3.0, MIB / 2));
-        let mut plan_at = |s: u64| {
-            p.plan(
-                t0 + Duration::from_secs(s),
-                MIB / 2,
-                starving,
-                &c,
-                DownloadOrder::InOrder,
-                None,
-            )
-        };
+        let mut plan_at = |s: u64| p.plan(t0 + Duration::from_secs(s), MIB / 2, starving, &c, None);
         // The link's capacity is unknown, so the pause gets its whole trial.
         assert!(plan_at(0).pause_background);
         assert!(plan_at(10).pause_background);
@@ -630,16 +541,8 @@ mod tests {
         }
         let c = many(2);
         let starving = Some(watching(3.0, MIB / 2));
-        let mut plan_at = |s: u64| {
-            p.plan(
-                t0 + Duration::from_secs(3 + s),
-                MIB / 2,
-                starving,
-                &c,
-                DownloadOrder::InOrder,
-                None,
-            )
-        };
+        let mut plan_at =
+            |s: u64| p.plan(t0 + Duration::from_secs(3 + s), MIB / 2, starving, &c, None);
         assert!(plan_at(0).pause_background);
         // Five seconds in, the link carries a twentieth of what it can: the pause frees
         // bandwidth nothing uses.
@@ -684,32 +587,14 @@ mod tests {
     fn with_a_maximum_started_items_keep_running_for_a_while() {
         let mut p = Planner::default();
         let t0 = Instant::now();
-        let mut c = vec![
-            candidate("a", "x", 0, Some(MIB)),
-            candidate("b", "y", 1, None),
-        ];
-        let first = p.plan(t0, 0, None, &c[..1], DownloadOrder::Fastest, Some(1));
+        let c = [candidate("a", "x", 1), candidate("b", "y", 0)];
+        let first = p.plan(t0, 0, None, &c[..1], Some(1));
         assert_eq!(first.active, ["a"]);
-        // A faster torrent appears: `a` keeps running beside it during its minimum run.
-        c[1].rate_bps = Some(10 * MIB);
-        let next = p.plan(
-            t0 + Duration::from_secs(1),
-            0,
-            None,
-            &c,
-            DownloadOrder::Fastest,
-            Some(1),
-        );
+        // An item earlier in the queue appears: `a` keeps running beside it for its minimum run.
+        let next = p.plan(t0 + Duration::from_secs(1), 0, None, &c, Some(1));
         assert_eq!(next.active, ["b", "a"]);
-        let later = p.plan(
-            t0 + MIN_RUN + Duration::from_secs(2),
-            0,
-            None,
-            &c,
-            DownloadOrder::Fastest,
-            Some(1),
-        );
-        // Its minimum run over, the slower item gives way.
+        let later = p.plan(t0 + MIN_RUN + Duration::from_secs(2), 0, None, &c, Some(1));
+        // Its minimum run over, the lower-ranked item gives way.
         assert_eq!(later.active, ["b"]);
     }
 }

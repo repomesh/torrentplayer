@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::Notify;
-use torrentplayer_library::{DownloadOrder, Queue, QueueItem};
+use torrentplayer_library::{Queue, QueueItem};
 use torrentplayer_torrent::bandwidth::{self, Candidate, Foreground, Planner, Pressure};
 use torrentplayer_torrent::{FileReadiness, TorrentId, TorrentSource, TorrentStats};
 use ts_rs::TS;
@@ -50,10 +50,6 @@ const RETRY_ADD_AFTER: Duration = Duration::from_secs(60);
 const MAX_ADDING: usize = 4;
 /// Below this rate an ETA would be meaningless.
 const MIN_ETA_BPS: u64 = 16 * 1024;
-/// Weight of the newest sample in a torrent's measured speed.
-const RATE_WEIGHT: f64 = 0.2;
-/// A torrent's speed counts as measured once it has downloaded this long.
-const MEASURE_AFTER: Duration = Duration::from_secs(8);
 
 /// Managed state shared by the commands and the downloader task.
 #[derive(Clone)]
@@ -349,9 +345,6 @@ struct TorrentRun {
     id: Option<TorrentId>,
     adding: Option<tokio::task::JoinHandle<Result<TorrentId, String>>>,
     failed: Option<(Instant, String)>,
-    /// Measured speed while it downloaded in the background.
-    rate: Option<f64>,
-    downloading_since: Option<Instant>,
     /// What the downloader last set.
     paused: bool,
     limit: Option<u64>,
@@ -606,35 +599,20 @@ impl Runtime {
                         .get(item.id.as_str())
                         .is_some_and(FileReadiness::complete)
             })
-            .map(|(position, item)| {
-                let run = self.torrents.get(&group_of(item));
-                Candidate {
-                    id: item.id.clone(),
-                    group: group_of(item),
-                    position,
-                    up_next: position == up_next,
-                    skipped: current.is_some_and(|c| position <= c),
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    rate_bps: run
-                        .filter(|r| {
-                            r.downloading_since
-                                .is_some_and(|t| now.saturating_duration_since(t) >= MEASURE_AFTER)
-                        })
-                        .and_then(|r| r.rate)
-                        .map(|r| r as u64),
-                }
+            .map(|(position, item)| Candidate {
+                id: item.id.clone(),
+                group: group_of(item),
+                position,
+                up_next: position == up_next,
+                skipped: current.is_some_and(|c| position <= c),
             })
             .collect();
-        let order = match queue.order {
-            DownloadOrder::InOrder => bandwidth::DownloadOrder::InOrder,
-            DownloadOrder::Fastest => bandwidth::DownloadOrder::Fastest,
-        };
         let max_active = usize::try_from(settings.bandwidth.max_downloads)
             .ok()
             .filter(|n| *n > 0);
         let plan = self
             .planner
-            .plan(now, total_bps, foreground, &candidates, order, max_active);
+            .plan(now, total_bps, foreground, &candidates, max_active);
         let active: HashSet<&str> = plan.active.iter().map(String::as_str).collect();
 
         // Start adding the torrents of active items that are not added yet, a few at a time.
@@ -702,9 +680,9 @@ impl Runtime {
             let Some(id) = run.id else {
                 continue;
             };
-            let Some(m) = measured.get(&id) else {
+            if !measured.contains_key(&id) {
                 continue;
-            };
+            }
             let foreground = watched_torrent == Some(id);
             let needed = wanted.get(&id).copied().unwrap_or(false);
             let role = if foreground {
@@ -761,18 +739,6 @@ impl Runtime {
                 if engine.set_download_limit(id, bps).is_ok() {
                     run.limit = limit;
                 }
-            }
-            // Speed is measured while it downloads in the background.
-            if needed && !pause && !foreground {
-                run.downloading_since.get_or_insert(now);
-                #[allow(clippy::cast_precision_loss)]
-                let sample = m.stats.download_bps as f64;
-                run.rate = Some(
-                    run.rate
-                        .map_or(sample, |r| r * (1.0 - RATE_WEIGHT) + sample * RATE_WEIGHT),
-                );
-            } else {
-                run.downloading_since = None;
             }
         }
 
@@ -968,8 +934,7 @@ mod tests {
         let state = DownloadsState::new(Queue::default());
         let queue = Queue {
             items: vec![item("a", None, true)],
-            order: DownloadOrder::Fastest,
-            ..Queue::default()
+            current: Some("a".into()),
         };
         state.set_queue(queue.clone()).await;
         assert_eq!(state.queue(), queue);

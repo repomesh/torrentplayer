@@ -83,11 +83,6 @@ pub struct PlaybackSettings {
     pub resume_position: bool,
     /// Hardware video decoding (used by the libmpv player).
     pub hardware_decoding: HardwareDecoding,
-    /// Move queued videos that are ready to play (downloaded, or their start and end are)
-    /// ahead of those that are not.
-    pub optimize_queue: bool,
-    /// When optimizing the queue, keep the order of files within one torrent (lectures).
-    pub keep_course_order: bool,
     /// Turn on subtitles in the system language when a video has them.
     pub subtitles_by_default: bool,
     /// Show a frame above the seek bar where the pointer is, for parts already downloaded.
@@ -101,8 +96,6 @@ impl Default for PlaybackSettings {
             default_speed: 1.0,
             resume_position: true,
             hardware_decoding: HardwareDecoding::Auto,
-            optimize_queue: false,
-            keep_course_order: true,
             subtitles_by_default: false,
             seek_thumbnails: true,
         }
@@ -834,18 +827,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn queue_settings_default_for_older_files() {
-        // A playback section saved before the queue options existed, with the autoplay
-        // setting removed in 0.3.1.
-        let old: PlaybackSettings =
-            serde_json::from_str(r#"{"defaultSpeed": 1.5, "autoplayNext": false}"#).unwrap();
-        assert!(!old.optimize_queue, "off unless chosen");
-        assert!(old.keep_course_order);
+    fn removed_queue_settings_are_ignored() {
+        // A playback section with the queue settings removed in 0.3.1.
+        let old: PlaybackSettings = serde_json::from_str(
+            r#"{"defaultSpeed": 1.5, "autoplayNext": false, "optimizeQueue": true,
+                "keepCourseOrder": false}"#,
+        )
+        .unwrap();
         assert!((old.default_speed - 1.5).abs() < f64::EPSILON);
-        let json = serde_json::to_value(PlaybackSettings::default()).unwrap();
-        assert_eq!(json["optimizeQueue"], false);
-        assert_eq!(json["keepCourseOrder"], true);
-        assert!(json.get("autoplayNext").is_none());
+        let json = serde_json::to_value(&old).unwrap();
+        for removed in ["autoplayNext", "optimizeQueue", "keepCourseOrder"] {
+            assert!(json.get(removed).is_none(), "{removed}");
+        }
     }
 
     #[test]

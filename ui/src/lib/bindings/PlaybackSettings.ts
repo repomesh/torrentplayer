@@ -18,15 +18,6 @@ resumePosition: boolean,
  */
 hardwareDecoding: HardwareDecoding, 
 /**
- * Move queued videos that are ready to play (downloaded, or their start and end are)
- * ahead of those that are not.
- */
-optimizeQueue: boolean, 
-/**
- * When optimizing the queue, keep the order of files within one torrent (lectures).
- */
-keepCourseOrder: boolean, 
-/**
  * Turn on subtitles in the system language when a video has them.
  */
 subtitlesByDefault: boolean, 

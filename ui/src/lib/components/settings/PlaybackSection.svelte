@@ -41,36 +41,6 @@
     </select>
   </Field>
   <Field
-    id="playback-optimize-queue"
-    label="Play ready videos first"
-    path="playback.optimizeQueue"
-    help="Queued videos that are downloaded, or whose start and end are, move ahead of those still waiting. The video playing never moves."
-  >
-    <Toggle
-      id="playback-optimize-queue"
-      checked={p.optimizeQueue}
-      describedby="playback-optimize-queue-help"
-      onchange={(v) => {
-        update('playback.optimizeQueue', v);
-      }}
-    />
-  </Field>
-  <Field
-    id="playback-course-order"
-    label="Keep each torrent's order"
-    path="playback.keepCourseOrder"
-    help="Files of one torrent keep their order when ready videos move up."
-  >
-    <Toggle
-      id="playback-course-order"
-      checked={p.keepCourseOrder}
-      describedby="playback-course-order-help"
-      onchange={(v) => {
-        update('playback.keepCourseOrder', v);
-      }}
-    />
-  </Field>
-  <Field
     id="playback-resume"
     label="Resume where I left off"
     path="playback.resumePosition"

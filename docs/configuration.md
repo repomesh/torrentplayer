@@ -72,9 +72,9 @@ Every problem is logged and shown at the top of the Settings page. Older files a
 `network.killSwitch` (the kill switch is always on in protected modes, see [Network](#network));
 a version 1 file loads normally and the field is dropped the next time settings are saved.
 Version 3 added the optional seeding time target. 0.3.1 removed `bandwidth.seedAfterWatching`,
-`bandwidth.seedRatioTarget`, `bandwidth.seedTimeLimitMinutes`, and `playback.autoplayNext`
-(the queue is manual now, see [Bandwidth and seeding](#bandwidth-and-seeding)) without a version
-change: unknown fields are ignored when loading, so older files load normally and the fields are
+`bandwidth.seedRatioTarget`, `bandwidth.seedTimeLimitMinutes`, `playback.autoplayNext`,
+`playback.optimizeQueue`, and `playback.keepCourseOrder` (the queue is manual now, see
+[Bandwidth and seeding](#bandwidth-and-seeding)) without a version change: unknown fields are ignored when loading, so older files load normally and the fields are
 dropped the next time settings are saved.
 `network.incomingPeers` was added later without a version change: files without it load with
 incoming connections off, and an out-of-range port is reset to 0 (random). Version 4 (0.3.0)
@@ -97,8 +97,6 @@ tags these "Coming in a later milestone").
 | `playback.defaultSpeed`       | `1.0`   | 0.5–3         | when the next video starts     |
 | `playback.resumePosition`     | `true`  | on / off      | when the next video starts     |
 | `playback.hardwareDecoding`   | `auto`  | `auto`, `off` | later (with the libmpv player) |
-| `playback.optimizeQueue`      | `false` | on / off      | at once                        |
-| `playback.keepCourseOrder`    | `true`  | on / off      | at once                        |
 | `playback.subtitlesByDefault` | `false` | on / off      | when the next video starts     |
 | `playback.seekThumbnails`     | `true`  | on / off      | at once                        |
 
@@ -107,11 +105,8 @@ as it starts. `subtitlesByDefault` ("Show subtitles automatically") turns on the
 subtitles in the first of the system's languages that they have; whatever is chosen in the CC
 menu (or with C) is remembered for the rest of the session instead. When a video ends it is
 marked played and stays on its end; the next video plays only when you choose it (Shift+N plays
-the queue's next one).
-`optimizeQueue` ("Play ready videos first", also in the queue panel) moves queued videos that are
-ready to play (downloaded, or their start and end are) ahead of those still downloading, without
-moving the video playing; with `keepCourseOrder`, files of one torrent keep their order. Files
-saved before these two existed read them as their defaults. With `resumePosition`, reopening an
+the queue's next one). The queue downloads and plays in its own order, which changes only when
+you move items. With `resumePosition`, reopening an
 unfinished video at least 10 seconds in offers its saved position or a fresh start. Positions are
 kept even while this preference is off, so the Library can still show watch progress.
 `seekThumbnails` ("Seek bar

@@ -30,6 +30,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- The queue downloads in its own order, which changes only when you move items. The "In
+  order" / "Fastest first" choice, "Play ready videos first" (`playback.optimizeQueue`) with its
+  "Keep each torrent's order" option (`playback.keepCourseOrder`), and the "Fastest" badge are
+  removed. Queues and settings saved by older versions load as before and drop these on the
+  next save.
 - The queue is now manual. Nothing in it is skipped, paused, or removed for you: playing a video
   further down no longer marks the videos in between as skipped (also when the app starts), and
   playing or finishing a skipped video keeps it skipped until you tick it again. Only merging

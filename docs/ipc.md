@@ -697,8 +697,7 @@ playback are left and the rest of the file arrives in under half that time
 
 #### `queue_readiness`
 
-How ready queued videos are to play, for the queue's "Ready" badges and "Play ready videos
-first" (`playback.optimizeQueue`). Each answer is `complete` (downloaded), `ready` (its start
+How ready queued videos are to play, for the queue's "Ready" labels. Each answer is `complete` (downloaded), `ready` (its start
 and end are present, as much as a preload leaves, so it starts at once), or `waiting`. Only
 items in torrents that are already added (a preload's included) and that name a 40-hex info
 hash are answered; the others, and everything before the engine has started, are left out. It
@@ -725,8 +724,8 @@ peers now (`uploading`), and why a queued item waits (`waitReason`: `playback`, 
 "Waiting for playback", or `limit`). `paused` is only ever the user's pause. `link` gives the estimated capacity, the total rate,
 playback's need, the pressure (`relaxed`, `guarded`, `starving`), the user's maximum of
 downloads at once (`maxActive`, `null` for none), and how many items download. The downloader updates it about once a second; the call only reads
-that, so it never starts the engine. Pause an item, or change the order, with `save_queue`
-(`QueueItem.paused`, `Queue.order`). The UI asks every second while the queue is on screen.
+that, so it never starts the engine. Pause an item with `save_queue` (`QueueItem.paused`);
+the queue downloads in its own order. The UI asks every second while the queue is on screen.
 
 |            |                                                                                                                                                                                                     |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
