@@ -108,6 +108,7 @@ async fn fixture(choice: EngineChoice) -> Fixture {
         upload_limit_bps: None,
         peer_limit: 40,
         dht_state_dir: None,
+        allow_local_links: true,
     })
     .await
     .unwrap();
@@ -509,6 +510,35 @@ async fn download_links_are_checked_remembered_and_fall_back_to_the_magnet_link(
     f.engine.shutdown().await;
 }
 
+/// Links come from untrusted sites: by default, one to the local network is refused before
+/// any request, by both engines, for adds, prefetches, and preloads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn links_to_the_local_network_are_refused() {
+    let server = LinkServer::start(Bytes::new(), other_torrent(), String::new()).await;
+    for choice in [EngineChoice::Auto, EngineChoice::Rqbit] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = StreamEngineConfig::new(dir.path().to_path_buf());
+        config.choice = choice;
+        config.public_discovery = false;
+        assert!(!config.allow_local_links, "the default");
+        let engine = StreamEngine::start(config).await.unwrap();
+        let link = || TorrentSource::parse_link(server.url("/other").as_str()).unwrap();
+        let added = engine.add(link()).await;
+        assert!(
+            matches!(added, Err(EngineError::Source(SourceError::NotPublic))),
+            "{choice:?}: {added:?}"
+        );
+        let prefetched = engine.prefetch_metadata(link()).await;
+        assert!(
+            matches!(prefetched, Err(EngineError::Source(SourceError::NotPublic))),
+            "{prefetched:?}"
+        );
+        assert!(engine.preload_file(link(), None).await.is_none());
+        engine.shutdown().await;
+    }
+    assert_eq!(server.count("/other"), 0, "nothing was requested");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_download_link_that_redirects_to_a_magnet_link_is_added_as_that_magnet_link() {
     for choice in [EngineChoice::Swarm, EngineChoice::Auto] {
@@ -631,6 +661,7 @@ async fn a_torrents_poster_becomes_its_thumbnail() {
         upload_limit_bps: None,
         peer_limit: 40,
         dht_state_dir: None,
+        allow_local_links: false,
     })
     .await
     .unwrap();
@@ -701,6 +732,7 @@ async fn a_stopped_thumbnail_download_leaves_nothing_behind() {
         upload_limit_bps: None,
         peer_limit: 40,
         dht_state_dir: None,
+        allow_local_links: false,
     })
     .await
     .unwrap();
@@ -777,6 +809,7 @@ async fn torrents_with_unusable_lengths_are_refused_without_a_panic() {
             upload_limit_bps: None,
             peer_limit: 40,
             dht_state_dir: None,
+            allow_local_links: false,
         })
         .await
         .unwrap();

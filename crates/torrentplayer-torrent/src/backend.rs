@@ -155,6 +155,10 @@ pub struct StreamEngineConfig {
     /// librqbit keeps none: restored from a saved table, it fetched magnet metadata more
     /// slowly than from a fresh start (see docs/performance.md).
     pub dht_state_dir: Option<PathBuf>,
+    /// Download `.torrent` links (and follow their redirects) to the local network too. Off in
+    /// the app: links come from untrusted search results and sites, and must not reach the
+    /// user's router, other devices, or local services. For tests with a local server.
+    pub allow_local_links: bool,
 }
 
 impl StreamEngineConfig {
@@ -169,6 +173,7 @@ impl StreamEngineConfig {
             upload_limit_bps: None,
             peer_limit: 40,
             dht_state_dir: None,
+            allow_local_links: false,
         }
     }
 }
@@ -392,6 +397,7 @@ impl StreamEngine {
         let http = http_for(
             concat!("TorrentPlayer/", env!("CARGO_PKG_VERSION")),
             network.as_ref(),
+            config.allow_local_links,
         )?;
         info!(choice = ?config.choice, "stream engine started");
         let engine = Self {
@@ -469,6 +475,7 @@ impl StreamEngine {
         // as long as from an empty table, which waits for the bootstrap servers' responsive nodes.
         c.enable_trackers = self.config.public_discovery;
         c.network.clone_from(&self.network);
+        c.allow_local_links = self.config.allow_local_links;
         c.peer_limit = Some(self.config.peer_limit);
         (c.download_limit_bps, c.upload_limit_bps) = self.limits();
         let listen = self.rqbit_listen(protected);
@@ -809,7 +816,7 @@ impl StreamEngine {
             }
             None => {}
         }
-        match fetch_torrent_file(&self.http, url).await {
+        match fetch_torrent_file(&self.http, url, self.config.allow_local_links).await {
             Ok(bytes) => {
                 // Checked when it is used; the hash is only needed to remember it.
                 if let Ok(meta) = Metainfo::from_bytes(&bytes) {

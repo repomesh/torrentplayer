@@ -63,6 +63,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   traffic. TorrentPlayer now contacts those trackers itself, with the names resolved by the
   tunnel or proxy, and librqbit contacts none, so turning "Send tracker requests through the
   proxy" off also stops every tracker request of torrents already open.
+- Links to `.torrent` files (pasted, or from search results) can no longer reach your local
+  network. A link, or a redirect it sends the app to, that leads to a private, loopback, or
+  link-local address or to `localhost` (such as your router or a cloud metadata address) is now
+  refused, in every network mode, and a redirect from https to http is no longer followed.
 
 ## [0.3.0] - 2026-10-21
 

@@ -30,7 +30,9 @@ use tracing::{debug, info, warn};
 
 use crate::media::{FileKind, mime_type};
 use crate::paths::{UnsafePath, validate_components};
-use crate::source::{SourceError, TorrentSource, fetch_torrent_file, http_client_builder};
+use crate::source::{
+    PublicResolver, SourceError, TorrentSource, fetch_torrent_file, http_client_builder,
+};
 
 /// Identifies a torrent within an [`Engine`].
 pub type TorrentId = usize;
@@ -81,6 +83,9 @@ pub struct EngineConfig {
     /// discovery, and no UDP trackers, and reaches peers and trackers only through the network's
     /// loopback bridge. `None` connects directly.
     pub network: Option<Network>,
+    /// Download `.torrent` links (and follow their redirects) to the local network too. Off by
+    /// default: links come from untrusted sites. For tests with a local server.
+    pub allow_local_links: bool,
 }
 
 impl EngineConfig {
@@ -102,6 +107,7 @@ impl EngineConfig {
             download_limit_bps: None,
             upload_limit_bps: None,
             network: None,
+            allow_local_links: false,
         }
     }
 }
@@ -183,15 +189,20 @@ fn engine_err(e: impl std::fmt::Display) -> EngineError {
     EngineError::Engine(format!("{e:#}"))
 }
 
-/// The client for downloading `.torrent` files, routed through `network` if given.
+/// The client for downloading `.torrent` files: routed through `network` if given, and to public
+/// hosts only unless `allow_local` (see `crate::source::http_client_builder`).
 pub(crate) fn http_for(
     user_agent: &str,
     network: Option<&Network>,
+    allow_local: bool,
 ) -> Result<reqwest::Client, EngineError> {
-    let mut builder = http_client_builder(user_agent);
-    if let Some(network) = network {
-        builder = network.configure_http(builder).map_err(engine_err)?;
-    }
+    let builder = http_client_builder(user_agent, allow_local);
+    let builder = match (network, allow_local) {
+        (Some(network), false) => network.configure_http_public(builder).map_err(engine_err)?,
+        (Some(network), true) => network.configure_http(builder).map_err(engine_err)?,
+        (None, false) => builder.dns_resolver(PublicResolver),
+        (None, true) => builder,
+    };
     builder.build().map_err(engine_err)
 }
 
@@ -323,7 +334,11 @@ impl Engine {
             }
             Err(error) => return Err(error),
         };
-        let http = http_for(&config.client_name, config.network.as_ref())?;
+        let http = http_for(
+            &config.client_name,
+            config.network.as_ref(),
+            config.allow_local_links,
+        )?;
         info!(protected, "torrent engine started");
         Ok(Self {
             inner: Arc::new(Inner {
@@ -434,7 +449,8 @@ impl Engine {
             }
             _ if self.inner.protected => Err(EngineError::Unsupported(PROTECTED_TORRENT_FILE)),
             TorrentSource::Url(url) => Ok(AddTorrent::from_bytes(checked_torrent(
-                fetch_torrent_file(&self.inner.http, &url).await?,
+                fetch_torrent_file(&self.inner.http, &url, self.inner.config.allow_local_links)
+                    .await?,
             )?)),
             TorrentSource::File(bytes) => Ok(AddTorrent::from_bytes(checked_torrent(bytes)?)),
         }
