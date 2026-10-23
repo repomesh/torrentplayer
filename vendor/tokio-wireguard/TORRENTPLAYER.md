@@ -31,3 +31,14 @@ each one once. The loop's "back at the start" check matched on the first attempt
 whose random start port was taken failed with "not a suitable bind address" instead of moving
 on. torrentplayer-net's `a_random_port_that_is_taken_moves_on_to_the_next_free_one` test takes
 1024 ports and binds 300 more.
+
+Endpoint roaming and handshake rate limiting (`src/interface/tunnel.rs`, `Tunnel::recv` and
+`Tunnel::new`, marked "Added/Modified for TorrentPlayer"): the peer's endpoint moved to the
+source of any message `decapsulate` accepted, including cookie replies, which anyone who knows
+the server's public key and sees an initiation can forge, and the cookie replies the interface
+itself sends under load. Like WireGuard, it now roams only on handshake and data messages. A
+handshake initiation also passes the shared rate limiter (MAC1, and under load the cookie MAC2)
+before `parse_handshake_anon`'s key agreement, as in boringtun's own device; since
+`decapsulate` checks it again, the limit is 128 so that initiations still get 64 per second.
+torrentplayer-net's `a_forged_cookie_reply_does_not_move_the_tunnel_to_its_sender` test forges
+a cookie reply (boringtun is a test-only dependency there for this) and fails without the fix.

@@ -48,6 +48,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In WireGuard mode, opening a connection or UDP socket no longer fails now and then with "not a
   suitable bind address" when the randomly chosen tunnel port is already in use; the next free port
   is used.
+- In WireGuard mode, a forged WireGuard cookie reply (which anyone who knows the server's public key
+  and sees the handshake can make) no longer redirects the tunnel's traffic to its sender; the
+  tunnel follows the server only on authenticated handshake and data messages. Handshake initiations
+  are rate-limited before the key agreement, so a flood of them costs little CPU.
 
 ## [0.3.0] - 2026-10-21
 

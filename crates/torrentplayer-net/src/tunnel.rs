@@ -1141,6 +1141,8 @@ mod tests {
         data: std::sync::atomic::AtomicUsize,
         /// When each tunnel (a new sender index) sent its first handshake initiation.
         tunnels: Mutex<Vec<(u32, tokio::time::Instant)>>,
+        /// The latest handshake initiation, and the address it came from.
+        init: Mutex<Option<(Vec<u8>, SocketAddr)>>,
     }
 
     impl Traffic {
@@ -1192,6 +1194,7 @@ mod tests {
                                 if tunnels.iter().all(|(known, _)| *known != index) {
                                     tunnels.push((index, tokio::time::Instant::now()));
                                 }
+                                *seen.init.lock().unwrap() = Some((up[..n].to_vec(), from));
                             }
                             4 if n > 32 => {
                                 seen.data.fetch_add(1, Ordering::SeqCst);
@@ -1778,6 +1781,82 @@ mod tests {
         ));
         tunnel.close();
         server.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_forged_cookie_reply_does_not_move_the_tunnel_to_its_sender() {
+        // Anyone who knows the server's public key and sees an initiation can make a valid
+        // cookie reply (its key comes from the public key). The tunnel used to roam to the
+        // sender of any message it accepted, so traffic then went to the forger.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (server, mut config) = pair();
+            let server_public: [u8; 32] = base64::engine::general_purpose::STANDARD
+                .decode(&config.peers[0].public_key)
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let mode = Arc::new(std::sync::atomic::AtomicU8::new(PASS_ALL));
+            let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
+            let (endpoint, traffic) = relay(target, Arc::clone(&mode)).await;
+            config.peers[0].endpoint = endpoint.to_string();
+            let tunnel = Tunnel::start(&config, false).await.unwrap();
+            tunnel
+                .healthy(
+                    Duration::from_secs(2),
+                    crate::WIREGUARD_REPLY_TIMEOUT,
+                    crate::WIREGUARD_RESTART_AFTER,
+                )
+                .await
+                .unwrap();
+
+            // A rekey the server does not answer yet, so the client waits for a reply.
+            mode.store(DROP_ALL, Ordering::SeqCst);
+            *traffic.init.lock().unwrap() = None;
+            tunnel.0.interface.request_handshake().unwrap();
+            let (init, client) = loop {
+                if let Some(init) = traffic.init.lock().unwrap().clone() {
+                    break init;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            // A limiter of 0 is always under load, so it answers with a cookie reply.
+            let limiter = boringtun::noise::rate_limiter::RateLimiter::new(
+                &x25519::PublicKey::from(server_public),
+                0,
+            );
+            let mut reply = [0u8; 64];
+            let Err(boringtun::noise::TunnResult::WriteToNetwork(cookie)) =
+                limiter.verify_packet(Some(client.ip()), &init, &mut reply)
+            else {
+                panic!("no cookie reply");
+            };
+            let forger = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            forger.send_to(cookie, client).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // Traffic in the current session still goes to the server.
+            mode.store(PASS_ALL, Ordering::SeqCst);
+            let before = traffic.data();
+            let socket = tokio_wireguard::UdpSocket::bind("10.44.0.2:0", &tunnel.0.interface)
+                .await
+                .unwrap();
+            socket
+                .send_to(b"tracker request", "10.44.0.1:6969")
+                .await
+                .unwrap();
+            let mut bytes = [0u8; 256];
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), forger.recv_from(&mut bytes))
+                    .await
+                    .is_err(),
+                "tunnel traffic went to the forger"
+            );
+            assert!(traffic.data() > before);
+            tunnel.close();
+            server.close();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

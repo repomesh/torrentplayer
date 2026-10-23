@@ -56,7 +56,9 @@ impl Tunnel {
             keypair: (private_key, public_key),
             peers: Vec::new(),
             rng: Lfsr24::from_entropy(),
-            rate_limiter: Arc::new(RateLimiter::new(&public_key, 64)),
+            // Modified for TorrentPlayer: 128, since `recv` counts each handshake initiation
+            // twice (boringtun's device uses 64 and counts it once).
+            rate_limiter: Arc::new(RateLimiter::new(&public_key, 128)),
             buffers: (vec![0; u16::MAX as usize], vec![0; u16::MAX as usize]),
             socket,
         };
@@ -113,12 +115,31 @@ impl Tunnel {
             peers,
             buffers,
             socket,
+            rate_limiter,
             ..
         } = self;
 
         let (len, source) = socket.try_recv_from(&mut buffers.0).ok()?;
         let packet = Tunn::parse_incoming_packet(&buffers.0[..len]).ok()?;
+        // Modified for TorrentPlayer: a handshake initiation passes the rate limiter (its MAC
+        // and, under load, the cookie that proves the source address) before the
+        // Diffie-Hellman work below, as in boringtun's own device: before, any 148-byte
+        // datagram of type 1 cost a key agreement. `decapsulate` checks it again, so an
+        // initiation counts twice toward the limit (see `new`).
+        if let Packet::HandshakeInit(..) = packet {
+            match rate_limiter.verify_packet(Some(source.ip()), &buffers.0[..len], &mut buffers.1) {
+                Ok(_) => {}
+                Err(TunnResult::WriteToNetwork(cookie)) => {
+                    socket.send_to(cookie, source).await.ok();
+                    return None;
+                }
+                Err(_) => return None,
+            }
+        }
         let transport = matches!(packet, Packet::PacketData(..));
+        // Added for TorrentPlayer: like WireGuard, roam to the source of authenticated
+        // handshake and data messages only, never of a cookie reply.
+        let roams = !matches!(packet, Packet::PacketCookieReply(..));
 
         let peer = match packet {
             Packet::HandshakeInit(packet) => {
@@ -156,7 +177,9 @@ impl Tunnel {
                 _ => None,
             };
 
-        peer.config.endpoint = Some(source);
+        if roams {
+            peer.config.endpoint = Some(source);
+        }
         // Added for TorrentPlayer: an authenticated data or keepalive packet shows the peer
         // is answering (see `liveness`). Handshake messages do not: a server can complete
         // handshakes and still drop every data packet.
