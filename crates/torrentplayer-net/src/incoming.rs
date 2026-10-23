@@ -18,7 +18,7 @@
 //! outgoing ones, so it closes when the mode changes or the kill switch engages. Accepted
 //! connections go to a single consumer, the torrent engine ([`Network::incoming_peers`]).
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -466,7 +466,7 @@ async fn open(
     let mut port = key.port;
     let mut attempts = 0;
     let bound = loop {
-        match bind_route(&route, port, ipv4_only).await {
+        match bind_route(&route, port, ipv4_only, net.options.loopback_only).await {
             Ok(bound) => break bound,
             Err(NetError::Io(error))
                 if random
@@ -516,15 +516,20 @@ async fn open(
             }
         }
     }
-    if key.upnp && matches!(route, Route::Direct) {
+    if key.upnp && matches!(route, Route::Direct) && !net.options.loopback_only {
         tokio::spawn(forward_port(port, cancel.child_token()));
     }
     Ok((port, addresses, Listening { cancel, accepting }))
 }
 
-/// Opens the sockets for `route`, never anywhere else: every interface in direct mode, the
-/// tunnel's addresses for WireGuard.
-async fn bind_route(route: &Route, port: u16, ipv4_only: bool) -> Result<Bound, NetError> {
+/// Opens the sockets for `route`, never anywhere else: every interface in direct mode (loopback
+/// in tests, see [`direct_listen_ips`]), the tunnel's addresses for WireGuard.
+async fn bind_route(
+    route: &Route,
+    port: u16,
+    ipv4_only: bool,
+    loopback_only: bool,
+) -> Result<Bound, NetError> {
     let os = |ip: IpAddr| {
         let addr = SocketAddr::new(ip, port);
         listen(addr)
@@ -533,9 +538,10 @@ async fn bind_route(route: &Route, port: u16, ipv4_only: bool) -> Result<Bound, 
     };
     match route {
         Route::Direct => {
-            let mut listeners = vec![os(IpAddr::V4(Ipv4Addr::UNSPECIFIED))?];
+            let [v4, v6] = direct_listen_ips(loopback_only);
+            let mut listeners = vec![os(v4)?];
             // IPv6 is optional: not every machine has it.
-            match os(IpAddr::V6(Ipv6Addr::UNSPECIFIED)) {
+            match os(v6) {
                 Ok(v6) => listeners.push(v6),
                 Err(error) => {
                     tracing::debug!(target: "torrentplayer_net", %error, "not listening on IPv6");
@@ -559,6 +565,15 @@ async fn bind_route(route: &Route, port: u16, ipv4_only: bool) -> Result<Bound, 
             "a SOCKS5 proxy cannot accept incoming connections".into(),
         )),
     }
+}
+
+/// The addresses the direct-mode listener opens: IPv4 and IPv6 on every interface (loopback
+/// with [`NetworkOptions::loopback_only`](crate::NetworkOptions), for tests).
+fn direct_listen_ips(loopback_only: bool) -> [IpAddr; 2] {
+    [
+        crate::addr::local_ip(false, loopback_only),
+        crate::addr::local_ip(true, loopback_only),
+    ]
 }
 
 /// A listening socket on `addr`. An IPv6 socket accepts only IPv6, so the IPv4 one can share
@@ -662,6 +677,25 @@ async fn forward_port(port: u16, cancel: CancellationToken) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn direct_mode_listens_on_every_interface() {
+        assert_eq!(
+            direct_listen_ips(false),
+            [
+                IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+            ]
+        );
+        assert_eq!(
+            direct_listen_ips(true),
+            [
+                IpAddr::V4(Ipv4Addr::LOCALHOST),
+                IpAddr::V6(Ipv6Addr::LOCALHOST)
+            ]
+        );
+    }
 
     #[tokio::test]
     async fn listeners_bind_only_the_given_address() {

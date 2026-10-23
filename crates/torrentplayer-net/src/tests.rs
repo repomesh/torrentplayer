@@ -24,6 +24,8 @@ fn fast_options() -> NetworkOptions {
         retry_interval: Duration::from_millis(50),
         check_timeout: Duration::from_secs(2),
         connect_timeout: Duration::from_secs(5),
+        // Sockets stay on loopback, where every test server is (see the option).
+        loopback_only: true,
         ..NetworkOptions::default()
     }
 }
@@ -858,7 +860,7 @@ fn reads_plain_text_and_json_connection_check_answers() {
 
 /// A port nothing listens on right now.
 fn free_port() -> u16 {
-    let probe = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     probe.local_addr().unwrap().port()
 }
 
@@ -912,7 +914,7 @@ async fn incoming_connections_are_off_until_turned_on_and_follow_the_setting() {
     let status = wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
     assert!(
         matches!(&status, IncomingStatus::Listening { port: p, upnp: false, addresses }
-            if *p == port && addresses.contains(&format!("0.0.0.0:{port}"))),
+            if *p == port && addresses.contains(&format!("127.0.0.1:{port}"))),
         "{status:?}"
     );
     assert_eq!(net.incoming_port(), Some(port));
@@ -979,7 +981,7 @@ async fn a_random_port_is_chosen_once_and_kept() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_port_in_use_is_reported() {
-    let taken = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let taken = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = taken.local_addr().unwrap().port();
     let net = Network::start(NetworkConfig::default(), fast_options())
         .await

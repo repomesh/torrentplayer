@@ -169,6 +169,7 @@ impl Tunnel {
     pub(crate) async fn start(
         config: &WireGuardConfig,
         previous: Option<&Tunnel>,
+        loopback_only: bool,
     ) -> Result<Self, NetError> {
         validate(config)?;
         let peer = &config.peers[0];
@@ -223,7 +224,7 @@ impl Tunnel {
                     ),
                 }],
             },
-            interface_options(),
+            interface_options(loopback_only),
         )?;
         // Search domains (the `DNS` entries that are names) are ignored: host names are
         // always looked up in full.
@@ -681,8 +682,12 @@ async fn endpoint_addresses(endpoint: &str) -> Result<Vec<SocketAddr>, NetError>
 /// received packet, socket read or write, new socket, connect, and close polls it at once,
 /// and smoltcp's own timers set the next poll while any are pending. The WireGuard timers keep
 /// boringtun's recommended 100 ms tick.
-fn interface_options() -> tokio_wireguard::interface::Options {
+///
+/// The tunnel's UDP socket is on every interface, or on loopback with
+/// [`NetworkOptions::loopback_only`](crate::NetworkOptions) (tests).
+fn interface_options(loopback_only: bool) -> tokio_wireguard::interface::Options {
     let mut options = tokio_wireguard::interface::Options::default();
+    options.bind_address = loopback_only.then_some(IpAddr::V4(Ipv4Addr::LOCALHOST));
     options.poll_interval = Duration::from_secs(1);
     options.tcp.backlog = 16;
     options.tcp.timeout = Some(Duration::from_secs(120));
@@ -815,6 +820,31 @@ mod tests {
     use crate::wireguard::{WgInterface, WgPeer};
     use crate::{ConnectionState, Network, NetworkConfig, NetworkOptions, Secret};
 
+    /// Options for a network whose sockets stay on loopback (see
+    /// [`NetworkOptions::loopback_only`]).
+    fn test_options() -> NetworkOptions {
+        NetworkOptions {
+            loopback_only: true,
+            ..NetworkOptions::default()
+        }
+    }
+
+    /// Options for a test WireGuard server on loopback.
+    fn loopback_wireguard() -> tokio_wireguard::interface::Options {
+        let mut options = tokio_wireguard::interface::Options::default();
+        options.bind_address = Some(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        options
+    }
+
+    #[tokio::test]
+    async fn the_tunnel_socket_is_on_every_interface_outside_tests() {
+        assert_eq!(interface_options(false).bind_address, None);
+        assert_eq!(
+            interface_options(true).bind_address,
+            Some(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        );
+    }
+
     /// Test seam: endpoint host names and what they resolve to (see `endpoint_addresses`).
     pub(super) static RESOLVE: std::sync::LazyLock<
         Mutex<std::collections::HashMap<String, Vec<SocketAddr>>>,
@@ -831,21 +861,24 @@ mod tests {
                 let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
                 let port = reservation.local_addr().unwrap().port();
                 drop(reservation);
-                Interface::new(config::Config {
-                    interface: config::Interface {
-                        address: "10.44.0.1/32".parse().unwrap(),
-                        listen_port: Some(port),
-                        private_key: server_key.clone(),
-                        mtu: None,
+                Interface::new_with(
+                    config::Config {
+                        interface: config::Interface {
+                            address: "10.44.0.1/32".parse().unwrap(),
+                            listen_port: Some(port),
+                            private_key: server_key.clone(),
+                            mtu: None,
+                        },
+                        peers: vec![config::Peer {
+                            endpoint: None,
+                            allowed_ips: vec!["10.44.0.2/32".parse().unwrap()],
+                            public_key: client_public,
+                            preshared_key: Some(psk.clone()),
+                            persistent_keepalive: None,
+                        }],
                     },
-                    peers: vec![config::Peer {
-                        endpoint: None,
-                        allowed_ips: vec!["10.44.0.2/32".parse().unwrap()],
-                        public_key: client_public,
-                        preshared_key: Some(psk.clone()),
-                        persistent_keepalive: None,
-                    }],
-                })
+                    loopback_wireguard(),
+                )
                 .ok()
                 .map(|server| (server, port))
             })
@@ -883,7 +916,7 @@ mod tests {
                     allow_ipv6: false,
                     hold: None,
                 },
-                NetworkOptions::default(),
+                test_options(),
             )
             .await
             .unwrap();
@@ -938,13 +971,13 @@ mod tests {
                     allow_ipv6: false,
                     hold: None,
                 },
-                NetworkOptions::default(),
+                test_options(),
             )
             .await
             .unwrap();
             let mut peers = net.incoming_peers();
             let port = {
-                let probe = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+                let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
                 probe.local_addr().unwrap().port()
             };
             net.set_incoming(crate::IncomingConfig {
@@ -1049,7 +1082,7 @@ mod tests {
                 NetworkOptions {
                     ip_check_v4_url: "http://search.torrentplayer.test:8080/".into(),
                     ip_check_v6_url: None,
-                    ..NetworkOptions::default()
+                    ..test_options()
                 },
             )
             .await
@@ -1104,7 +1137,7 @@ mod tests {
                     });
                 }
             });
-            let tunnel = Tunnel::start(&config, None).await.unwrap();
+            let tunnel = Tunnel::start(&config, None, true).await.unwrap();
             tunnel
                 .healthy(
                     Duration::from_secs(2),
@@ -1166,7 +1199,7 @@ mod tests {
                 stream.write_all(&bytes).await.unwrap();
                 let _ = stream.shutdown().await;
             });
-            let tunnel = Tunnel::start(&config, None).await.unwrap();
+            let tunnel = Tunnel::start(&config, None, true).await.unwrap();
             tunnel
                 .healthy(
                     Duration::from_secs(2),
@@ -1237,7 +1270,7 @@ mod tests {
                     allow_ipv6: false,
                     hold: None,
                 },
-                NetworkOptions::default(),
+                test_options(),
             )
             .await
             .unwrap();
@@ -1406,7 +1439,7 @@ mod tests {
             retry_interval: Duration::from_millis(50),
             check_timeout: Duration::from_millis(500),
             wireguard_reply_timeout: reply_timeout,
-            ..NetworkOptions::default()
+            ..test_options()
         }
     }
 
@@ -1648,7 +1681,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(20), async {
             let (server, mut config) = pair();
             config.interface.dns.clear();
-            let tunnel = Tunnel::start(&config, None).await.unwrap();
+            let tunnel = Tunnel::start(&config, None, true).await.unwrap();
             assert_eq!(
                 tunnel.0.probe_target.unwrap().remote,
                 "192.0.2.1:9".parse().unwrap()
@@ -1980,7 +2013,7 @@ mod tests {
             },
             NetworkOptions {
                 check_timeout: Duration::from_millis(150),
-                ..NetworkOptions::default()
+                ..test_options()
             },
         )
         .await
@@ -2028,7 +2061,7 @@ mod tests {
                 stream.write_all(&answer).await.unwrap();
                 let _ = stream.shutdown().await;
             });
-            let tunnel = Tunnel::start(&config, None).await.unwrap();
+            let tunnel = Tunnel::start(&config, None, true).await.unwrap();
             tunnel
                 .healthy(
                     Duration::from_secs(3),
@@ -2060,7 +2093,7 @@ mod tests {
         let (server, mut config) = pair();
         config.interface.dns = vec!["10.44.0.1".into(), "corp.example".into()];
         validate(&config).unwrap();
-        let tunnel = Tunnel::start(&config, None).await.unwrap();
+        let tunnel = Tunnel::start(&config, None, true).await.unwrap();
         assert_eq!(tunnel.0.dns, ["10.44.0.1".parse::<IpAddr>().unwrap()]);
         tunnel.close();
         server.close();
@@ -2070,7 +2103,7 @@ mod tests {
     async fn missing_dns_never_falls_back_to_the_system_resolver() {
         let (server, mut config) = pair();
         config.interface.dns.clear();
-        let tunnel = Tunnel::start(&config, None).await.unwrap();
+        let tunnel = Tunnel::start(&config, None, true).await.unwrap();
         assert!(matches!(
             tunnel.resolve("api.ipify.org", 443, true).await,
             Err(NetError::InvalidConfig(_))
@@ -2095,7 +2128,7 @@ mod tests {
             let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
             let (endpoint, traffic) = relay(target, Arc::clone(&mode)).await;
             config.peers[0].endpoint = endpoint.to_string();
-            let tunnel = Tunnel::start(&config, None).await.unwrap();
+            let tunnel = Tunnel::start(&config, None, true).await.unwrap();
             tunnel
                 .healthy(
                     Duration::from_secs(2),
@@ -2165,7 +2198,7 @@ mod tests {
             let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
             let (endpoint, traffic) = relay(target, Arc::clone(&mode)).await;
             config.peers[0].endpoint = endpoint.to_string();
-            let tunnel = Tunnel::start(&config, None).await.unwrap();
+            let tunnel = Tunnel::start(&config, None, true).await.unwrap();
             tunnel
                 .healthy(
                     Duration::from_secs(2),
@@ -2219,7 +2252,7 @@ mod tests {
         // bind address"); 300 binds hit it with near certainty.
         let (key, _) = x25519::keypair();
         let (_, peer) = x25519::keypair();
-        let mut options = tokio_wireguard::interface::Options::default();
+        let mut options = loopback_wireguard();
         options.udp.recv_buffer_size = 1024;
         options.udp.send_buffer_size = 1024;
         let interface = Interface::new_with(

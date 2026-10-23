@@ -91,6 +91,11 @@ pub struct NetworkOptions {
     /// How long a WireGuard server may leave traffic unanswered before the tunnel is replaced
     /// by a new one (a fresh handshake and source port). See [`WIREGUARD_RESTART_AFTER`].
     pub wireguard_restart_after: Duration,
+    /// Open local sockets on loopback instead of every interface: the direct-mode incoming
+    /// listener, direct UDP sockets, SOCKS5 UDP relay sockets, and the WireGuard socket. Only for
+    /// tests, whose servers are all on loopback: a socket on every interface makes Windows ask
+    /// whether to allow each newly built test binary through the firewall. Off by default.
+    pub loopback_only: bool,
 }
 
 /// The default [`NetworkOptions::wireguard_reply_timeout`]: WireGuard's `KEEPALIVE_TIMEOUT`
@@ -114,6 +119,7 @@ impl Default for NetworkOptions {
             ip_check_v6_url: Some(IP_CHECK_V6_URL.to_owned()),
             wireguard_reply_timeout: WIREGUARD_REPLY_TIMEOUT,
             wireguard_restart_after: WIREGUARD_RESTART_AFTER,
+            loopback_only: false,
         }
     }
 }
@@ -725,6 +731,13 @@ impl Network {
         }
     }
 
+    /// Whether local sockets stay on loopback ([`NetworkOptions::loopback_only`], for tests),
+    /// for listeners other engines open themselves.
+    #[must_use]
+    pub fn loopback_only(&self) -> bool {
+        self.inner.options.loopback_only
+    }
+
     /// What connections may do right now.
     #[must_use]
     pub fn policy(&self) -> Policy {
@@ -825,12 +838,8 @@ impl Network {
         }
         let socket = match &route {
             Route::Direct => {
-                let any = if target.is_ipv4() {
-                    SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
-                } else {
-                    SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
-                };
-                std::net::UdpSocket::bind(any)?
+                let ip = crate::addr::local_ip(target.is_ipv6(), self.inner.options.loopback_only);
+                std::net::UdpSocket::bind(SocketAddr::new(ip, 0))?
             }
             Route::WireGuard(tunnel) => {
                 let socket = tunnel.udp_socket(target).await?;
@@ -844,7 +853,11 @@ impl Network {
             Route::Socks(cfg) => {
                 let socket = tokio::time::timeout(
                     self.inner.options.connect_timeout,
-                    crate::socks_udp::SocksUdp::open(cfg, lease.clone()),
+                    crate::socks_udp::SocksUdp::open(
+                        cfg,
+                        lease.clone(),
+                        self.inner.options.loopback_only,
+                    ),
                 )
                 .await
                 .map_err(|_| NetError::Timeout)??;
@@ -1277,7 +1290,9 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
                         // A tunnel the health check closed is replaced by one at the endpoint's
                         // next address; if its server had stopped answering, the new one must
                         // hear from the server before traffic resumes.
-                        let tunnel = Tunnel::start(&cfg, existing.as_ref()).await?;
+                        let tunnel =
+                            Tunnel::start(&cfg, existing.as_ref(), net.options.loopback_only)
+                                .await?;
                         let mut st = net.state();
                         if st.generation != generation || st.conn == ConnectionState::Disconnected {
                             tunnel.close();

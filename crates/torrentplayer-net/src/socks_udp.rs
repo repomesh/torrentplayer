@@ -26,7 +26,11 @@ impl Drop for SocksUdp {
 }
 
 impl SocksUdp {
-    pub(crate) async fn open(cfg: &Socks5Config, mut lease: Lease) -> Result<Self, NetError> {
+    pub(crate) async fn open(
+        cfg: &Socks5Config,
+        mut lease: Lease,
+        loopback_only: bool,
+    ) -> Result<Self, NetError> {
         let mut control = TcpStream::connect((cfg.host.trim(), cfg.port))
             .await
             .map_err(NetError::ProxyUnreachable)?;
@@ -53,15 +57,8 @@ impl SocksUdp {
                 "the proxy supplied an invalid UDP relay".into(),
             ));
         }
-        let any = SocketAddr::new(
-            if relay.is_ipv4() {
-                Ipv4Addr::UNSPECIFIED.into()
-            } else {
-                Ipv6Addr::UNSPECIFIED.into()
-            },
-            0,
-        );
-        let socket = UdpSocket::bind(any).await?;
+        let local = crate::addr::local_ip(relay.is_ipv6(), loopback_only);
+        let socket = UdpSocket::bind(SocketAddr::new(local, 0)).await?;
         socket.connect(relay).await?;
         let closed = CancellationToken::new();
         let stopped = closed.clone();

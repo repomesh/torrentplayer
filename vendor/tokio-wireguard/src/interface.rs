@@ -62,6 +62,10 @@ pub struct Options {
     pub tcp: TcpOptions,
     /// UDP options
     pub udp: UdpOptions,
+    /// Added for TorrentPlayer: the address the WireGuard UDP socket binds. `None` (the
+    /// default) binds every interface. The socket is dual-stack, so an IPv4 address is bound
+    /// in its IPv4-mapped form and still reaches IPv4 endpoints.
+    pub bind_address: Option<std::net::IpAddr>,
 }
 
 /// Advanced TCP options for configuring an [`Interface`]
@@ -242,7 +246,8 @@ impl Interface {
         let (mut interface, mut device) = Self::smol(&config);
 
         let mut sockets = sockets::Sockets::new();
-        let mut tunnel = tunnel::Tunnel::new(&config, peer_configs)?;
+        // Modified for TorrentPlayer: the socket's address comes from the options.
+        let mut tunnel = tunnel::Tunnel::new(&config, peer_configs, options.bind_address)?;
 
         let poll = time::sleep_until(time::Instant::now());
         let mut timers = time::interval(options.timer_interval);
@@ -561,6 +566,7 @@ impl Default for Options {
             timer_interval: Duration::from_millis(100),
             tcp: TcpOptions::default(),
             udp: UdpOptions::default(),
+            bind_address: None,
         }
     }
 }

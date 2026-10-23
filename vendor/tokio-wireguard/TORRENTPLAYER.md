@@ -62,3 +62,9 @@ TCP timeout and keep-alive options (`src/interface.rs` `TcpOptions::timeout` and
 smoltcp sockets had neither, so a connection whose peer vanished stayed open for good.
 torrentplayer-net sets a 2-minute timeout, 30-second keep-alives, and a listener backlog of 16
 (each pending slot holds full buffers).
+
+Socket address option (`src/interface.rs` `Options::bind_address`, used by
+`src/interface/tunnel.rs` `Tunnel::new`, marked "Added/Modified for TorrentPlayer"): the
+WireGuard UDP socket always bound `[::]` (every interface). `bind_address` keeps that default
+and lets torrentplayer-net's tests bind loopback instead (an IPv4 address in its IPv4-mapped
+form on the dual-stack socket), so their newly built binaries never trigger a firewall prompt.

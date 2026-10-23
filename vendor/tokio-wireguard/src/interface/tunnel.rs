@@ -36,6 +36,7 @@ impl Tunnel {
     pub fn new(
         config: &crate::config::Interface,
         peer_configs: impl IntoIterator<Item = crate::config::Peer>,
+        bind_address: Option<IpAddr>,
     ) -> Result<Self, io::Error> {
         let private_key = config.private_key.clone();
         let public_key = PublicKey::from(&private_key);
@@ -46,8 +47,14 @@ impl Tunnel {
         #[cfg(not(windows))]
         socket.set_reuse_address(true)?;
 
-        let address: SockAddr =
-            SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.listen_port.unwrap_or(0), 0, 0).into();
+        // Modified for TorrentPlayer: bound to `bind_address` (see `Options::bind_address`),
+        // every interface by default.
+        let ip = match bind_address {
+            None => Ipv6Addr::UNSPECIFIED,
+            Some(IpAddr::V6(ip)) => ip,
+            Some(IpAddr::V4(ip)) => ip.to_ipv6_mapped(),
+        };
+        let address: SockAddr = SocketAddrV6::new(ip, config.listen_port.unwrap_or(0), 0, 0).into();
         socket.bind(&address)?;
 
         let socket = UdpSocket::from_std(socket.into())?;

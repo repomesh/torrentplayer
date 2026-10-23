@@ -61,12 +61,32 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     }
 }
 
+/// The address a local socket of the given family binds to: every interface (the unspecified
+/// address), or loopback when [`NetworkOptions::loopback_only`](crate::NetworkOptions) is set
+/// for tests.
+pub(crate) fn local_ip(v6: bool, loopback_only: bool) -> IpAddr {
+    match (v6, loopback_only) {
+        (false, false) => Ipv4Addr::UNSPECIFIED.into(),
+        (true, false) => Ipv6Addr::UNSPECIFIED.into(),
+        (false, true) => Ipv4Addr::LOCALHOST.into(),
+        (true, true) => Ipv6Addr::LOCALHOST.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn public(s: &str) -> bool {
         is_public_ip(s.parse().unwrap())
+    }
+
+    #[test]
+    fn local_sockets_bind_every_interface_unless_tests_ask_for_loopback() {
+        assert_eq!(local_ip(false, false), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(local_ip(true, false), IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(local_ip(false, true), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(local_ip(true, true), IpAddr::V6(Ipv6Addr::LOCALHOST));
     }
 
     #[test]
