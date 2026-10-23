@@ -13,6 +13,8 @@
 
 import type { Queue } from './bindings/Queue';
 import type { FileSummary } from './bindings/FileSummary';
+import type { ItemDownload } from './bindings/ItemDownload';
+import { progressOf } from './downloads';
 import { isPlayable } from './files';
 import type { QueueItem } from './bindings/QueueItem';
 import { torrentLoadKeys } from './torrent-loads';
@@ -592,6 +594,121 @@ function lastIndexOf<T>(items: readonly T[], test: (item: T) => boolean): number
     }
   }
   return -1;
+}
+
+// --- Sort by… -------------------------------------------------------------------------------
+
+/** What "Sort by…" can order the queue by. */
+export type SortKey = 'name' | 'added' | 'size' | 'progress' | 'speed' | 'peers' | 'eta';
+
+/** The sort keys in menu order, with their labels. */
+export const SORT_KEYS: readonly { key: SortKey; label: string }[] = [
+  { key: 'name', label: 'Name (A–Z)' },
+  { key: 'added', label: 'Recently added' },
+  { key: 'size', label: 'Size (largest first)' },
+  { key: 'progress', label: 'Progress (most downloaded first)' },
+  { key: 'speed', label: 'Download speed (fastest now first)' },
+  { key: 'peers', label: 'Peers (most connected first)' },
+  { key: 'eta', label: 'Time left (shortest first)' },
+];
+
+const sortNames = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+
+/** A group's name for sorting: its torrent's name, or its first item's title. */
+function groupName(group: QueueGroup): string {
+  const first = group.items[0];
+  return first?.torrentName ?? first?.title ?? '';
+}
+
+function largest(values: readonly (number | null | undefined)[]): number | null {
+  const known = values.filter((v): v is number => typeof v === 'number' && Number.isFinite(v));
+  return known.length === 0 ? null : Math.max(...known);
+}
+
+/**
+ * A group's value for a numeric sort key, or null when unknown (sorted last). Live values come
+ * from one download snapshot, taken when the user sorts:
+ *
+ * - `speed` and `peers`: the highest of its items. Items of one torrent report their torrent's
+ *   shared rate and peers, so adding them up would count the torrent once per item.
+ * - `progress`: its furthest-downloaded item (the share of its file downloaded).
+ * - `eta`: the item that finishes soonest (the smallest time left).
+ * - `size`: its queued items' sizes added up (unknown sizes left out).
+ * - `added`: its newest item; items saved before `addedAt` existed have none.
+ */
+function groupValue(
+  group: QueueGroup,
+  key: Exclude<SortKey, 'name'>,
+  stats: ReadonlyMap<string, ItemDownload>,
+): number | null {
+  const live = group.items
+    .map((item) => stats.get(item.id))
+    .filter((d): d is ItemDownload => d !== undefined);
+  switch (key) {
+    case 'added':
+      return largest(group.items.map((item) => item.addedAt));
+    case 'size': {
+      const sizes = group.items
+        .map((item) => item.sizeBytes)
+        .filter((size): size is number => size !== null);
+      return sizes.length === 0 ? null : sizes.reduce((sum, size) => sum + size, 0);
+    }
+    case 'progress':
+      return largest(live.map(progressOf));
+    case 'speed':
+      return largest(live.map((d) => d.downloadBps));
+    case 'peers':
+      return largest(live.map((d) => d.peersLive));
+    case 'eta': {
+      const soonest = largest(live.map((d) => (d.etaSecs === null ? null : -d.etaSecs)));
+      return soonest === null ? null : -soonest;
+    }
+  }
+}
+
+/**
+ * "Sort by…": reorders the queue once, by `key`. Each torrent's files stay together in their
+ * order (a single video is its own group); torrents with equal or unknown values keep their
+ * current order, unknown ones after the rest. The live keys (`progress`, `speed`, `peers`,
+ * `eta`) read `stats`, the latest download snapshot, once. Nothing re-sorts later: the result
+ * is simply the queue's order. Returns the same queue if nothing moved.
+ */
+export function sortQueue(
+  queue: Queue,
+  key: SortKey,
+  stats: ReadonlyMap<string, ItemDownload> = new Map(),
+): Queue {
+  const ranked = groupQueue(queue).map((group, index) => ({
+    group,
+    index,
+    name: groupName(group),
+    value: key === 'name' ? null : groupValue(group, key, stats),
+  }));
+  ranked.sort((a, b) => {
+    if (key === 'name') {
+      return sortNames.compare(a.name, b.name) || a.index - b.index;
+    }
+    if (a.value === null || b.value === null) {
+      return (a.value === null ? 1 : 0) - (b.value === null ? 1 : 0) || a.index - b.index;
+    }
+    const order = key === 'eta' ? a.value - b.value : b.value - a.value;
+    return order || a.index - b.index;
+  });
+  const items = ranked.flatMap((r) => r.group.items);
+  return items.every((item, i) => item === queue.items[i]) ? queue : { ...queue, items };
+}
+
+/**
+ * Undo for a reordering: puts the items back in `before`'s order. Items added since keep
+ * their group (or go at the end), items removed since stay removed, and the cursor stays.
+ */
+export function restoreOrder(queue: Queue, before: Queue): Queue {
+  const now = new Map(queue.items.map((item) => [item.id, item]));
+  const kept = before.items.filter((item) => now.has(item.id)).map((item) => now.get(item.id));
+  const restored = kept.filter((item): item is QueueItem => item !== undefined);
+  const known = new Set(restored.map((item) => item.id));
+  const added = queue.items.filter((item) => !known.has(item.id));
+  return { ...queue, items: keepGroupsTogether([...restored, ...added]) };
 }
 
 /** One row under a torrent in the queue's tree: a video, and its queue item if it is queued. */

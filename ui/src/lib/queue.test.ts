@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FileSummary } from './bindings/FileSummary';
+import type { ItemDownload } from './bindings/ItemDownload';
 import {
   MAX_QUEUE_ITEMS,
   QueueSaver,
@@ -27,12 +28,14 @@ import {
   playbackEnded,
   remove,
   removeItem,
+  restoreOrder,
   restoreRemoved,
   resolveTorrent,
   sameEntry,
   sanitizeQueue,
   setCurrent,
   setPaused,
+  sortQueue,
   upcomingCount,
   type Queue,
   type QueueItem,
@@ -577,5 +580,135 @@ describe('undoing a removal', () => {
     const again = enqueue(after, [item('a2', 0)]).queue;
     expect(restoreRemoved(again, removed)).toBe(again);
     expect(removeItem(start, 'missing').removed).toBeNull();
+  });
+});
+
+describe('sort by', () => {
+  /** A download snapshot entry for `id`. */
+  function stat(id: string, over: Partial<ItemDownload> = {}): [string, ItemDownload] {
+    return [
+      id,
+      {
+        id,
+        state: 'downloading',
+        downloadBps: 0,
+        uploadBps: 0,
+        peersLive: 0,
+        peersConnecting: 0,
+        peersSeen: 0,
+        downloaded: 0,
+        length: 1000,
+        etaSecs: null,
+        startable: false,
+        limited: false,
+        uploading: false,
+        waitReason: null,
+        error: null,
+        ...over,
+      },
+    ];
+  }
+  const named = (id: string, title: string, over: Partial<QueueItem> = {}): QueueItem => ({
+    ...item(id, null, id.repeat(40).slice(0, 40)),
+    title,
+    torrentName: null,
+    ...over,
+  });
+
+  it('sorts by name, A to Z with numbers in order, keeping each torrent together', () => {
+    const q = queueFrom(
+      [named('c', 'Zeta'), of('b', 2), of('b', 1), named('a', 'alpha 10'), named('d', 'Alpha 2')],
+      'b1',
+    );
+    // Torrent `b` is named "b" (its torrentName); its files keep their order (2, then 1).
+    const sorted = sortQueue(q, 'name');
+    expect(ids(sorted)).toEqual(['d', 'a', 'b2', 'b1', 'c']);
+    expect(sorted.current).toBe('b1');
+    expect(sortQueue(sorted, 'name')).toBe(sorted);
+  });
+
+  it('sorts by recently added, undated items after the dated ones in their order', () => {
+    const q = queueFrom([
+      named('old1', 'x'),
+      named('a', 'x', { addedAt: 100 }),
+      named('old2', 'x'),
+      named('b', 'x', { addedAt: 300 }),
+      named('c', 'x', { addedAt: 200 }),
+    ]);
+    expect(ids(sortQueue(q, 'added'))).toEqual(['b', 'c', 'a', 'old1', 'old2']);
+    // A torrent counts as recent as its newest file.
+    const group = queueFrom([
+      { ...of('a', 1), addedAt: 50 },
+      { ...of('b', 1), addedAt: 10 },
+      { ...of('b', 2), addedAt: 90 },
+    ]);
+    expect(ids(sortQueue(group, 'added'))).toEqual(['b1', 'b2', 'a1']);
+  });
+
+  it('sorts by size, a torrent by its queued files added up, unknown sizes last', () => {
+    const q = queueFrom([
+      named('small', 'x', { sizeBytes: 10 }),
+      named('unknown', 'x', { sizeBytes: null }),
+      { ...of('t', 1), sizeBytes: 30 },
+      { ...of('t', 2), sizeBytes: 30 },
+      named('big', 'x', { sizeBytes: 50 }),
+    ]);
+    expect(ids(sortQueue(q, 'size'))).toEqual(['t1', 't2', 'big', 'small', 'unknown']);
+  });
+
+  it('sorts by live progress, speed, peers, and time left from one snapshot', () => {
+    const q = queueFrom([named('a', 'x'), named('b', 'x'), named('c', 'x'), named('d', 'x')]);
+    const stats = new Map([
+      stat('a', { downloaded: 100, downloadBps: 5, peersLive: 2, etaSecs: 90 }),
+      stat('b', { downloaded: 900, downloadBps: 50, peersLive: 1, etaSecs: 5 }),
+      stat('c', { downloaded: 500, downloadBps: 20, peersLive: 9, etaSecs: 30 }),
+    ]);
+    // `d` is not in the snapshot: last for every live key.
+    expect(ids(sortQueue(q, 'progress', stats))).toEqual(['b', 'c', 'a', 'd']);
+    expect(ids(sortQueue(q, 'speed', stats))).toEqual(['b', 'c', 'a', 'd']);
+    expect(ids(sortQueue(q, 'peers', stats))).toEqual(['c', 'a', 'b', 'd']);
+    expect(ids(sortQueue(q, 'eta', stats))).toEqual(['b', 'c', 'a', 'd']);
+    // Without a snapshot nothing is known, so nothing moves.
+    expect(sortQueue(q, 'speed')).toBe(q);
+  });
+
+  it('ranks a torrent by its best file for live keys, and treats unknown time left as last', () => {
+    const q = queueFrom([of('a', 1), of('a', 2), named('s', 'x'), named('u', 'x')]);
+    const stats = new Map([
+      // Files of one torrent report the torrent's shared rate and peers.
+      stat('a1', { downloadBps: 10, peersLive: 3, etaSecs: null, downloaded: 0 }),
+      stat('a2', { downloadBps: 10, peersLive: 3, etaSecs: 40, downloaded: 800 }),
+      stat('s', { downloadBps: 15, peersLive: 4, etaSecs: 60, downloaded: 600 }),
+      stat('u', { etaSecs: null, length: null }),
+    ]);
+    // Speed is the torrent's rate (10), not its files added up (20).
+    expect(ids(sortQueue(q, 'speed', stats))).toEqual(['s', 'a1', 'a2', 'u']);
+    expect(ids(sortQueue(q, 'peers', stats))).toEqual(['s', 'a1', 'a2', 'u']);
+    expect(ids(sortQueue(q, 'eta', stats))).toEqual(['a1', 'a2', 's', 'u']);
+    // `u`'s length is unknown, so its progress is too.
+    expect(ids(sortQueue(q, 'progress', stats))).toEqual(['a1', 'a2', 's', 'u']);
+  });
+
+  it('keeps the current order for ties', () => {
+    const q = queueFrom([
+      named('a', 'Same', { sizeBytes: 5 }),
+      named('b', 'same', { sizeBytes: 5 }),
+      named('c', 'Same', { sizeBytes: 5 }),
+    ]);
+    expect(sortQueue(q, 'name')).toBe(q);
+    expect(sortQueue(q, 'size')).toBe(q);
+    expect(sortQueue(emptyQueue(), 'name')).toEqual(emptyQueue());
+  });
+
+  it('undoes a sort, keeping what changed since', () => {
+    const before = queueFrom([named('a', 'c'), named('b', 'b'), named('c', 'a')], 'a');
+    const after = sortQueue(before, 'name');
+    expect(ids(after)).toEqual(['c', 'b', 'a']);
+    expect(restoreOrder(after, before)).toEqual(before);
+    // Since then: b was removed and d was queued.
+    const changed = enqueue(remove(after, 'b'), [named('d', 'd')]).queue;
+    const undone = restoreOrder(changed, before);
+    expect(ids(undone)).toEqual(['a', 'c', 'd']);
+    expect(undone.current).toBe('a');
   });
 });

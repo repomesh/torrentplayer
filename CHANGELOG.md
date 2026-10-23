@@ -30,15 +30,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- The queue downloads in its own order, which changes only when you move items. The "In
-  order" / "Fastest first" choice, "Play ready videos first" (`playback.optimizeQueue`) with its
-  "Keep each torrent's order" option (`playback.keepCourseOrder`), and the "Fastest" badge are
-  removed. Queues and settings saved by older versions load as before and drop these on the
-  next save.
-- The queue is now manual. Nothing in it is skipped, paused, or removed for you: playing a video
-  further down no longer marks the videos in between as skipped (also when the app starts), and
-  playing or finishing a skipped video keeps it skipped until you tick it again. Only merging
-  the same file of one torrent queued twice still happens on its own.
+- The queue is now manual. Nothing in it is paused, removed, or reordered for you: playing a
+  video further down no longer marks the videos in between as skipped (also when the app
+  starts). Only merging the same file of one torrent queued twice still happens on its own.
+- Skipping is gone. Unticking a video in the queue removes it, with Undo; a file of a torrent
+  with several videos stays listed, so ticking it adds it again. Pause keeps a video without
+  downloading or uploading it. Queues saved with skipped videos load them as paused.
+- The queue downloads in its own order. The "In order" / "Fastest first" choice, "Play ready
+  videos first" (`playback.optimizeQueue`) with its "Keep each torrent's order" option
+  (`playback.keepCourseOrder`), and the "Fastest" badge are removed; queues and settings saved
+  by older versions load as before and drop these on the next save. Instead, **Sort by…** in
+  the queue's ⋯ menu reorders the queue once, with Undo, by name, recently added, size,
+  progress, download speed, peers, or time left. Each torrent's files stay together, and
+  nothing re-sorts later.
 - When a video ends it is marked played and stays on its end. The "Up next" countdown and the
   "Play the next item in the queue automatically" setting (`playback.autoplayNext`) are gone;
   pick the next video yourself, or press Shift+N.
@@ -49,7 +53,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `bandwidth.seedRatioTarget`, `bandwidth.seedTimeLimitMinutes`) are removed. Older settings
   files load as before and drop them on the next save.
 - One pause per video, torrent, or the whole queue stops both downloading and uploading until
-  you resume it, and now applies to finished and skipped videos too. The only automatic hold is
+  you resume it, and now applies to finished videos too. The only automatic hold is
   the one that protects the video playing: background downloads that wait for it now say
   "Waiting for playback", and it never changes your own pauses. A finished video that is
   sharing reads "Downloaded · seeding".

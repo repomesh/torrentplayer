@@ -25,6 +25,7 @@
   import { fileName, isPlayable, playTarget, readTorrentFile } from './lib/files';
   import { dismissVpnHint, followSeedingStarted, followVpnHint, showVpnHint } from './lib/vpnHint';
   import { explorerTorrents, torrentKeys, type ExplorerTorrent } from './lib/explorer';
+  import { byId } from './lib/downloads';
   import {
     addTorrentFile,
     addTorrentLink,
@@ -79,6 +80,7 @@
     newItemId,
     nextItem,
     playbackEnded,
+    restoreOrder,
     putFirst,
     queueEntryState,
     remove,
@@ -88,6 +90,9 @@
     sanitizeQueue,
     setCurrent,
     setPaused,
+    sortQueue,
+    SORT_KEYS,
+    type SortKey,
     upcomingCount,
     type MainFile,
     type Queue,
@@ -268,6 +273,23 @@
       clearInterval(timer);
     };
   });
+
+  /** "Sort by…": reorders the queue once, with Undo. Nothing re-sorts it later. */
+  function sortBy(key: SortKey): void {
+    const before = queue;
+    const sorted = sortQueue(queue, key, byId(downloads));
+    const label = SORT_KEYS.find((k) => k.key === key)?.label ?? key;
+    if (sorted === before) {
+      showToast(`Already in that order: ${label}`);
+      return;
+    }
+    queue = sorted;
+    showToast(`Sorted by ${label}`, {
+      undo: () => {
+        queue = restoreOrder(queue, before);
+      },
+    });
+  }
 
   function removeGroup(key: string): void {
     const before = queue;
@@ -913,6 +935,7 @@
           sizeBytes: result.sizeBytes,
           paused: false,
           played: false,
+          addedAt: Date.now(),
         },
       ],
       clipTitle(result.title),
@@ -931,6 +954,7 @@
       sizeBytes: file.length,
       paused: false,
       played: false,
+      addedAt: Date.now(),
     }));
   }
 
@@ -1437,6 +1461,7 @@
               onTogglePause={(ids: readonly string[], paused: boolean) => {
                 queue = setPaused(queue, ids, paused);
               }}
+              onSort={sortBy}
               filesOf={(key: string) => torrentOf(key)?.files ?? null}
               {playingFile}
               onPlayFile={(key: string, file: FileSummary) => {

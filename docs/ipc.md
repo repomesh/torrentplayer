@@ -639,10 +639,11 @@ whole after each change. Each item holds only what is needed to play it again: t
 link (`source`: a magnet link, or an http(s) link to a `.torrent` file; torrents opened from a
 file are saved as their `TorrentSummary.magnet`, with the info hash, name, and up to 20 of the
 file's trackers; a magnet link may list at most 64 trackers), `fileIndex` (`null` plays the
-torrent's main video), `title`, `torrentName`, `sizeBytes`, and `infoHash`. The `paused`,
-`skipped`, and `played` flags separately record the user's pauses (of download and upload
-together), videos the user unticked, and videos that reached their end; only the user sets
-`paused` and `skipped`. Stream URLs are never stored: links to this computer (`localhost`,
+torrent's main video), `title`, `torrentName`, `sizeBytes`, `infoHash`, and `addedAt` (when
+it was queued, milliseconds since the Unix epoch; absent for items queued before 0.3.1). The
+`paused` and `played` flags separately record the user's pause (of download and upload together)
+and videos that reached their end; only the user sets `paused`. Items saved with `skipped: true`
+(0.3.0) load as paused, and `skipped` and the queue's old `order` are dropped on the next save. Stream URLs are never stored: links to this computer (`localhost`,
 loopback addresses) are refused.
 
 #### `load_queue`

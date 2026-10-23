@@ -895,6 +895,7 @@ mod tests {
             size_bytes: None,
             paused,
             played: false,
+            added_at: None,
         }
     }
 

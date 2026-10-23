@@ -8,7 +8,15 @@
   import type { LibraryItem } from '../bindings/LibraryItem';
   import type { ReadinessState } from '../bindings/ReadinessState';
   import { byId, describeLink, type DownloadsSnapshot } from '../downloads';
-  import { currentIndex, groupKey, upcomingCount, type Queue, type QueueItem } from '../queue';
+  import {
+    currentIndex,
+    groupKey,
+    SORT_KEYS,
+    upcomingCount,
+    type Queue,
+    type QueueItem,
+    type SortKey,
+  } from '../queue';
   import QueueList from './QueueList.svelte';
 
   interface Props {
@@ -42,6 +50,8 @@
     watchProgress?: ReadonlyMap<string, LibraryItem>;
     /** Pauses or resumes background downloading of items. */
     onTogglePause?: (ids: readonly string[], paused: boolean) => void;
+    /** Reorders the queue once by `key` ("Sort by…"); it never re-sorts on its own. */
+    onSort?: (key: SortKey) => void;
   }
 
   let {
@@ -68,6 +78,7 @@
     downloads = null,
     watchProgress = new Map(),
     onTogglePause,
+    onSort,
   }: Props = $props();
 
   const linkLine = $derived(downloads ? describeLink(downloads.link) : null);
@@ -170,6 +181,24 @@
           }
         }}
       >
+        {#if onSort}
+          <div class="sort" role="group" aria-labelledby="queue-sort-label">
+            <span id="queue-sort-label" class="menu-label"
+              >Sort by… <span class="hint">(once; drag to reorder after)</span></span
+            >
+            {#each SORT_KEYS as option (option.key)}
+              <button
+                type="button"
+                disabled={queue.items.length < 2}
+                onclick={() => {
+                  onSort(option.key);
+                  closeMenu();
+                }}>{option.label}</button
+              >
+            {/each}
+          </div>
+          <hr />
+        {/if}
         {#if onTogglePause}
           <button
             type="button"
@@ -465,7 +494,8 @@
     font-size: 0.85rem;
   }
 
-  .menu > button {
+  .menu > button,
+  .sort > button {
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -476,13 +506,37 @@
     cursor: pointer;
   }
 
-  .menu > button:hover:not(:disabled) {
+  .menu > button:hover:not(:disabled),
+  .sort > button:hover:not(:disabled) {
     background: rgb(255 255 255 / 6%);
   }
 
-  .menu > button:disabled {
+  .menu > button:disabled,
+  .sort > button:disabled {
     cursor: default;
     opacity: 0.4;
+  }
+
+  .sort {
+    display: grid;
+    gap: 0.15rem;
+  }
+
+  .menu-label {
+    padding: 0.3rem 0.5rem 0.1rem;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+  }
+
+  .menu-label .hint {
+    opacity: 0.8;
+  }
+
+  .menu hr {
+    width: 100%;
+    margin: 0.2rem 0;
+    border: none;
+    border-top: 1px solid rgb(255 255 255 / 6%);
   }
 
   .confirm {

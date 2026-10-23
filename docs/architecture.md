@@ -143,8 +143,8 @@ time. Every view stays reachable from the rail.
   the stream.
 - **Queue** (`ui/src/lib/queue.ts`, persisted by `torrentplayer-library`) is a playlist with a cursor.
   It is manual: a video that ends is marked played and stays on its end; nothing plays next on
-  its own. Moving the cursor never changes an item's flags, and only the user skips, pauses, or
-  removes items (the same file of one torrent queued twice is merged into one entry). The
+  its own. Moving the cursor never changes an item's flags, and only the user pauses, removes,
+  or reorders items (the same file of one torrent queued twice is merged into one entry). The
   playlist panel beside the player collapses with Q, and Shift+N plays the next item. Fullscreen is requested on the stage that holds the player,
   not the player itself, so it stays on when the next video's player replaces the last one.
 - **Library and resume** (`torrentplayer-library`, `ui/src/lib/library.ts`) identify a playable file by
@@ -158,7 +158,11 @@ time. Every view stays reachable from the rail.
   Resume or Start over when `playback.resumePosition` is on.
 - **One queue, in Playing.** The playlist panel beside the player is the queue (there is no
   separate Queue page); Playing is reachable with nothing playing, showing a placeholder. Its
-  ⋯ menu holds "Pause all", "Clear played", and "Clear all".
+  ⋯ menu holds "Sort by…", "Pause all", "Clear played", and "Clear all". "Sort by…"
+  (`sortQueue`) reorders the queue once, with Undo (`restoreOrder`), by name, recently added
+  (`QueueItem.addedAt`), size, progress, download speed, peers, or time left; the live keys read
+  the current `queue_downloads` snapshot once. Each torrent's files stay together in their
+  order, ties and unknown values keep the current order, and nothing re-sorts later.
 - **Torrent groups as a tree** (`QueueList.svelte`, an ARIA treeview). A torrent's queued files
   stay together (`groupKey`: the info hash, or the link) and new files join their group in
   lecture order. A torrent with several videos is a node whose videos (all of them once its
@@ -189,10 +193,9 @@ time. Every view stays reachable from the rail.
   current one ranks first, then the rest after the current item, then items before it
   (played, or passed over), each in queue order. This ranking only matters with a maximum of
   downloads at once. Torrents are added four at a time so
-  a long queue does not fetch all of its metadata at once. Items keep paused, skipped, and
-  completed state independently (`QueueItem.paused`, `.skipped`, `.played`), and only the user
-  sets `paused` and `skipped`. Paused, skipped, finished, and waiting items' files are
-  deselected. A queued torrent keeps running and uploading, finished or not, watched or not,
+  a long queue does not fetch all of its metadata at once. Items keep paused and completed
+  state independently (`QueueItem.paused`, `.played`), and only the user sets `paused`;
+  unticking a video removes it. Paused, finished, and waiting items' files are deselected. A queued torrent keeps running and uploading, finished or not, watched or not,
   until the user pauses all of its items (one pause stops its download and upload together) or
   removes them from the queue. The only automatic hold is the playback protection above, shown
   as "Waiting for playback"; it never changes `QueueItem.paused`. The settings' download limit covers everything together (both engines, playback

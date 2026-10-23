@@ -129,9 +129,10 @@ sources, details, and where other tools are the better fit.
   torrents keep sharing, finished or not, until you pause or remove them, with one upload limit
   across both engines.
 - **In your order.** The queue downloads in the order you set, so series, albums, and courses
-  arrive in sequence; only you reorder it. Pause any video, a whole torrent, or everything with
-  one click; a pause stops download and upload until you resume.
-- **You stay in charge.** Nothing in the queue is paused, skipped, or removed for you, and the
+  arrive in sequence; only you reorder it, by dragging or once with **Sort by…** (name, recently
+  added, size, progress, speed, peers, or time left). Pause any video, a whole torrent, or
+  everything with one click; a pause stops download and upload until you resume.
+- **You stay in charge.** Nothing in the queue is paused, removed, or reordered for you, and the
   next video plays only when you pick it.
 
 ### A player for video and audio

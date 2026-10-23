@@ -261,6 +261,7 @@ mod tests {
                 size_bytes: None,
                 paused: true,
                 played: false,
+                added_at: Some(1_792_000_000_000),
             }],
             current: Some("a".into()),
         };

@@ -42,4 +42,9 @@ paused: boolean,
  * The video reached its end during playback. Kept separately from the cursor so jumping
  * ahead does not make every item before it look watched.
  */
-played: boolean, };
+played: boolean, 
+/**
+ * When it was queued, in milliseconds since the Unix epoch, for "Sort by… Recently
+ * added". Items queued before 0.3.1 have none.
+ */
+addedAt?: number, };

@@ -451,6 +451,7 @@ mod tests {
             size_bytes: None,
             paused: false,
             played: false,
+            added_at: None,
         };
         let queue = Queue {
             items: vec![

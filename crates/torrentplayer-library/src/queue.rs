@@ -68,6 +68,11 @@ pub struct QueueItem {
     /// ahead does not make every item before it look watched.
     #[serde(default)]
     pub played: bool,
+    /// When it was queued, in milliseconds since the Unix epoch, for "Sort by… Recently
+    /// added". Items queued before 0.3.1 have none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub added_at: Option<u64>,
 }
 
 /// The queue: items in play order and a cursor.
@@ -457,6 +462,7 @@ mod tests {
             size_bytes: Some(1_234_567_890),
             paused: false,
             played: false,
+            added_at: None,
         }
     }
 
@@ -510,6 +516,31 @@ mod tests {
         let loaded = store.load().queue;
         assert!(!loaded.items[1].paused);
         assert!(!loaded.items[0].played);
+    }
+
+    #[test]
+    fn keeps_when_items_were_added_and_loads_items_without_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::new(dir.path());
+        let mut saved = queue(&["a", "b"], None);
+        saved.items[0].added_at = Some(1_792_000_000_000);
+        store.save(&saved).unwrap();
+        assert_eq!(store.load().queue, saved);
+        let json: Value = serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
+        assert_eq!(json["items"][0]["addedAt"], 1_792_000_000_000_u64);
+        assert!(
+            json["items"][1].get("addedAt").is_none(),
+            "unknown: left out"
+        );
+
+        // A file saved before the field existed.
+        let mut old = json;
+        old["items"][0].as_object_mut().unwrap().remove("addedAt");
+        fs::write(store.path(), old.to_string()).unwrap();
+        let loaded = store.load();
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        assert_eq!(loaded.queue.items.len(), 2);
+        assert!(loaded.queue.items.iter().all(|i| i.added_at.is_none()));
     }
 
     #[test]
