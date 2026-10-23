@@ -227,7 +227,7 @@ impl Scenario {
             }
             _ => match self.download_mibps {
                 Some(limit) => format!("public swarm, {}, {limit} MiB/s limit", self.source()),
-                None => format!("public swarm, {}", self.source()),
+                None => format!("public swarm, {}, no download limit", self.source()),
             },
         }
     }
@@ -683,7 +683,7 @@ impl Scenario {
         };
         match self.download_mibps {
             Some(limit) => format!("public · {source} · {limit} MiB/s cap"),
-            None => format!("public · {source}"),
+            None => format!("public · {source} · no cap"),
         }
     }
 }
@@ -1282,6 +1282,15 @@ mod tests {
             .label(),
             "public swarm, peers + web seeds, 10 MiB/s limit"
         );
+        let uncapped = Scenario {
+            download_mibps: None,
+            ..public
+        };
+        assert_eq!(
+            uncapped.label(),
+            "public swarm, peers only, no download limit"
+        );
+        assert_eq!(uncapped.short(), "public · peers only · no cap");
     }
 
     #[test]

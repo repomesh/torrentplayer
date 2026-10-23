@@ -116,7 +116,7 @@
 //! `bench-results/<UTC timestamp>/`). Local media: both engines × `--links` (MiB/s, default
 //! 2,8,25) × `--seeders` (default 1,4) at `--rtt-ms` (default 40), plus 8 MiB/s with 4 seeders at
 //! 120 ms, 3 runs each. Torrents and magnet links: their public swarm, both engines, a 10 MiB/s
-//! download limit (`--download-mibps`), 3 runs, from peers only: web seeds (BEP 19) are off for
+//! download limit (`--download-mibps N`; `0` removes it), 3 runs, from peers only: web seeds (BEP 19) are off for
 //! the swarm engine, as librqbit never uses them, and `--web-seeds` adds a separate swarm row
 //! with them. The report lists each torrent's trackers and web seeds. These download from and
 //! upload to strangers, so they run only with `public` or `--public`. `--quick`: 1 run, and for
@@ -1005,7 +1005,8 @@ fn apply_media(info: &MediaInfo, bench: &mut BenchConfig) {
     }
 }
 
-/// The download limit for public entries in `suite` unless `--download-mibps` is given.
+/// The download limit for public entries in `suite` unless `--download-mibps` is given
+/// (`--download-mibps 0` removes it).
 const PUBLIC_LIMIT_MIBPS: u32 = 10;
 
 /// `suite` options.
@@ -1022,6 +1023,8 @@ struct SuiteArgs {
     options: Vec<String>,
     /// Public entries: also run the swarm engine with the torrent's web seeds.
     web_seeds: bool,
+    /// Public entries: no download limit (`--download-mibps 0`).
+    uncapped: bool,
 }
 
 /// Parses a comma-separated list.
@@ -1038,6 +1041,10 @@ fn numbers<T: std::str::FromStr>(v: Option<String>, name: &str) -> anyhow::Resul
 fn parse_suite(args: impl Iterator<Item = String>) -> anyhow::Result<SuiteArgs> {
     let raw: Vec<String> = args.collect();
     let (positional, mut options) = tokenize(raw.iter().cloned())?;
+    // `--download-mibps 0` means no limit; without the option, public entries get the default.
+    let uncapped = options
+        .get("download-mibps")
+        .is_some_and(|v| v.trim().parse::<u32>().is_ok_and(|n| n == 0));
     let mut take = |name: &str| options.remove(name);
     let mut positional = positional.into_iter();
     let list = positional
@@ -1113,6 +1120,7 @@ fn parse_suite(args: impl Iterator<Item = String>) -> anyhow::Result<SuiteArgs> 
         bench,
         options: raw.into_iter().skip(1).collect(),
         web_seeds,
+        uncapped,
     })
 }
 
@@ -1465,18 +1473,28 @@ async fn run_public(
     };
 
     let mut bench = args.bench.clone();
-    let limit = bench
-        .download_limit_bps
-        .and_then(|l| u32::try_from(u64::from(l.get()) / MIB).ok())
-        .unwrap_or(PUBLIC_LIMIT_MIBPS);
-    bench.download_limit_bps = bench
-        .download_limit_bps
-        .or(NonZeroU32::new(PUBLIC_LIMIT_MIBPS * 1024 * 1024));
+    let limit = if args.uncapped {
+        None
+    } else {
+        Some(
+            bench
+                .download_limit_bps
+                .and_then(|l| u32::try_from(u64::from(l.get()) / MIB).ok())
+                .unwrap_or(PUBLIC_LIMIT_MIBPS),
+        )
+    };
+    bench.download_limit_bps = if args.uncapped {
+        None
+    } else {
+        bench
+            .download_limit_bps
+            .or(NonZeroU32::new(PUBLIC_LIMIT_MIBPS * 1024 * 1024))
+    };
     let peers_only = Scenario {
         link_mibps: None,
         seeders: None,
         rtt_ms: None,
-        download_mibps: Some(limit),
+        download_mibps: limit,
         web_seeds: false,
     };
     let mut rows: Vec<(EngineKind, Scenario)> =
@@ -1700,5 +1718,25 @@ mod tests {
         assert_eq!(peers[0].offline.len(), 3);
         add_churn(&mut peers[..1], Duration::ZERO, Duration::from_secs(16));
         assert_eq!(peers[0].offline.len(), 3);
+    }
+    #[test]
+    fn download_mibps_zero_removes_the_public_limit() {
+        let parse = |extra: &[&str]| {
+            let mut args = vec!["list.txt".to_owned(), "public".to_owned()];
+            args.extend(extra.iter().map(|a| (*a).to_owned()));
+            parse_suite(args.into_iter()).unwrap()
+        };
+        let default = parse(&[]);
+        assert!(!default.uncapped);
+        assert!(default.bench.download_limit_bps.is_none());
+        let zero = parse(&["--download-mibps", "0"]);
+        assert!(zero.uncapped);
+        assert!(zero.bench.download_limit_bps.is_none());
+        let fifty = parse(&["--download-mibps", "50"]);
+        assert!(!fifty.uncapped);
+        assert_eq!(
+            fifty.bench.download_limit_bps.map(NonZeroU32::get),
+            Some(50 * 1024 * 1024)
+        );
     }
 }
