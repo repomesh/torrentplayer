@@ -59,7 +59,7 @@
     {
       value: 'socks5',
       label: 'SOCKS5 proxy',
-      help: 'Route traffic through a SOCKS5 proxy (many VPN providers offer one). If it stops answering, traffic pauses.',
+      help: 'Route traffic through a SOCKS5 proxy (many VPN providers offer one). If it stops answering, traffic is blocked.',
     },
     {
       value: 'wireGuard',
@@ -392,7 +392,7 @@
       id="network-password"
       label="Password"
       help={storeAvailable
-        ? 'Stored in the system credential store, never in the settings file. With a user name and no password, traffic pauses.'
+        ? 'Stored in the system credential store, never in the settings file. With a user name and no password, traffic is blocked.'
         : 'No system credential store is available, so passwords cannot be saved. On Linux, install and unlock GNOME Keyring or KWallet.'}
     >
       <SecretField
@@ -453,7 +453,7 @@
   <Field
     id="network-kill"
     label="Kill switch"
-    help="Always on in the SOCKS5 and WireGuard modes: if the proxy or tunnel stops working, torrent traffic pauses and searches are refused, never falling back to a direct connection. Traffic resumes by itself. In Direct mode, keep your VPN app's own kill switch on."
+    help="Always on in the SOCKS5 and WireGuard modes: if the proxy or tunnel stops working, torrent traffic is blocked and searches are refused, never falling back to a direct connection. Traffic resumes by itself. In Direct mode, keep your VPN app's own kill switch on."
   >
     <output id="network-kill" class="fixed" aria-describedby="network-kill-help">
       {n.mode === 'direct' ? 'Not needed in Direct mode' : 'Always on'}
@@ -541,7 +541,7 @@
     id="network-show-ip"
     label="Show public IP in the status bar"
     path="network.showPublicIp"
-    help="Asks icanhazip.com for your public IPv4 and IPv6 addresses, through the current mode, when the connection changes and every 10 minutes. Never while traffic is paused."
+    help="Asks icanhazip.com for your public IPv4 and IPv6 addresses, through the current mode, when the connection changes and every 10 minutes. Never while traffic is blocked."
   >
     <Toggle
       id="network-show-ip"
@@ -582,7 +582,7 @@
     <p class="intro">
       Import a <code>.conf</code> file from your VPN provider. TorrentPlayer connects through its
       own WireGuard tunnel, carrying search, trackers, and peer connections. Your keys stay in the
-      system credential store. Traffic stays paused until the server authenticates. The
+      system credential store. Traffic stays blocked until the server authenticates. The
       configuration must include a <code>DNS</code> server for search and other host names.
     </p>
     {#if wgConfigured}

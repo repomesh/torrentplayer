@@ -52,6 +52,6 @@
   }
 
   .rates.idle {
-    opacity: 0.6;
+    color: var(--text-muted);
   }
 </style>

@@ -306,7 +306,6 @@
   dt {
     overflow-wrap: anywhere;
     color: var(--text-muted);
-    opacity: 0.8;
   }
 
   dd {

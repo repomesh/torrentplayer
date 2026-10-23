@@ -459,10 +459,9 @@
   }
 
   .reason {
-    color: var(--text);
+    color: var(--text-muted);
     font-size: 0.8125rem;
     overflow-wrap: anywhere;
-    opacity: 0.85;
   }
 
   .preload {
@@ -471,7 +470,7 @@
 
   .ready {
     margin-left: 0.25rem;
-    opacity: 0.8;
+    color: var(--text-muted);
   }
 
   .text {

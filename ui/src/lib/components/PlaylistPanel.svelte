@@ -588,7 +588,7 @@
   }
 
   .menu-label .hint {
-    opacity: 0.8;
+    color: var(--text-muted);
   }
 
   .menu hr {
