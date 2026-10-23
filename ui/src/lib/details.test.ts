@@ -74,7 +74,7 @@ describe('verdicts', () => {
       'Plays in the built-in player (MP4, x264)',
     );
     expect(playsVerdict({ playable: 'needsFullPlayer', container: 'AVI/TS', codec: null })).toBe(
-      'Needs the full player (AVI/TS)',
+      'May not play here (format: AVI/TS)',
     );
     expect(playsVerdict({ playable: 'unknown', container: null, codec: null })).toBe(
       'The title does not say whether it plays here',

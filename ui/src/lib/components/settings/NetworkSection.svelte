@@ -264,8 +264,8 @@
           {status.trafficAllowed
             ? 'Allowed'
             : status.mode === 'direct'
-              ? 'Paused until the notice above is dismissed'
-              : 'Paused by the kill switch'}{status.trafficAllowed && !status.trackersAllowed
+              ? 'Blocked until the notice above is dismissed'
+              : 'Blocked by the kill switch'}{status.trafficAllowed && !status.trackersAllowed
             ? ' · trackers off'
             : ''}{status.trafficAllowed && !status.udpAllowed
             ? ' · DHT and UDP off in this mode'
@@ -459,25 +459,7 @@
       {n.mode === 'direct' ? 'Not needed in Direct mode' : 'Always on'}
     </output>
   </Field>
-  <Field
-    id="network-encryption"
-    label="Protocol encryption"
-    path="network.encryption"
-    help="Encrypts BitTorrent traffic between peers. It hides the protocol, not your IP address. Saved now; neither engine applies it yet."
-  >
-    <select
-      id="network-encryption"
-      value={n.encryption}
-      aria-describedby="network-encryption-help"
-      onchange={(e: Event) => {
-        update('network.encryption', (e.currentTarget as HTMLSelectElement).value);
-      }}
-    >
-      <option value="prefer">Prefer</option>
-      <option value="require">Require</option>
-      <option value="off">Off</option>
-    </select>
-  </Field>
+  <!-- Protocol encryption (network.encryption) is hidden: neither engine applies it yet. -->
   <Field
     id="network-ipv6"
     label="IPv6"

@@ -19,7 +19,7 @@ export const REMOVED_MODE_NOTICE =
 
 /** Added while traffic is held (Direct mode) after an update from the VPN adapter mode. */
 export const REMOVED_MODE_HELD =
-  'Torrent traffic and searches stay paused until you dismiss this note.';
+  'Torrent traffic and searches stay blocked until you dismiss this note.';
 
 /** The settings could not be read, and traffic is held (Direct mode). */
 export const UNREADABLE_NOTICE =
@@ -31,7 +31,7 @@ export const UNREADABLE_CHOSEN =
 
 /** Added while traffic is held (Direct mode) after the settings could not be read. */
 export const UNREADABLE_HELD =
-  'Torrent traffic and searches stay paused until you choose a connection or connect directly.';
+  'Torrent traffic and searches stay blocked until you choose Connect directly, or pick a VPN or proxy in Network settings.';
 
 /** The status bar button that opens the notice. */
 export const HOLD_BUTTON: Record<NetworkHold, string> = {

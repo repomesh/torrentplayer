@@ -85,22 +85,5 @@
       }}
     />
   </Field>
-  <Field
-    id="playback-hwdec"
-    label="Hardware decoding"
-    path="playback.hardwareDecoding"
-    help="Uses the graphics card to decode video when it is known to be safe. Applies with the libmpv player."
-  >
-    <select
-      id="playback-hwdec"
-      value={p.hardwareDecoding}
-      aria-describedby="playback-hwdec-help"
-      onchange={(e: Event) => {
-        update('playback.hardwareDecoding', (e.currentTarget as HTMLSelectElement).value);
-      }}
-    >
-      <option value="auto">Automatic</option>
-      <option value="off">Off (software)</option>
-    </select>
-  </Field>
+  <!-- Hardware decoding (playback.hardwareDecoding) is hidden: no player applies it yet. -->
 </section>

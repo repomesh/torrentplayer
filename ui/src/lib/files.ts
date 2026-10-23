@@ -42,8 +42,8 @@ export function sortFiles(files: readonly FileSummary[]): FileSummary[] {
 /**
  * Video containers the built-in (webview) player cannot play. Chromium-based webviews play MP4,
  * M4V, WebM, and usually MOV and MKV with web codecs; Theora (OGV) support was removed, and
- * AVI, WMV, FLV, MPEG-TS, and MPEG-PS were never supported. The full player (libmpv, Phase 2)
- * plays all of them.
+ * AVI, WMV, FLV, MPEG-TS, and MPEG-PS were never supported. Another player (VLC, mpv)
+ * plays them once downloaded.
  */
 const NEEDS_FULL_PLAYER = new Set([
   'ogv',
@@ -91,6 +91,20 @@ export function visibleFiles(files: readonly FileSummary[], all: boolean): FileS
 export function playableInWebview(path: string): boolean {
   const ext = path.toLowerCase().split('.').pop() ?? '';
   return !NEEDS_FULL_PLAYER.has(ext);
+}
+
+/** A file's format for display: `a/b.avi` → `AVI`, or null without an extension. */
+export function formatOf(path: string): string | null {
+  const name = fileName(path);
+  const at = name.lastIndexOf('.');
+  return at <= 0 || at === name.length - 1 ? null : name.slice(at + 1).toUpperCase();
+}
+
+/** The warning for a file the built-in player probably cannot play: `May not play here (format: AVI)`. */
+export function mayNotPlay(format: string | null): string {
+  return format === null || format === ''
+    ? 'May not play here'
+    : `May not play here (format: ${format})`;
 }
 
 /** Whether a dropped or chosen file looks like a `.torrent` file. */

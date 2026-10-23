@@ -52,9 +52,10 @@ function peers(n: number): string {
 
 /**
  * One line about an item's download: `↓ 2.4 MB/s · 14 peers · 37% · 4 min left`, or what it
- * waits for. Null when there is nothing to say (an unknown, untouched item).
+ * waits for. `maxActive` is the limit of downloads at once, when known. Null when there is
+ * nothing to say (an unknown, untouched item).
  */
-export function describeDownload(d: ItemDownload): string | null {
+export function describeDownload(d: ItemDownload, maxActive: number | null = null): string | null {
   const parts: string[] = [];
   const pct = percent(d);
   switch (d.state) {
@@ -75,7 +76,7 @@ export function describeDownload(d: ItemDownload): string | null {
     }
     case 'complete':
       // Finished torrents keep sharing until the user pauses or removes them.
-      parts.push(d.uploading ? 'Downloaded · seeding' : 'Downloaded');
+      parts.push(d.uploading ? 'Downloaded · sharing with others' : 'Downloaded');
       break;
     case 'connecting':
       parts.push(
@@ -93,7 +94,9 @@ export function describeDownload(d: ItemDownload): string | null {
         d.waitReason === 'playback'
           ? 'Waiting for playback: the video playing needs the bandwidth'
           : d.waitReason === 'limit'
-            ? 'Waiting: your limit of downloads at once'
+            ? maxActive === null
+              ? 'Waiting: your limit of downloads at once (Settings → Bandwidth)'
+              : `Waiting: up to ${String(maxActive)} queued videos download at once (Settings → Bandwidth)`
             : 'Waiting',
       );
       if (pct !== null && d.downloaded > 0) {
@@ -102,7 +105,7 @@ export function describeDownload(d: ItemDownload): string | null {
       break;
     case 'paused':
       // Only the user pauses; nothing resumes it but the user.
-      parts.push('Paused');
+      parts.push('Paused by you');
       if (pct !== null && d.downloaded > 0) {
         parts.push(pct);
       }
@@ -173,7 +176,7 @@ export function canPause(d: ItemDownload | undefined): boolean {
 }
 
 /**
- * A summary of the connection: `Connection ≈ 12 MB/s · 9.8 MB/s in use · 3 downloading`, plus
+ * A summary of the connection: `Speed ≈ 12 MB/s · 9.8 MB/s in use · 3 downloading`, plus
  * how playback is doing when a video plays.
  */
 export function describeLink(link: LinkUse): string | null {
@@ -182,7 +185,7 @@ export function describeLink(link: LinkUse): string | null {
   }
   const parts: string[] = [];
   if (link.capacityBps > 0) {
-    parts.push(`Connection ≈ ${formatRate(link.capacityBps)}`);
+    parts.push(`Speed ≈ ${formatRate(link.capacityBps)}`);
   }
   parts.push(`${formatRate(link.usedBps)} in use`);
   if (link.active > 0) {
@@ -195,9 +198,9 @@ export function describeLink(link: LinkUse): string | null {
   if (link.playbackNeedBps !== null) {
     parts.push(
       link.pressure === 'starving'
-        ? 'queue waiting for playback'
+        ? 'queue held for the video playing'
         : link.pressure === 'guarded'
-          ? 'playback first'
+          ? 'the video playing comes first'
           : 'playback has enough',
     );
   }

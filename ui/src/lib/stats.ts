@@ -49,7 +49,6 @@ export interface StatusInfo {
   fileDownloaded: number;
   fileLength: number;
   etaSecs: number | null;
-  engine: string | null;
 }
 
 /** Green at 10 s or more ahead, yellow from 3 to 10 s, red below 3 s or while stalled. */
@@ -94,22 +93,4 @@ export function etaSeconds(remainingBytes: number, bytesPerSec: number): number 
     return null;
   }
   return remainingBytes / bytesPerSec;
-}
-
-/** Formats an ETA compactly: `45s`, `3m 20s`, `1h 05m`, or `—` when unknown. */
-export function formatEta(secs: number | null): string {
-  if (secs === null || !Number.isFinite(secs)) {
-    return '—';
-  }
-  const total = Math.ceil(secs);
-  if (total < 60) {
-    return `${total.toString()}s`;
-  }
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h > 0) {
-    return `${h.toString()}h ${m.toString().padStart(2, '0')}m`;
-  }
-  return `${m.toString()}m ${s.toString().padStart(2, '0')}s`;
 }

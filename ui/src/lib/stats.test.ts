@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import { describe, expect, it } from 'vitest';
-import { Ewma, bufferHealth, bufferedSeconds, etaSeconds, formatEta } from './stats';
+import { Ewma, bufferHealth, bufferedSeconds, etaSeconds } from './stats';
 
 describe('Ewma', () => {
   it('starts at the first sample and moves toward new ones by the time constant', () => {
@@ -45,12 +45,5 @@ describe('ETA', () => {
     expect(etaSeconds(10_000_000, 1_000_000)).toBe(10);
     expect(etaSeconds(0, 0)).toBe(0);
     expect(etaSeconds(10_000_000, 10)).toBeNull();
-  });
-
-  it('formats compactly', () => {
-    expect(formatEta(null)).toBe('—');
-    expect(formatEta(44.2)).toBe('45s');
-    expect(formatEta(200)).toBe('3m 20s');
-    expect(formatEta(3900)).toBe('1h 05m');
   });
 });

@@ -64,19 +64,22 @@ describe('download status', () => {
     expect(describeDownload(d({ state: 'watching', limited: true, etaSecs: null }))).toBe(
       '↓ 2.4 MB/s · 14 peers · 37%',
     );
-    expect(describeDownload(d({ state: 'paused' }))).toBe('Paused · 37%');
-    expect(describeDownload(d({ state: 'paused', downloaded: 0 }))).toBe('Paused');
+    expect(describeDownload(d({ state: 'paused' }))).toBe('Paused by you · 37%');
+    expect(describeDownload(d({ state: 'paused', downloaded: 0 }))).toBe('Paused by you');
     expect(describeDownload(d({ state: 'queued', downloaded: 0, waitReason: 'limit' }))).toBe(
-      'Waiting: your limit of downloads at once',
+      'Waiting: your limit of downloads at once (Settings → Bandwidth)',
+    );
+    expect(describeDownload(d({ state: 'queued', downloaded: 0, waitReason: 'limit' }), 3)).toBe(
+      'Waiting: up to 3 queued videos download at once (Settings → Bandwidth)',
     );
     expect(describeDownload(d({ state: 'queued', waitReason: 'playback' }))).toBe(
       'Waiting for playback: the video playing needs the bandwidth · 37%',
     );
     expect(describeDownload(d({ state: 'connecting', peersSeen: 0 }))).toBe('Finding peers… · 37%');
     expect(describeDownload(d({ state: 'complete' }))).toBe('Downloaded');
-    // A finished torrent keeps sharing: it reads as seeding, never as paused.
+    // A finished torrent keeps sharing: it reads as sharing, never as paused.
     expect(describeDownload(d({ state: 'complete', uploading: true }))).toBe(
-      'Downloaded · seeding',
+      'Downloaded · sharing with others',
     );
     expect(describeDownload(d({ state: 'failed', error: 'No peers.' }))).toBe(
       'No peers. Trying again soon.',
@@ -121,12 +124,17 @@ describe('download status', () => {
   });
 
   it('summarizes the connection', () => {
-    expect(describeLink(link)).toBe('Connection ≈ 12.0 MB/s · 9.8 MB/s in use · 3 downloading');
+    expect(describeLink(link)).toBe('Speed ≈ 12.0 MB/s · 9.8 MB/s in use · 3 downloading');
     expect(
       describeLink({ ...link, playbackNeedBps: 1_500_000, pressure: 'guarded', active: 1 }),
-    ).toBe('Connection ≈ 12.0 MB/s · 9.8 MB/s in use · 1 downloading · playback first');
+    ).toBe('Speed ≈ 12.0 MB/s · 9.8 MB/s in use · 1 downloading · the video playing comes first');
+    expect(
+      describeLink({ ...link, playbackNeedBps: 1_500_000, pressure: 'starving', active: 1 }),
+    ).toBe(
+      'Speed ≈ 12.0 MB/s · 9.8 MB/s in use · 1 downloading · queue held for the video playing',
+    );
     expect(describeLink({ ...link, maxActive: 4 })).toBe(
-      'Connection ≈ 12.0 MB/s · 9.8 MB/s in use · 3 of max 4 downloading',
+      'Speed ≈ 12.0 MB/s · 9.8 MB/s in use · 3 of max 4 downloading',
     );
     expect(describeLink({ ...link, capacityBps: 0, usedBps: 0, active: 0 })).toBeNull();
   });
@@ -143,6 +151,6 @@ describe('pausing as shown', () => {
   });
 
   it('shows no upload on a paused video, even while its torrent shares for others', () => {
-    expect(describeDownload(d({ state: 'paused', uploadBps: 51_000 }))).toBe('Paused · 37%');
+    expect(describeDownload(d({ state: 'paused', uploadBps: 51_000 }))).toBe('Paused by you · 37%');
   });
 });

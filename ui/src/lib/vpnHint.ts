@@ -20,7 +20,7 @@ import {
 
 /** One sentence. It recommends privacy, and says nothing about what is legal. */
 export const VPN_HINT =
-  "In a swarm every peer and tracker sees your IP address, so a VPN is recommended when downloading or seeding: connect your VPN app (for example Windscribe) first, or use the WireGuard mode with your provider's WireGuard configuration.";
+  "Everyone downloading the same torrent can see your IP address, so a VPN is recommended when downloading or sharing: connect your VPN app (for example Windscribe) first, or use the WireGuard mode with your provider's WireGuard configuration.";
 
 /** The blog post on VPNs for torrenting. */
 export const VPN_POST_URL = 'https://torrentplayer.io/blog/vpn-for-torrenting/';

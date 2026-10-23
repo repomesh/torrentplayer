@@ -28,7 +28,7 @@ describe('the removed VPN adapter mode notice', () => {
     expect(REMOVED_MODE_NOTICE).toContain('keep your VPN app connected');
     expect(REMOVED_MODE_NOTICE).toContain('built-in WireGuard mode');
     expect(REMOVED_MODE_NOTICE).toContain('kill switch');
-    expect(REMOVED_MODE_HELD).toMatch(/paused until you dismiss/);
+    expect(REMOVED_MODE_HELD).toMatch(/blocked until you dismiss/);
     expect(holdNotice('vpnAdapterModeRemoved', true)).toEqual({
       text: REMOVED_MODE_NOTICE,
       held: REMOVED_MODE_HELD,
@@ -42,7 +42,7 @@ describe('the unreadable settings notice', () => {
   it('says traffic is held and where to choose a connection', () => {
     expect(UNREADABLE_NOTICE).toContain('could not be read, so TorrentPlayer is not connecting');
     expect(UNREADABLE_NOTICE).toContain('Settings → Network & VPN');
-    expect(UNREADABLE_HELD).toMatch(/paused until you choose a connection/);
+    expect(UNREADABLE_HELD).toMatch(/blocked until you choose Connect directly/);
     expect(holdNotice('settingsUnreadable', true)).toEqual({
       text: UNREADABLE_NOTICE,
       held: UNREADABLE_HELD,

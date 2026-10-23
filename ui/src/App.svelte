@@ -1567,7 +1567,7 @@
 
     {#if seedingHint}
       <div class="seeding-hint" role="status">
-        <strong>Uploading to other peers</strong>
+        <strong>Sharing started</strong>
         <VpnHint
           onDismiss={() => {
             seedingHintError = null;

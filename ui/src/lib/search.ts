@@ -8,6 +8,7 @@ import type { QualityDto } from './bindings/QualityDto';
 import type { PrefetchRequest } from './bindings/PrefetchRequest';
 import type { SearchResultDto } from './bindings/SearchResultDto';
 import type { ThumbnailRequest } from './bindings/ThumbnailRequest';
+import { mayNotPlay } from './files';
 
 /** Whether input is a link to add directly rather than words to search for. */
 export function looksLikeLink(text: string): boolean {
@@ -182,7 +183,7 @@ export function preloadActive(status: Pick<PreloadStatusDto, 'phase'> | null): b
 
 /**
  * Short quality notes for a result's details line, warnings first: `Camera copy`,
- * `Too small for 4K`, `Needs the full player`, then the quality label (`1080p WEB-DL`).
+ * `Too small for 4K`, `May not play here (format: AVI)`, then the quality label (`1080p WEB-DL`).
  */
 export function qualityNotes(quality: QualityDto): string[] {
   const notes: string[] = [];
@@ -193,7 +194,7 @@ export function qualityNotes(quality: QualityDto): string[] {
     notes.push('Too small for 4K');
   }
   if (quality.playable === 'needsFullPlayer') {
-    notes.push('Needs the full player');
+    notes.push(mayNotPlay(quality.container ?? quality.codec));
   }
   if (!quality.camera && quality.label !== '') {
     notes.push(quality.label);

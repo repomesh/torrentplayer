@@ -46,7 +46,7 @@
   const SECTIONS: { id: SectionId; label: string }[] = [
     { id: 'playback', label: 'Playback' },
     { id: 'storage', label: 'Downloads & storage' },
-    { id: 'bandwidth', label: 'Bandwidth & seeding' },
+    { id: 'bandwidth', label: 'Bandwidth & sharing' },
     { id: 'search', label: 'Search' },
     { id: 'network', label: 'Network & VPN' },
     { id: 'advanced', label: 'Advanced' },

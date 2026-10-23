@@ -232,7 +232,6 @@
           fileDownloaded: stats.fileDownloaded,
           fileLength: stats.fileLength,
           etaSecs: etaSeconds(stats.fileLength - stats.fileDownloaded, smoothedDown),
-          engine: stats.engine,
         },
   );
 
@@ -959,7 +958,7 @@
         return;
       }
       playbackError =
-        'This video could not be played by the built-in player (its format may not be supported yet).';
+        "The built-in player can't play this format. It keeps downloading; once done you can open it in another player such as VLC.";
     }}
   ></video>
 

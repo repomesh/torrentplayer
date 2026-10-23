@@ -6,7 +6,7 @@ import type { FileSummary } from './bindings/FileSummary';
 import type { NetworkModeKind } from './bindings/NetworkModeKind';
 import type { QualityDto } from './bindings/QualityDto';
 import type { TorrentDetailsDto } from './bindings/TorrentDetailsDto';
-import { fileName, isPlayable, sortFiles } from './files';
+import { fileName, isPlayable, mayNotPlay, sortFiles } from './files';
 
 /** Videos listed before "+N more". */
 export const LISTED_VIDEOS = 10;
@@ -99,7 +99,7 @@ export function playsVerdict(
     case 'unlikely':
       return `Probably does not play in the built-in player${because}: needs a hardware decoder`;
     case 'needsFullPlayer':
-      return `Needs the full player${because}`;
+      return mayNotPlay(what === '' ? null : what);
     default:
       return 'The title does not say whether it plays here';
   }

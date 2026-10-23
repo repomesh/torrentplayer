@@ -257,7 +257,7 @@
                   class="secondary"
                   disabled={queued !== null}
                   title={queued === null
-                    ? 'Play it after the current video'
+                    ? 'Add to the queue. It downloads in the background; you choose when to play it.'
                     : 'Already in the queue'}
                   onclick={() => {
                     onQueue(result);

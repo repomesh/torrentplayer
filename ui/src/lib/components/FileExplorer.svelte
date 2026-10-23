@@ -11,7 +11,7 @@
   import type { FileSummary } from '../bindings/FileSummary';
   import type { TorrentSummary } from '../bindings/TorrentSummary';
   import { defaultSelection, previewHint, splitFiles, type ExplorerTorrent } from '../explorer';
-  import { fileName, folderOf, playableInWebview } from '../files';
+  import { fileName, folderOf, formatOf, mayNotPlay, playableInWebview } from '../files';
   import { formatBytes } from '../format';
   import {
     errorMessage,
@@ -200,7 +200,7 @@
           >
         {/if}
         {starting === file.index ? 'Starting…' : formatBytes(file.length)}
-        {#if video && !playableInWebview(file.path)}· may need the full player{/if}
+        {#if video && !playableInWebview(file.path)}· {mayNotPlay(formatOf(file.path))}{/if}
       </span>
     </button>
     {#if video}
@@ -222,7 +222,9 @@
           class:queued
           disabled={queued}
           aria-label={queued ? `${fileName(file.path)} is queued` : `Queue ${fileName(file.path)}`}
-          title={queued ? 'In the queue' : 'Play after the current video'}
+          title={queued
+            ? 'In the queue'
+            : 'Add to the queue. It downloads in the background; you choose when to play it.'}
           onclick={() => {
             onQueue(file);
           }}>{queued ? 'Queued' : '+ Queue'}</button

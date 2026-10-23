@@ -70,7 +70,7 @@ describe('describeIncoming', () => {
       }),
     ).toBe('Listening on port 51413 (10.64.0.2:51413)');
     expect(describeIncoming({ kind: 'paused', reason: 'proxy down' })).toBe(
-      'Closed while traffic is paused',
+      'Closed while traffic is blocked',
     );
     expect(describeIncoming({ kind: 'unsupported', reason: 'no SOCKS5 listening' })).toBe(
       'Not available: no SOCKS5 listening',
@@ -132,13 +132,15 @@ describe('describeNetwork', () => {
     });
     expect(describeNetwork(held, 0)).toMatchObject({
       tone: 'blocked',
-      label: 'Traffic paused: the VPN adapter mode was removed',
+      label: 'Traffic blocked: the VPN adapter mode was removed',
     });
     expect(trafficPaused(held)).toBe(true);
-    expect(pausedMessage(held)).toBe('Traffic paused — confirm the network change in Settings');
+    expect(pausedMessage(held)).toBe(
+      'Traffic blocked — choose a connection in Settings → Network & VPN',
+    );
   });
 
-  it('is yellow while checking and red while traffic is paused', () => {
+  it('is yellow while checking and red while traffic is blocked', () => {
     const paused = { ...socks, trafficAllowed: false, killSwitchEngaged: true };
     expect(describeNetwork(status({ ...paused, state: { kind: 'connecting' } }), 0)).toMatchObject({
       tone: 'pending',
@@ -160,9 +162,9 @@ describe('describeNetwork', () => {
     );
     expect(blocked).toMatchObject({
       tone: 'blocked',
-      label: 'Kill switch: traffic paused (the proxy is unreachable)',
+      label: 'Kill switch: traffic blocked (the proxy is unreachable)',
     });
-    expect(blocked.details.some((line) => line.includes('torrent traffic is paused'))).toBe(true);
+    expect(blocked.details.some((line) => line.includes('torrent traffic is blocked'))).toBe(true);
     // Newest event first.
     const events = blocked.details.filter((line) => line.includes('Conn'));
     expect(events[0]).toMatch(/Connection lost$/);
@@ -186,7 +188,7 @@ describe('helpers', () => {
     expect(formatUptime(76 * 3_600_000)).toBe('3 d 4 h');
   });
 
-  it('report paused traffic only when the kill switch is engaged', () => {
+  it('report blocked traffic only when the kill switch is engaged', () => {
     expect(trafficPaused(null)).toBe(false);
     expect(trafficPaused(status())).toBe(false);
     expect(trafficPaused(status({ ...socks, killSwitchEngaged: true }))).toBe(true);
@@ -199,7 +201,7 @@ describe('helpers', () => {
           state: { kind: 'reconnecting', reason: 'the proxy is unreachable' },
         }),
       ),
-    ).toBe('VPN/proxy disconnected — traffic paused');
+    ).toBe('VPN/proxy disconnected — downloads blocked until it reconnects');
     expect(
       pausedMessage(status({ ...socks, killSwitchEngaged: true, state: { kind: 'connecting' } })),
     ).toBe('Connecting to the VPN or proxy…');
