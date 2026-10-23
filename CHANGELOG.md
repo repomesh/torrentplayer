@@ -37,6 +37,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - In the WireGuard and SOCKS5 modes, a magnet link that finds no peers now says what to check in
   that mode (the tunnel's handshake, or the proxy's UDP support) instead of always blaming the
   proxy, and the message for `.torrent` files in these modes no longer has stray spaces.
+- A long-running WireGuard tunnel keeps renewing its keys promptly. After 64 key exchanges
+  (about two hours of traffic, sooner when handshakes repeat) every later one was refused as a
+  flood and stalled for at least 5 seconds, or failed with a server that ignores WireGuard
+  cookies, until the app was restarted.
 
 ## [0.3.0] - 2026-10-21
 

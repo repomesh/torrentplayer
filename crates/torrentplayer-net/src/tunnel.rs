@@ -824,6 +824,71 @@ mod tests {
         .unwrap();
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn handshakes_keep_completing_after_many_rekeys() {
+        // Both ends rekey 80 times, more than boringtun's handshake rate limit (64 per second)
+        // but slower than it. The limit must count per second: counted over the tunnel's
+        // lifetime, the 65th handshake was refused as a flood, as were all later ones, and the
+        // tunnel went silent once its last session expired.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let (server, config) = pair();
+            let dns = dns_server(&server).await;
+            let listener = tokio_wireguard::TcpListener::bind("10.44.0.1:8080", &server)
+                .await
+                .unwrap();
+            let echo = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 5];
+                stream.read_exact(&mut bytes).await.unwrap();
+                stream.write_all(&bytes).await.unwrap();
+                let _ = stream.shutdown().await;
+            });
+            let tunnel = Tunnel::start(&config).await.unwrap();
+            tunnel
+                .healthy(Duration::from_secs(2), crate::WIREGUARD_REPLY_TIMEOUT)
+                .await
+                .unwrap();
+            for _ in 0..80 {
+                tunnel.0.interface.request_handshake().unwrap();
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            // The next handshake still completes at once (a refused one is retried only after
+            // REKEY_TIMEOUT, 5 s)...
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            tunnel.0.interface.request_handshake().unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while tunnel
+                    .0
+                    .interface
+                    .handshake_age()
+                    .await
+                    .unwrap()
+                    .is_none_or(|age| age >= Duration::from_millis(500))
+                {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            })
+            .await
+            .expect("the handshake after 80 rekeys was refused");
+            // ...and DNS and data still flow.
+            let address = tunnel
+                .resolve("search.torrentplayer.test", 8080, true)
+                .await
+                .unwrap()[0];
+            let mut stream = tunnel.connect(address).await.unwrap();
+            stream.write_all(b"hello").await.unwrap();
+            let mut reply = [0; 5];
+            stream.read_exact(&mut reply).await.unwrap();
+            assert_eq!(&reply, b"hello");
+            echo.await.unwrap();
+            dns.abort();
+            tunnel.close();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn udp_stays_inside_wireguard_and_closes_with_its_lease() {
         tokio::time::timeout(Duration::from_secs(5), async {
