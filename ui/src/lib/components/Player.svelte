@@ -681,11 +681,15 @@
   }
 
   function onKey(event: KeyboardEvent): void {
-    // The settings, and dialogs over the player (the queue's "Choose files"), handle their own
-    // keys (Escape closes them).
+    // The settings, dialogs over the player (the queue's "Choose files"), the queue panel, and
+    // form controls (the volume slider) handle their own keys: one key press must not also
+    // pause or seek the video.
     if (
       settingsSection !== null ||
-      (event.target instanceof Element && event.target.closest('dialog') !== null)
+      (event.target instanceof Element &&
+        event.target.closest(
+          'dialog, aside, [role="tree"], [role="menu"], input, select, textarea',
+        ) !== null)
     ) {
       return;
     }
