@@ -262,6 +262,20 @@ impl SettingsState {
         patch: &Value,
         origin: Origin,
     ) -> Result<SettingsView, IpcError> {
+        let storage_policy_changed = self.save_locked(patch, origin).await?;
+        self.announce(app);
+        if storage_policy_changed {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                enforce_cache_policy(&app).await;
+            });
+        }
+        Ok(self.view())
+    }
+
+    /// Checks, saves, and applies a patch, with `updating` already held; everything
+    /// [`Self::update_locked`] does but tell the app. Returns whether the cache policy changed.
+    async fn save_locked(&self, patch: &Value, origin: Origin) -> Result<bool, IpcError> {
         let current = self.current();
         let next = apply_patch(&current, patch).map_err(|e| patch_error(&e))?;
         if origin == Origin::Webview {
@@ -306,20 +320,14 @@ impl SettingsState {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.changes.send_replace(next);
-        self.announce(app);
-        if storage_policy_changed {
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                enforce_cache_policy(&app).await;
-            });
-        }
-        Ok(self.view())
+        Ok(storage_policy_changed)
     }
 
     /// Saves an imported WireGuard configuration: its keys in the credential store and the rest
-    /// in `network.wireguard` (see `import_wireguard_config`). The settings are checked before
-    /// any key is stored, so an invalid import leaves nothing behind. A configuration without a
-    /// preshared key removes the previous one.
+    /// in `network.wireguard` (see `import_wireguard_config`). A configuration without a
+    /// preshared key removes the previous one. All or nothing: the settings are checked before
+    /// any key is stored, and if storing a key or saving the settings fails, the previous keys
+    /// are put back. Holds `updating` throughout, so no other change interleaves.
     pub(crate) async fn import_wireguard(
         &self,
         app: &AppHandle,
@@ -327,22 +335,52 @@ impl SettingsState {
         private_key: SecretString,
         preshared_key: Option<SecretString>,
     ) -> Result<(SettingsView, SecretStatus), IpcError> {
+        let _guard = self.updating.lock().await;
+        let status = self
+            .import_wireguard_locked(imported, private_key, preshared_key)
+            .await?;
+        // Announced once, with the keys already stored.
+        self.announce(app);
+        Ok((self.view(), status))
+    }
+
+    /// [`Self::import_wireguard`] without telling the app, with `updating` already held.
+    async fn import_wireguard_locked(
+        &self,
+        imported: &WireGuardSettings,
+        private_key: SecretString,
+        preshared_key: Option<SecretString>,
+    ) -> Result<SecretStatus, IpcError> {
         let patch = serde_json::json!({ "network": { "wireguard": imported } });
         apply_patch(&self.current(), &patch).map_err(|e| patch_error(&e))?;
         let store = self.secrets();
-        let status = blocking(move || {
-            store.set(SecretKey::WireGuardPrivateKey, &private_key)?;
-            match &preshared_key {
-                Some(key) => store.set(SecretKey::WireGuardPresharedKey, key)?,
-                None => store.clear(SecretKey::WireGuardPresharedKey)?,
+        let previous = blocking(move || {
+            let previous = WG_KEYS.map(|key| store.get(key));
+            let previous = match previous {
+                [Ok(private), Ok(preshared)] => [private, preshared],
+                [Err(error), _] | [_, Err(error)] => return Err(error),
+            };
+            let stored = store
+                .set(SecretKey::WireGuardPrivateKey, &private_key)
+                .and_then(|()| match &preshared_key {
+                    Some(key) => store.set(SecretKey::WireGuardPresharedKey, key),
+                    None => store.clear(SecretKey::WireGuardPresharedKey),
+                });
+            if let Err(error) = stored {
+                restore_keys(store.as_ref(), &previous);
+                return Err(error);
             }
-            Ok(SecretStatus::of(store.as_ref()))
+            Ok(previous)
         })
         .await?
         .map_err(|e| secret_error(&e))?;
-        // Announces the change once, with the keys already stored.
-        let view = self.update(app, &patch).await?;
-        Ok((view, status))
+        if let Err(error) = self.save_locked(&patch, Origin::Backend).await {
+            let store = self.secrets();
+            blocking(move || restore_keys(store.as_ref(), &previous)).await?;
+            return Err(error);
+        }
+        let store = self.secrets();
+        blocking(move || SecretStatus::of(store.as_ref())).await
     }
 
     /// Tells watchers that secrets changed (the settings value itself is unchanged).
@@ -727,7 +765,25 @@ fn secret_error(error: &SecretError) -> IpcError {
     }
 }
 
-/// Creates `dir` if needed and checks that files can be written in it.
+/// The keys of an imported WireGuard configuration.
+const WG_KEYS: [SecretKey; 2] = [
+    SecretKey::WireGuardPrivateKey,
+    SecretKey::WireGuardPresharedKey,
+];
+
+/// Puts back the WireGuard keys from before a failed import (`None`: there was none).
+fn restore_keys(store: &dyn SecretStore, previous: &[Option<SecretString>; 2]) {
+    for (key, value) in WG_KEYS.into_iter().zip(previous) {
+        let restored = match value {
+            Some(value) => store.set(key, value),
+            None => store.clear(key),
+        };
+        if let Err(error) = restored {
+            tracing::warn!(%error, ?key, "could not put the previous WireGuard key back");
+        }
+    }
+}
+
 /// Who asked for a settings change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Origin {
@@ -791,6 +847,7 @@ fn is_within(path: &Path, parent: &Path) -> bool {
     !parent.is_empty() && path.starts_with(&parent)
 }
 
+/// Creates `dir` if needed and checks that files can be written in it.
 fn check_writable(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     if !fs::metadata(dir)?.is_dir() {
@@ -804,7 +861,7 @@ fn check_writable(dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use torrentplayer_settings::MemoryStore;
+    use torrentplayer_settings::{ExposeSecret as _, MemoryStore};
 
     #[test]
     fn bandwidth_limits_become_engine_rates() {
@@ -830,6 +887,94 @@ mod tests {
             root.join("downloads"),
             None,
         )
+    }
+
+    fn wireguard_import() -> WireGuardSettings {
+        WireGuardSettings {
+            name: Some("vpn.conf".into()),
+            addresses: vec!["10.0.0.2/32".into()],
+            peer_public_key: Some("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=".into()),
+            peer_endpoint: Some("198.51.100.1:51820".into()),
+            allowed_ips: vec!["0.0.0.0/0".into()],
+            ..WireGuardSettings::default()
+        }
+    }
+
+    fn secret(text: &str) -> SecretString {
+        SecretString::from(text)
+    }
+
+    fn key(store: &dyn SecretStore, key: SecretKey) -> Option<String> {
+        store
+            .get(key)
+            .unwrap()
+            .map(|s| s.expose_secret().to_owned())
+    }
+
+    #[tokio::test]
+    async fn a_wireguard_import_stores_keys_and_settings_together() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let secrets = state.secrets();
+        let status = state
+            .import_wireguard_locked(&wireguard_import(), secret("new-private"), None)
+            .await
+            .unwrap();
+        assert!(status.wire_guard_private_key);
+        assert_eq!(
+            key(secrets.as_ref(), SecretKey::WireGuardPrivateKey).as_deref(),
+            Some("new-private")
+        );
+        assert_eq!(state.current().network.wireguard, wireguard_import());
+    }
+
+    #[tokio::test]
+    async fn a_failed_wireguard_import_puts_the_previous_keys_back() {
+        let root = tempfile::tempdir().unwrap();
+        // The settings cannot be saved: a file stands where the config folder belongs.
+        fs::write(root.path().join("config"), "").unwrap();
+        let state = state(root.path());
+        let secrets = state.secrets();
+        secrets
+            .set(SecretKey::WireGuardPrivateKey, &secret("old-private"))
+            .unwrap();
+        secrets
+            .set(SecretKey::WireGuardPresharedKey, &secret("old-preshared"))
+            .unwrap();
+        let error = state
+            .import_wireguard_locked(&wireguard_import(), secret("new-private"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Internal);
+        assert_eq!(
+            key(secrets.as_ref(), SecretKey::WireGuardPrivateKey).as_deref(),
+            Some("old-private")
+        );
+        assert_eq!(
+            key(secrets.as_ref(), SecretKey::WireGuardPresharedKey).as_deref(),
+            Some("old-preshared")
+        );
+        assert_eq!(
+            state.current().network.wireguard,
+            WireGuardSettings::default()
+        );
+
+        // Without earlier keys, nothing is left behind.
+        secrets.clear(SecretKey::WireGuardPrivateKey).unwrap();
+        secrets.clear(SecretKey::WireGuardPresharedKey).unwrap();
+        state
+            .import_wireguard_locked(
+                &wireguard_import(),
+                secret("new-private"),
+                Some(secret("new-preshared")),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(key(secrets.as_ref(), SecretKey::WireGuardPrivateKey), None);
+        assert_eq!(
+            key(secrets.as_ref(), SecretKey::WireGuardPresharedKey),
+            None
+        );
     }
 
     #[test]

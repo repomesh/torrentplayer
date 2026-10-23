@@ -70,6 +70,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A download folder chosen inside the app's own data folder from before the rename (for example
   `%LOCALAPPDATA%\io.torrentstream.desktop\downloads`) is now followed when that folder moves to
   its new name, instead of the settings still pointing at the old path.
+- Importing a WireGuard configuration is now all or nothing: if its settings cannot be saved, the
+  previous keys are put back instead of new keys being paired with the old configuration, and no
+  other settings change can slip in during the import.
 
 ## [0.3.0] - 2026-10-21
 
