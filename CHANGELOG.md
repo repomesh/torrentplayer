@@ -146,6 +146,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the import says so. The import also says when `ListenPort` is ignored (TorrentPlayer uses a
   random local port) and when `PersistentKeepalive = off` is (the tunnel keeps a 25-second
   keepalive).
+- Adding a torrent again while the player was still finishing a request on its previous
+  instance no longer empties the engine's piece cache under that request, which could hand the
+  player zeros or the bytes of other pieces. Reads from the cache also stay inside the piece
+  they ask for.
+- A peer that sends bad data can no longer stall playback in TorrentPlayer's engine. Data a peer
+  was not asked for is dropped, so it cannot spoil pieces other peers are fetching. A piece that
+  fails its hash check is fetched again from one peer, and once it verifies, every peer that had
+  sent different data for it is banned ("smart ban") — and only those: before, a bad peer and an
+  honest one that both sent blocks of failed pieces tied, nobody was banned, and in a thin swarm
+  the pieces could fail again and again.
+- Peers banned for bad data are now refused when they connect to the listening port again, from
+  any port, and are no longer dialed at another port of the same address.
+- Another program on the computer can no longer lock the player out of the loopback stream
+  server by opening connections and sending nothing: connections that have not presented the
+  stream token are kept apart, at most 8 at a time (the oldest is closed for a new one), and are
+  closed after 10 seconds or once refused. A player that stopped reading a response no longer
+  holds its connection forever: after 30 seconds without progress it is closed when another
+  request needs the place. When all 16 places are busy, a request is now answered
+  `503 Service Unavailable` instead of having its connection dropped.
+- A torrent added to TorrentPlayer's engine no longer serves pieces to peers that connect in the
+  moment before the app applies the upload setting: uploading is now off until it is turned on.
 
 ## [0.3.0] - 2026-10-21
 

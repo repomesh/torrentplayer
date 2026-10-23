@@ -22,8 +22,13 @@
 //!   for.
 //! - **Background fill.** Otherwise, selected files are downloaded rarest piece first, finishing
 //!   started pieces before starting new ones.
+//! - **Bad data.** Blocks are accepted only from a peer that was asked for them. When a piece
+//!   fails its hash check, each block's digest is remembered with its sender, and the piece is
+//!   downloaded again from one peer where possible; once it verifies, every peer that had sent
+//!   a block different from the verified data is returned to be banned ("smart ban", as in
+//!   libtorrent), and only those.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -163,8 +168,44 @@ struct Progress {
     blocks: Vec<BlockState>,
     data: Vec<u8>,
     received: u32,
-    contributors: Vec<PeerKey>,
+    /// Who sent each received block.
+    senders: Vec<Option<PeerKey>>,
+    /// For a piece that failed its hash check before: the one peer downloading it again (see
+    /// [`Scheduler::take_blocks`]).
+    owner: Option<PeerKey>,
 }
+
+/// A digest of one block's data, for smart ban (see [`Scheduler::on_verified`]).
+pub(crate) type BlockDigest = [u8; 20];
+
+/// The outcome of checking a completed piece.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PieceCheck {
+    /// It matched its hash and was stored. Carries the digest of each block when
+    /// [`Scheduler::needs_block_digests`] asked for them.
+    Valid(Option<Vec<BlockDigest>>),
+    /// It failed its hash check: the digest of each block.
+    Invalid(Vec<BlockDigest>),
+    /// It matched but could not be stored. It is downloaded again and nobody is blamed.
+    NotStored,
+}
+
+/// What [`Scheduler::on_verified`] found out about the peers.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Verified {
+    /// The peers that sent a piece that failed its hash check.
+    pub(crate) failed_by: Vec<PeerKey>,
+    /// Peers whose data for a piece differed from the data that later verified: to ban.
+    pub(crate) banned: Vec<PeerKey>,
+}
+
+/// Failed pieces remembered for smart ban at most; the oldest is forgotten first.
+const MAX_SUSPECT_PIECES: usize = 64;
+/// Distinct (sender, digest) records kept per block of a failed piece.
+const MAX_RECORDS_PER_BLOCK: usize = 4;
+/// Requests cancelled at a peer whose data is still accepted if it arrives (peers such as
+/// librqbit ignore `cancel`). Older ones are forgotten.
+const MAX_CANCELLED: usize = 256;
 
 #[derive(Debug, Clone, Copy)]
 struct Outstanding {
@@ -298,8 +339,23 @@ struct Peer {
     /// `cancel`. While any are pending its queue is not really empty, so no round-trip sample is
     /// taken (it would measure the drain of the cancelled data, not the round trip).
     cancelled_pending: u32,
+    /// The blocks `(piece, block)` behind the most recent cancels (at most [`MAX_CANCELLED`]):
+    /// their data is still accepted. Data for any other block it was not asked for is dropped.
+    cancelled: VecDeque<(u32, u32)>,
     /// When the peer last delivered a block or had requests cancelled.
     last_activity: Option<Instant>,
+}
+
+impl Peer {
+    /// Records that the request for `block` of `piece` was cancelled at this peer.
+    fn cancelled(&mut self, piece: u32, block: u32, now: Instant) {
+        self.cancelled_pending = self.cancelled_pending.saturating_add(1);
+        self.last_activity = Some(now);
+        if self.cancelled.len() >= MAX_CANCELLED {
+            self.cancelled.pop_front();
+        }
+        self.cancelled.push_back((piece, block));
+    }
 }
 
 /// Result of receiving a block.
@@ -318,7 +374,8 @@ pub(crate) struct SchedStats {
     pub(crate) duplicate_requests: u64,
     /// Requests cancelled on a seek or timeout.
     pub(crate) cancelled_requests: u64,
-    /// Bytes received for blocks that were already received or no longer needed.
+    /// Bytes received for blocks that were already received, no longer needed, or never asked
+    /// for.
     pub(crate) wasted_bytes: u64,
     pub(crate) peers: usize,
     pub(crate) unchoked: usize,
@@ -337,7 +394,13 @@ pub(crate) struct Scheduler {
     availability: Vec<u16>,
     wanted: Vec<bool>,
     progress: HashMap<u32, Progress>,
+    /// Pieces being hash-checked, with the sender of each block.
     verifying: HashMap<u32, Vec<PeerKey>>,
+    /// Pieces that failed their hash check and have not verified since: for each block, who
+    /// sent which data. See [`Scheduler::on_verified`].
+    suspects: HashMap<u32, Vec<Vec<(PeerKey, BlockDigest)>>>,
+    /// [`Scheduler::suspects`] oldest first, to bound them.
+    suspect_order: VecDeque<u32>,
     in_progress_bytes: u64,
     urgency: Vec<Option<Duration>>,
     urgent_order: Vec<u32>,
@@ -380,6 +443,8 @@ impl Scheduler {
             wanted: vec![false; n],
             progress: HashMap::new(),
             verifying: HashMap::new(),
+            suspects: HashMap::new(),
+            suspect_order: VecDeque::new(),
             in_progress_bytes: 0,
             urgency: vec![None; n],
             urgent_order: Vec::new(),
@@ -411,6 +476,12 @@ impl Scheduler {
 
     pub(crate) fn have_all(&self) -> Vec<bool> {
         self.have.clone()
+    }
+
+    /// Whether checking `piece` should also report its block digests: it failed before, so
+    /// the peers that sent wrong blocks can be found once it verifies.
+    pub(crate) fn needs_block_digests(&self, piece: u32) -> bool {
+        self.suspects.contains_key(&piece)
     }
 
     #[cfg(test)]
@@ -506,6 +577,7 @@ impl Scheduler {
                 base_rtt: None,
                 base_rtt_at: None,
                 cancelled_pending: 0,
+                cancelled: VecDeque::new(),
                 last_activity: None,
             },
         );
@@ -612,16 +684,10 @@ impl Scheduler {
         if !paused {
             return cancels;
         }
+        let now = Instant::now();
         for (&key, peer) in &mut self.peers {
-            let outstanding = std::mem::take(&mut peer.outstanding);
-            if outstanding.is_empty() {
-                continue;
-            }
-            peer.cancelled_pending = peer
-                .cancelled_pending
-                .saturating_add(u32::try_from(outstanding.len()).unwrap_or(u32::MAX));
-            peer.last_activity = Some(Instant::now());
-            for o in outstanding {
+            for o in std::mem::take(&mut peer.outstanding) {
+                peer.cancelled(o.piece, o.block, now);
                 if let Some(progress) = self.progress.get_mut(&o.piece) {
                     release_holder(&mut progress.blocks[o.block as usize], key);
                 }
@@ -809,28 +875,27 @@ impl Scheduler {
         let cancel_beyond = self.cfg.cancel_beyond;
         let critical = self.critical;
         let critical_pieces = &self.critical_pieces;
+        let now = Instant::now();
         for (&key, peer) in &mut self.peers {
-            let before = peer.outstanding.len();
-            peer.outstanding.retain(|o| {
-                let keep = if critical {
-                    // Only what the player needs right now survives.
-                    critical_pieces.binary_search(&o.piece).is_ok()
-                } else {
-                    // Background work survives; far-future read-ahead does not.
-                    urgency[o.piece as usize].is_none_or(|due| due <= cancel_beyond)
-                };
-                if !keep {
-                    if let Some(progress) = self.progress.get_mut(&o.piece) {
-                        release_holder(&mut progress.blocks[o.block as usize], key);
-                    }
-                    cancels.push((key, block_request(&self.meta, o.piece, o.block)));
+            let (keep, drop): (Vec<Outstanding>, Vec<Outstanding>) =
+                std::mem::take(&mut peer.outstanding)
+                    .into_iter()
+                    .partition(|o| {
+                        if critical {
+                            // Only what the player needs right now survives.
+                            critical_pieces.binary_search(&o.piece).is_ok()
+                        } else {
+                            // Background work survives; far-future read-ahead does not.
+                            urgency[o.piece as usize].is_none_or(|due| due <= cancel_beyond)
+                        }
+                    });
+            peer.outstanding = keep;
+            for o in drop {
+                if let Some(progress) = self.progress.get_mut(&o.piece) {
+                    release_holder(&mut progress.blocks[o.block as usize], key);
                 }
-                keep
-            });
-            let cancelled = u32::try_from(before - peer.outstanding.len()).unwrap_or(u32::MAX);
-            if cancelled > 0 {
-                peer.cancelled_pending = peer.cancelled_pending.saturating_add(cancelled);
-                peer.last_activity = Some(Instant::now());
+                peer.cancelled(o.piece, o.block, now);
+                cancels.push((key, block_request(&self.meta, o.piece, o.block)));
             }
         }
         self.cancelled_requests += cancels.len() as u64;
@@ -1011,7 +1076,8 @@ impl Scheduler {
                 blocks: vec![BlockState::Missing; blocks],
                 data: vec![0; usize::try_from(size).unwrap_or(0)],
                 received: 0,
-                contributors: Vec::new(),
+                senders: vec![None; blocks],
+                owner: None,
             },
         );
         self.in_progress_bytes += size;
@@ -1129,9 +1195,27 @@ impl Scheduler {
                 }
             })
         };
+        let suspect = self.suspects.contains_key(&piece);
         let Some(progress) = self.progress.get_mut(&piece) else {
             return 0;
         };
+        // A piece that failed its hash check is downloaded again from one peer, so that its
+        // next check says whose data was wrong. Another peer takes over only once that one has
+        // stopped: it left, was choked, holds none of the piece's blocks, or is snubbed.
+        let mut takeover = None;
+        if suspect {
+            if let Some(owner) = progress.owner.filter(|&o| o != key) {
+                let holds = progress.blocks.iter().any(|b| {
+                    matches!(b, BlockState::Requested(holders) if holders.iter().any(|(k, _)| *k == owner))
+                });
+                let working = peers.get(&owner).is_some_and(|p| !p.choked);
+                if working && holds && !snubbed(owner) {
+                    return 0;
+                }
+                takeover = Some(owner);
+            }
+            progress.owner = Some(key);
+        }
         let mut taken = 0;
         for (i, state) in progress.blocks.iter_mut().enumerate() {
             if taken == want {
@@ -1142,11 +1226,13 @@ impl Scheduler {
                 BlockState::Requested(holders) => {
                     #[allow(clippy::cast_possible_truncation)]
                     let block = i as u32;
-                    let stalled = allow_duplicate
-                        && holders
-                            .iter()
-                            .all(|(_, at)| now.saturating_duration_since(*at) >= duplicate_after)
-                        && (!only_snubbed || holders.iter().all(|(k, _)| snubbed(*k)));
+                    let taken_over = holders.iter().all(|(k, _)| Some(*k) == takeover);
+                    let stalled = taken_over
+                        || allow_duplicate
+                            && holders.iter().all(|(_, at)| {
+                                now.saturating_duration_since(*at) >= duplicate_after
+                            })
+                            && (!only_snubbed || holders.iter().all(|(k, _)| snubbed(*k)));
                     holders.len() < 2
                         && holders.iter().all(|(k, _)| *k != key)
                         && (stalled || holders.iter().all(|(k, _)| late(*k, block)))
@@ -1171,7 +1257,8 @@ impl Scheduler {
 
     // ----- Responses ---------------------------------------------------------------------
 
-    /// Records a received block. Unrequested or duplicate data is ignored.
+    /// Records a received block. Data the peer was not asked for (neither requested from it
+    /// nor among its recently cancelled requests), malformed data, and duplicates are ignored.
     pub(crate) fn on_block(
         &mut self,
         key: PeerKey,
@@ -1192,11 +1279,11 @@ impl Scheduler {
         now: Instant,
     ) -> BlockOutcome {
         let mut outcome = BlockOutcome::default();
-        if let Some(peer) = self.peers.get_mut(&key) {
-            peer.rate.add(data.len() as u64);
-            self.total_rate.add(data.len() as u64);
-            peer.last_progress = Some(now);
-        }
+        let Some(peer) = self.peers.get_mut(&key) else {
+            return outcome;
+        };
+        peer.rate.add(data.len() as u64);
+        self.total_rate.add(data.len() as u64);
         if !begin.is_multiple_of(BLOCK_LEN) || piece >= self.meta.piece_count() {
             return outcome;
         }
@@ -1205,35 +1292,44 @@ impl Scheduler {
         if block >= self.meta.blocks_in(piece) || data.len() != expected.len as usize {
             return outcome;
         }
-        if let Some(peer) = self.peers.get_mut(&key) {
-            peer.last_activity = Some(now);
-            if !peer
-                .outstanding
+        let requested = peer
+            .outstanding
+            .iter()
+            .any(|o| o.piece == piece && o.block == block);
+        if !requested {
+            // Only a block cancelled at this peer that it sent anyway is accepted. Anything
+            // else could slip bad data into pieces other peers are fetching.
+            let Some(at) = peer
+                .cancelled
                 .iter()
-                .any(|o| o.piece == piece && o.block == block)
-            {
-                // A block cancelled at this peer that it sent anyway.
-                peer.cancelled_pending = peer.cancelled_pending.saturating_sub(1);
-            }
-            // A request sent to an empty queue waits behind nothing, so its latency is the
-            // round trip plus one block transfer: an unbiased round-trip sample.
-            if let Some(o) = peer
-                .outstanding
-                .iter()
-                .find(|o| o.piece == piece && o.block == block && o.ahead == 0)
-            {
-                let sample = now.saturating_duration_since(o.at);
-                let expired = peer
-                    .base_rtt_at
-                    .is_none_or(|at| now.saturating_duration_since(at) >= RTT_WINDOW);
-                if expired || peer.base_rtt.is_none_or(|rtt| sample <= rtt) {
-                    peer.base_rtt = Some(sample);
-                    peer.base_rtt_at = Some(now);
-                }
-            }
-            peer.outstanding
-                .retain(|o| !(o.piece == piece && o.block == block));
+                .position(|&(p, b)| p == piece && b == block)
+            else {
+                self.wasted_bytes += data.len() as u64;
+                return outcome;
+            };
+            peer.cancelled.remove(at);
+            peer.cancelled_pending = peer.cancelled_pending.saturating_sub(1);
         }
+        peer.last_progress = Some(now);
+        peer.last_activity = Some(now);
+        // A request sent to an empty queue waits behind nothing, so its latency is the round
+        // trip plus one block transfer: an unbiased round-trip sample.
+        if let Some(o) = peer
+            .outstanding
+            .iter()
+            .find(|o| o.piece == piece && o.block == block && o.ahead == 0)
+        {
+            let sample = now.saturating_duration_since(o.at);
+            let expired = peer
+                .base_rtt_at
+                .is_none_or(|at| now.saturating_duration_since(at) >= RTT_WINDOW);
+            if expired || peer.base_rtt.is_none_or(|rtt| sample <= rtt) {
+                peer.base_rtt = Some(sample);
+                peer.base_rtt_at = Some(now);
+            }
+        }
+        peer.outstanding
+            .retain(|o| !(o.piece == piece && o.block == block));
         let Some(progress) = self.progress.get_mut(&piece) else {
             self.wasted_bytes += data.len() as u64;
             return outcome;
@@ -1249,8 +1345,7 @@ impl Scheduler {
                     if let Some(peer) = self.peers.get_mut(&other) {
                         peer.outstanding
                             .retain(|o| !(o.piece == piece && o.block == block));
-                        peer.cancelled_pending = peer.cancelled_pending.saturating_add(1);
-                        peer.last_activity = Some(now);
+                        peer.cancelled(piece, block, now);
                     }
                     outcome.cancels.push((other, expected));
                 }
@@ -1260,38 +1355,89 @@ impl Scheduler {
         let at = begin as usize;
         progress.data[at..at + data.len()].copy_from_slice(data);
         progress.received += 1;
-        if !progress.contributors.contains(&key) {
-            progress.contributors.push(key);
-        }
+        progress.senders[block as usize] = Some(key);
         if progress.received as usize == progress.blocks.len()
             && let Some(done) = self.progress.remove(&piece)
         {
             self.in_progress_bytes -= done.data.len() as u64;
-            self.verifying.insert(piece, done.contributors);
+            // Every block was received, so every block has a sender.
+            let senders = done.senders.into_iter().flatten().collect();
+            self.verifying.insert(piece, senders);
             outcome.completed = Some((piece, done.data));
         }
         outcome
     }
 
-    /// Records the hash check of a completed piece. On failure the piece is downloaded again
-    /// and the contributing peers are returned so the caller can penalize them.
-    pub(crate) fn on_verified(&mut self, piece: u32, ok: bool) -> Vec<PeerKey> {
-        let contributors = self.verifying.remove(&piece).unwrap_or_default();
-        if ok {
-            if let Some(slot) = self.have.get_mut(piece as usize)
-                && !*slot
+    /// Records the check of a completed piece and returns what it says about the peers.
+    ///
+    /// A piece that failed is downloaded again; its senders are returned in
+    /// [`Verified::failed_by`], and each block's digest is remembered with its sender. When such
+    /// a piece later verifies (with its block digests, see
+    /// [`Scheduler::needs_block_digests`]), every peer that had sent a block different from the
+    /// verified one is returned in [`Verified::banned`]: those sent bad data, and no other peer
+    /// is blamed for it, however the failed piece was put together.
+    pub(crate) fn on_verified(&mut self, piece: u32, check: PieceCheck) -> Verified {
+        let senders = self.verifying.remove(&piece).unwrap_or_default();
+        let mut verified = Verified::default();
+        match check {
+            PieceCheck::Valid(digests) => {
+                if let Some(slot) = self.have.get_mut(piece as usize)
+                    && !*slot
+                {
+                    *slot = true;
+                    self.have_count += 1;
+                }
+                let records = self.suspects.remove(&piece);
+                if records.is_some() {
+                    self.suspect_order.retain(|&p| p != piece);
+                }
+                if let Some((records, digests)) = records.zip(digests) {
+                    for (records, good) in records.iter().zip(&digests) {
+                        for &(key, digest) in records {
+                            if digest != *good && !verified.banned.contains(&key) {
+                                verified.banned.push(key);
+                            }
+                        }
+                    }
+                }
+            }
+            PieceCheck::Invalid(digests) => {
+                for &key in &senders {
+                    if !verified.failed_by.contains(&key) {
+                        verified.failed_by.push(key);
+                        if let Some(peer) = self.peers.get_mut(&key) {
+                            peer.bad_pieces += 1;
+                        }
+                    }
+                }
+                self.remember_suspect(piece, &senders, &digests);
+            }
+            PieceCheck::NotStored => {}
+        }
+        verified
+    }
+
+    /// Remembers who sent which data for a piece that failed its hash check, within
+    /// [`MAX_SUSPECT_PIECES`] and [`MAX_RECORDS_PER_BLOCK`].
+    fn remember_suspect(&mut self, piece: u32, senders: &[PeerKey], digests: &[BlockDigest]) {
+        if !self.suspects.contains_key(&piece) {
+            if self.suspect_order.len() >= MAX_SUSPECT_PIECES
+                && let Some(oldest) = self.suspect_order.pop_front()
             {
-                *slot = true;
-                self.have_count += 1;
+                self.suspects.remove(&oldest);
             }
-            return Vec::new();
+            self.suspect_order.push_back(piece);
         }
-        for key in &contributors {
-            if let Some(peer) = self.peers.get_mut(key) {
-                peer.bad_pieces += 1;
+        let blocks = self.meta.blocks_in(piece) as usize;
+        let records = self
+            .suspects
+            .entry(piece)
+            .or_insert_with(|| vec![Vec::new(); blocks]);
+        for ((records, &key), &digest) in records.iter_mut().zip(senders).zip(digests) {
+            if records.len() < MAX_RECORDS_PER_BLOCK && !records.contains(&(key, digest)) {
+                records.push((key, digest));
             }
         }
-        contributors
     }
 
     pub(crate) fn bad_pieces(&self, key: PeerKey) -> u32 {
@@ -1359,23 +1505,18 @@ impl Scheduler {
         let timeout = self.cfg.request_timeout;
         let mut cancels = Vec::new();
         for (&key, peer) in &mut self.peers {
-            let before = peer.outstanding.len();
-            peer.outstanding.retain(|o| {
-                let expired = now.saturating_duration_since(o.at) >= timeout;
-                if expired {
-                    if let Some(progress) = self.progress.get_mut(&o.piece) {
-                        release_holder(&mut progress.blocks[o.block as usize], key);
-                    }
-                    cancels.push((key, block_request(&self.meta, o.piece, o.block)));
+            let (expired, waiting): (Vec<Outstanding>, Vec<Outstanding>) =
+                std::mem::take(&mut peer.outstanding)
+                    .into_iter()
+                    .partition(|o| now.saturating_duration_since(o.at) >= timeout);
+            peer.outstanding = waiting;
+            peer.timeouts += u32::try_from(expired.len()).unwrap_or(u32::MAX);
+            for o in expired {
+                if let Some(progress) = self.progress.get_mut(&o.piece) {
+                    release_holder(&mut progress.blocks[o.block as usize], key);
                 }
-                !expired
-            });
-            #[allow(clippy::cast_possible_truncation)]
-            let expired = (before - peer.outstanding.len()) as u32;
-            peer.timeouts += expired;
-            if expired > 0 {
-                peer.cancelled_pending = peer.cancelled_pending.saturating_add(expired);
-                peer.last_activity = Some(now);
+                peer.cancelled(o.piece, o.block, now);
+                cancels.push((key, block_request(&self.meta, o.piece, o.block)));
             }
             // A peer quiet for a while after cancels has honoured them: nothing more is coming.
             let quiet = peer.base_rtt.unwrap_or_default() * 2 + Duration::from_secs(1);
@@ -1835,7 +1976,7 @@ mod tests {
         // Once the reader is buffered, background fills the rest of the queue.
         for r in requests {
             if let Some((piece, _)) = deliver(&mut s, 1, r).completed {
-                s.on_verified(piece, true);
+                s.on_verified(piece, PieceCheck::Valid(None));
             }
         }
         s.reprioritize(false);
@@ -1858,7 +1999,7 @@ mod tests {
         s.reprioritize(false);
         for r in s.fill(1, Instant::now()) {
             if let Some((piece, _)) = deliver(&mut s, 1, r).completed {
-                s.on_verified(piece, true);
+                s.on_verified(piece, PieceCheck::Valid(None));
             }
         }
         // The player has read 1 MiB. Only 1 MiB of the 2 MiB critical bytes ahead of it is
@@ -1915,7 +2056,7 @@ mod tests {
         s.reprioritize(false);
         for r in s.fill(1, Instant::now()) {
             if let Some((piece, _)) = deliver(&mut s, 1, r).completed {
-                s.on_verified(piece, true);
+                s.on_verified(piece, PieceCheck::Valid(None));
             }
         }
         // The player read all 2 MiB and still wants more (it needs more than the critical
@@ -1931,7 +2072,7 @@ mod tests {
         );
         for r in requests {
             if let Some((piece, _)) = deliver(&mut s, 1, r).completed {
-                s.on_verified(piece, true);
+                s.on_verified(piece, PieceCheck::Valid(None));
             }
         }
         s.reprioritize(false);
@@ -2094,7 +2235,8 @@ mod tests {
         // Free the queue (it now holds piece 1) so there is room to re-request piece 0.
         s.on_choke(1);
         s.on_unchoke(1);
-        assert_eq!(s.on_verified(0, false), vec![1]);
+        let failed = s.on_verified(0, PieceCheck::Invalid(digests(&data)));
+        assert_eq!(failed.failed_by, vec![1]);
         assert_eq!(s.bad_pieces(1), 1);
         s.reprioritize(false);
         assert!(
@@ -2192,14 +2334,14 @@ mod tests {
         // Twelve of the sixteen pieces arrive: more than half, but not all.
         for r in requests.iter().filter(|r| r.piece < first + 12) {
             if let Some((piece, _)) = deliver(&mut s, 1, *r).completed {
-                s.on_verified(piece, true);
+                s.on_verified(piece, PieceCheck::Valid(None));
             }
         }
         s.reprioritize(false);
         assert!(s.is_critical(), "the rest of the index stays exclusive");
         for r in requests.iter().filter(|r| r.piece >= first + 12) {
             if let Some((piece, _)) = deliver(&mut s, 1, *r).completed {
-                s.on_verified(piece, true);
+                s.on_verified(piece, PieceCheck::Valid(None));
             }
         }
         s.reprioritize(false);
@@ -2319,5 +2461,232 @@ mod tests {
         let r = s.fill(1, at(3000))[0];
         s.on_block_at(1, r.piece, r.begin, &vec![0; r.len as usize], at(3100));
         assert_eq!(s.peers[&1].base_rtt, Some(Duration::from_millis(100)));
+    }
+
+    fn digests(data: &[u8]) -> Vec<BlockDigest> {
+        use sha1::Digest as _;
+        data.chunks(BLOCK_LEN as usize)
+            .map(|block| sha1::Sha1::digest(block).into())
+            .collect()
+    }
+
+    /// Delivers `requests` from `key`, every byte `byte`. Returns the completed piece, if any.
+    fn send_all(
+        s: &mut Scheduler,
+        key: PeerKey,
+        requests: &[Request],
+        byte: u8,
+    ) -> Option<(u32, Vec<u8>)> {
+        let mut completed = None;
+        for r in requests {
+            let outcome = s.on_block(key, r.piece, r.begin, &vec![byte; r.len as usize]);
+            completed = outcome.completed.or(completed);
+        }
+        completed
+    }
+
+    /// Two-block queues, so that two peers share a four-block piece.
+    fn two_block_queues() -> SchedulerConfig {
+        SchedulerConfig {
+            initial_queue: 2,
+            min_queue: 2,
+            ..SchedulerConfig::default()
+        }
+    }
+
+    #[test]
+    fn blocks_nobody_asked_the_sender_for_are_dropped() {
+        let mut s = sched(10, small_queues());
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let now = Instant::now();
+        let asked = s.fill(1, now);
+        assert!(asked.iter().all(|r| r.piece == 0) && asked.len() == 4);
+
+        // Peer 2 sends a block of a piece only peer 1 was asked for: dropped, and peer 1's
+        // request stands.
+        let outcome = deliver(&mut s, 2, asked[0]);
+        assert!(outcome.cancels.is_empty() && outcome.completed.is_none());
+        assert_eq!(s.peers[&1].outstanding.len(), 4);
+        assert_eq!(s.stats().wasted_bytes, u64::from(BLOCK_LEN));
+        // A block of a piece in progress that nobody was asked for, and one of a piece not
+        // started: dropped too.
+        let unasked = block_request(&s.meta, 5, 0);
+        deliver(&mut s, 2, unasked);
+        assert!(!s.progress.contains_key(&5));
+        assert_eq!(s.stats().wasted_bytes, 2 * u64::from(BLOCK_LEN));
+        // Nor does it count as progress from peer 2.
+        assert_eq!(s.peers[&2].last_progress, None);
+        // An unknown peer's data is ignored.
+        assert!(deliver(&mut s, 99, asked[0]).completed.is_none());
+
+        // Peer 1's own blocks complete the piece, with peer 1 as the only sender.
+        assert!(send_all(&mut s, 1, &asked, 0).is_some());
+        assert_eq!(s.verifying[&0], vec![1; 4]);
+    }
+
+    #[test]
+    fn data_for_requests_cancelled_at_the_sender_is_still_accepted() {
+        let mut s = sched(1000, small_queues());
+        seed(&mut s, 1);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let t0 = Instant::now();
+        let old = s.fill(1, t0);
+        // A seek cancels them; the peer sends them anyway.
+        s.set_interest(1, reader(500 * u64::from(PIECE), &s));
+        assert_eq!(s.reprioritize(true).len(), 4);
+        assert!(send_all(&mut s, 1, &old, 0).is_some(), "piece 0 completes");
+        assert_eq!(s.stats().wasted_bytes, 0);
+        // Once each, though: a second copy is dropped.
+        assert!(deliver(&mut s, 1, old[0]).completed.is_none());
+        assert_eq!(s.stats().wasted_bytes, u64::from(BLOCK_LEN));
+    }
+
+    #[test]
+    fn smart_ban_names_the_peer_whose_blocks_differed_and_only_it() {
+        let honest: PeerKey = 1;
+        let attacker: PeerKey = 2;
+        let mut s = sched(10, two_block_queues());
+        seed(&mut s, honest);
+        seed(&mut s, attacker);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let now = Instant::now();
+        let fills = s.fill_all(&[honest, attacker], now);
+        let (h, a) = (fills[0].1.clone(), fills[1].1.clone());
+        assert!(h.iter().chain(&a).all(|r| r.piece == 0), "{fills:?}");
+
+        // The honest peer sends good blocks (0x11), the attacker garbage (0xEE): the piece is
+        // made of both and fails. Neither can be told from the other yet.
+        let good = vec![0x11u8; PIECE as usize];
+        assert!(send_all(&mut s, honest, &h, 0x11).is_none());
+        let (piece, data) = send_all(&mut s, attacker, &a, 0xEE).expect("complete");
+        let failed = s.on_verified(piece, PieceCheck::Invalid(digests(&data)));
+        assert_eq!(failed.failed_by.len(), 2);
+        assert!(failed.banned.is_empty());
+        assert!(s.needs_block_digests(0));
+
+        // The retry goes to one peer: the attacker asks first and gets the piece to itself.
+        s.reprioritize(false);
+        let fills = s.fill_all(&[attacker, honest], now);
+        assert!(fills[0].1.iter().all(|r| r.piece == 0) && !fills[0].1.is_empty());
+        assert!(
+            fills[1].1.iter().all(|r| r.piece != 0),
+            "only the owner fetches a piece that failed: {fills:?}"
+        );
+        let mut asked = fills[0].1.clone();
+        let mut completed = None;
+        while completed.is_none() {
+            completed = send_all(&mut s, attacker, &asked, 0xEE);
+            asked = s.fill(attacker, now);
+        }
+        let (piece, data) = completed.unwrap();
+        let failed = s.on_verified(piece, PieceCheck::Invalid(digests(&data)));
+        assert_eq!(failed.failed_by, vec![attacker], "a sole source this time");
+
+        // The attacker stops serving (choked us); the honest peer takes over and the piece
+        // verifies: the attacker, and only the attacker, is named.
+        s.on_choke(attacker);
+        s.on_choke(honest);
+        s.on_unchoke(honest);
+        s.reprioritize(false);
+        let mut asked = s.fill(honest, now);
+        assert!(asked.iter().any(|r| r.piece == 0));
+        let mut completed = None;
+        while completed.is_none() {
+            let zero: Vec<Request> = asked.iter().copied().filter(|r| r.piece == 0).collect();
+            completed = send_all(&mut s, honest, &zero, 0x11);
+            asked = s.fill(honest, now);
+        }
+        let (piece, data) = completed.unwrap();
+        assert_eq!(data, good);
+        let verified = s.on_verified(piece, PieceCheck::Valid(Some(digests(&data))));
+        assert_eq!(verified.banned, vec![attacker]);
+        assert!(s.have(0), "playback can go on");
+        assert!(
+            !s.needs_block_digests(0),
+            "the records are dropped once verified"
+        );
+    }
+
+    #[test]
+    fn smart_ban_spares_peers_whose_blocks_were_right() {
+        // Peer 1 sent blocks 0-1 right and peer 2 blocks 2-3 right; the piece failed for
+        // another reason (a third peer's block, here simulated by the digests). Neither is
+        // banned when the piece verifies with the same blocks.
+        let mut s = sched(10, two_block_queues());
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let now = Instant::now();
+        let fills = s.fill_all(&[1, 2], now);
+        send_all(&mut s, 1, &fills[0].1, 0x11);
+        let (piece, data) = send_all(&mut s, 2, &fills[1].1, 0x11).unwrap();
+        let failed = s.on_verified(piece, PieceCheck::Invalid(digests(&data)));
+        assert_eq!(failed.failed_by.len(), 2);
+        // Verified later with exactly that data: nobody sent anything different.
+        s.verifying.insert(0, vec![1, 1, 2, 2]);
+        let verified = s.on_verified(0, PieceCheck::Valid(Some(digests(&data))));
+        assert!(verified.banned.is_empty());
+    }
+
+    #[test]
+    fn pieces_that_could_not_be_stored_blame_nobody() {
+        let mut s = sched(10, small_queues());
+        seed(&mut s, 1);
+        s.set_interest(1, reader(0, &s));
+        s.reprioritize(false);
+        let asked = s.fill(1, Instant::now());
+        let (piece, _) = send_all(&mut s, 1, &asked, 0).unwrap();
+        assert_eq!(
+            s.on_verified(piece, PieceCheck::NotStored),
+            Verified::default()
+        );
+        assert_eq!(s.bad_pieces(1), 0);
+        assert!(!s.have(0) && !s.needs_block_digests(0));
+    }
+
+    #[test]
+    fn smart_ban_memory_is_bounded() {
+        let mut s = sched(200, small_queues());
+        let bad = [[0xAAu8; 20]; 4];
+        for piece in 0..100 {
+            s.remember_suspect(piece, &[1, 2, 3, 4], &bad);
+            // Repeats add nothing.
+            s.remember_suspect(piece, &[1, 2, 3, 4], &bad);
+        }
+        assert_eq!(s.suspects.len(), MAX_SUSPECT_PIECES);
+        assert_eq!(s.suspect_order.len(), MAX_SUSPECT_PIECES);
+        assert!(!s.needs_block_digests(0), "the oldest are forgotten");
+        assert!(s.needs_block_digests(99));
+        assert!(s.suspects[&99].iter().all(|records| records.len() == 1));
+        for n in 0..10u8 {
+            s.remember_suspect(99, &[PeerKey::from(n); 4], &[[n; 20]; 4]);
+        }
+        assert!(
+            s.suspects[&99]
+                .iter()
+                .all(|records| records.len() == MAX_RECORDS_PER_BLOCK)
+        );
+    }
+
+    #[test]
+    fn remembered_cancels_are_bounded() {
+        let mut s = sched(1000, small_queues());
+        seed(&mut s, 1);
+        let now = Instant::now();
+        let peer = s.peers.get_mut(&1).unwrap();
+        for piece in 0..1000 {
+            peer.cancelled(piece, 0, now);
+        }
+        assert_eq!(peer.cancelled.len(), MAX_CANCELLED);
+        assert_eq!(
+            peer.cancelled.front(),
+            Some(&(1000 - u32::try_from(MAX_CANCELLED).unwrap(), 0))
+        );
     }
 }

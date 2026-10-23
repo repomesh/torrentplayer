@@ -3,7 +3,7 @@
 //! The engine session and per-torrent driver.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -24,10 +24,11 @@ use tracing::{debug, info, trace};
 
 use crate::dht::DhtNode;
 use crate::limit::RateLimiter;
-use crate::metainfo::Metainfo;
+use crate::metainfo::{BLOCK_LEN, Metainfo};
 use crate::reader::FileReader;
 use crate::sched::{
-    Interest, InterestId, InterestKind, PeerKey, Request, Scheduler, SchedulerConfig,
+    BlockDigest, Interest, InterestId, InterestKind, PeerKey, PieceCheck, Request, Scheduler,
+    SchedulerConfig,
 };
 use crate::store::PieceStore;
 use crate::wire::{self, HANDSHAKE_LEN, Outgoing};
@@ -381,7 +382,15 @@ impl Swarm {
     pub fn add(&self, meta: Metainfo, peers: Vec<SocketAddr>) -> Result<Torrent, SwarmError> {
         let meta = Arc::new(meta);
         let dir = self.cfg.download_dir.join(meta.info_hash_hex());
-        let store = PieceStore::create(&dir, meta.piece_count())?;
+        // Held until the new instance is registered, so two adds of one torrent cannot both
+        // create the cache file.
+        let mut torrents = self.torrents.lock().unwrap_or_else(PoisonError::into_inner);
+        // A previous instance still in use (by a reader finishing a request) keeps reading the
+        // cache file: append to it instead of truncating it under that reader.
+        let store = match torrents.get(&meta.info_hash).and_then(Weak::upgrade) {
+            Some(previous) => previous.store.share(meta.piece_count()),
+            None => PieceStore::create(&dir, meta.piece_count())?,
+        };
         let shared = Arc::new(Shared {
             sched: Mutex::new(Scheduler::new(
                 Arc::clone(&meta),
@@ -394,7 +403,9 @@ impl Swarm {
             upload_limiter: Arc::clone(&self.upload_limiter),
             upload_slots: Arc::clone(&self.upload_slots),
             own_limit: RateLimiter::unlimited(),
-            upload_enabled: AtomicBool::new(true),
+            // Off until the caller enables it (see `Torrent::set_upload_enabled`), so peers that
+            // connect right after the add are never unchoked against the user's setting.
+            upload_enabled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             selected: Mutex::new(Vec::new()),
             peer_id: self.peer_id,
@@ -405,6 +416,7 @@ impl Swarm {
             peers: Mutex::new(HashMap::new()),
             verdicts: Mutex::new(HashMap::new()),
             blame: Mutex::new(HashMap::new()),
+            peer_ips: Mutex::new(PeerIps::default()),
             smoothed: Mutex::new(Smoothed::default()),
             upload_smoothed: Mutex::new(Smoothed::default()),
             candidates: Mutex::new(Candidates::default()),
@@ -416,12 +428,10 @@ impl Swarm {
             downloaded_web: AtomicU64::new(0),
             cancel: self.cancel.child_token(),
         });
+        torrents.retain(|_, t| t.strong_count() > 0);
+        torrents.insert(meta.info_hash, Arc::downgrade(&shared));
+        drop(torrents);
         shared.add_candidates(peers);
-        {
-            let mut torrents = self.torrents.lock().unwrap_or_else(PoisonError::into_inner);
-            torrents.retain(|_, t| t.strong_count() > 0);
-            torrents.insert(meta.info_hash, Arc::downgrade(&shared));
-        }
         if let Some(node) = &self.dht {
             tokio::spawn(crate::dht::discover(
                 Arc::clone(node),
@@ -583,7 +593,7 @@ impl Torrent {
     }
 
     /// Enables or disables serving verified pieces to peers. Existing peers are choked or
-    /// unchoked at once.
+    /// unchoked at once. Off when the torrent is added.
     pub fn set_upload_enabled(&self, enabled: bool) {
         // Serialize the state change and choke with the final upload enqueue. This prevents an
         // already-read block from slipping into a peer's queue after its choke.
@@ -807,6 +817,8 @@ pub(crate) struct Candidates {
     known: HashMap<SocketAddr, Known>,
     /// Peers being connected to or connected.
     active: HashSet<SocketAddr>,
+    /// Addresses of peers that sent bad data: never dialed, and refused when they connect.
+    pub(crate) banned_ips: HashSet<IpAddr>,
     /// TCP connection attempts in progress (limited by `max_connecting`).
     pub(crate) connecting: usize,
     /// Connected peers still exchanging handshakes. They no longer hold a connection slot but
@@ -849,7 +861,9 @@ impl Candidates {
     /// banned, waiting for a retry, or new while the list is full. Returns whether it was
     /// queued.
     fn offer(&mut self, addr: SocketAddr, preferred: bool) -> bool {
-        if !self.known.contains_key(&addr) && self.known.len() >= MAX_KNOWN {
+        if self.banned_ips.contains(&addr.ip())
+            || !self.known.contains_key(&addr) && self.known.len() >= MAX_KNOWN
+        {
             return false;
         }
         let known = self.known.entry(addr).or_default();
@@ -888,9 +902,20 @@ impl Candidates {
     /// Takes the next address to dial and counts the attempt. Returns it and whether this is
     /// the first attempt at it (a probe, with a short timeout).
     fn next(&mut self) -> Option<(SocketAddr, bool)> {
-        let addr = self.queues.iter_mut().find_map(VecDeque::pop_front)?;
+        let (addr, known) = loop {
+            let addr = self.queues.iter_mut().find_map(VecDeque::pop_front)?;
+            let known = self.known.get_mut(&addr);
+            if !self.banned_ips.contains(&addr.ip()) {
+                break (addr, known);
+            }
+            // Queued before its address was banned.
+            if let Some(known) = known {
+                known.queued = false;
+                known.banned = true;
+            }
+        };
         let mut first = false;
-        if let Some(known) = self.known.get_mut(&addr) {
+        if let Some(known) = known {
             known.queued = false;
             first = !known.tried;
             known.tried = true;
@@ -963,6 +988,72 @@ struct Blame {
     banned: bool,
 }
 
+/// Counts a failed piece against the peers that sent it, given each one's failed pieces so far
+/// (`totals`), and returns those to ban: a peer that alone sent two bad pieces, or that took
+/// part in four and in more than any other source of this piece. A piece put together from
+/// several sources does not show which one was wrong; blaming them all would let one bad source
+/// (such as a web seed with a different file) get honest peers banned, so a tie bans nobody
+/// (smart ban settles it once the piece verifies, see [`Scheduler::on_verified`]). A piece with
+/// data from a source already banned says nothing about the others, so it is not counted.
+fn blame(blames: &mut HashMap<PeerKey, Blame>, totals: &[(PeerKey, u32)]) -> Vec<PeerKey> {
+    if totals
+        .iter()
+        .any(|(k, _)| blames.get(k).is_some_and(|b| b.banned))
+    {
+        return Vec::new();
+    }
+    let alone = totals.len() == 1;
+    let mut disconnect = Vec::new();
+    for &(key, total) in totals {
+        let entry = blames.entry(key).or_default();
+        if alone {
+            entry.sole += 1;
+        }
+        let worst = totals.iter().all(|&(k, t)| k == key || t < total);
+        if entry.sole >= 2 || (total >= 4 && worst) {
+            entry.banned = true;
+            disconnect.push(key);
+        }
+    }
+    disconnect
+}
+
+/// Peers that recently ended, whose addresses are still remembered: smart ban can name a peer
+/// only once a piece it spoiled verifies, possibly after it left.
+const RECENT_PEER_IPS: usize = 256;
+
+/// The IP address behind each peer key, for bans.
+#[derive(Debug, Default)]
+struct PeerIps {
+    live: HashMap<PeerKey, IpAddr>,
+    /// Ended peers, oldest first, at most [`RECENT_PEER_IPS`].
+    recent: VecDeque<(PeerKey, IpAddr)>,
+}
+
+impl PeerIps {
+    fn insert(&mut self, key: PeerKey, ip: IpAddr) {
+        self.live.insert(key, ip);
+    }
+
+    fn ended(&mut self, key: PeerKey) {
+        if let Some(ip) = self.live.remove(&key) {
+            if self.recent.len() >= RECENT_PEER_IPS {
+                self.recent.pop_front();
+            }
+            self.recent.push_back((key, ip));
+        }
+    }
+
+    fn get(&self, key: PeerKey) -> Option<IpAddr> {
+        self.live.get(&key).copied().or_else(|| {
+            self.recent
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, ip)| *ip)
+        })
+    }
+}
+
 /// Why the torrent itself disconnected a peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -1004,6 +1095,8 @@ pub(crate) struct Shared {
     verdicts: Mutex<HashMap<PeerKey, Verdict>>,
     /// Hash failures counted against each peer (see [`Shared::blame`]).
     blame: Mutex<HashMap<PeerKey, Blame>>,
+    /// Where each peer connected from (see [`Shared::ban`]).
+    peer_ips: Mutex<PeerIps>,
     /// The download rate behind [`Torrent::playback_estimate`].
     smoothed: Mutex<Smoothed>,
     /// The upload rate behind [`SwarmStats::upload_bps`].
@@ -1092,40 +1185,66 @@ impl Shared {
         debug!(peers = again, "network changed: retrying known peers");
     }
 
-    /// Counts a failed piece against the peers that sent it, and returns those to disconnect: a
-    /// peer that alone sent two bad pieces, or that took part in four and in more than any other
-    /// source of this piece. A piece put together from several sources does not show which one
-    /// was wrong; blaming them all would let one bad source (such as a web seed with a different
-    /// file) get honest peers banned. A piece with data from a source already banned says
-    /// nothing about the others, so it is not counted.
+    /// Counts a failed piece against the peers that sent it (see [`blame`]) and returns those to
+    /// ban.
     fn blame(&self, contributors: &[PeerKey]) -> Vec<PeerKey> {
-        let mut blame = self.blame.lock().unwrap_or_else(PoisonError::into_inner);
-        if contributors
-            .iter()
-            .any(|k| blame.get(k).is_some_and(|b| b.banned))
-        {
-            return Vec::new();
-        }
         let sched = self.sched();
         let totals: Vec<(PeerKey, u32)> = contributors
             .iter()
             .map(|&k| (k, sched.bad_pieces(k)))
             .collect();
         drop(sched);
-        let alone = totals.len() == 1;
-        let mut disconnect = Vec::new();
-        for &(key, total) in &totals {
-            let entry = blame.entry(key).or_default();
-            if alone {
-                entry.sole += 1;
-            }
-            let worst = totals.iter().all(|&(k, t)| k == key || t < total);
-            if entry.sole >= 2 || (total >= 4 && worst) {
-                entry.banned = true;
-                disconnect.push(key);
+        let mut blames = self.blame.lock().unwrap_or_else(PoisonError::into_inner);
+        blame(&mut blames, &totals)
+    }
+
+    /// Disconnects peers that sent bad data and refuses their IP addresses from now on, for
+    /// outgoing and incoming connections alike (an incoming peer's source port changes with
+    /// every connection).
+    fn ban(&self, keys: &[PeerKey]) {
+        if keys.is_empty() {
+            return;
+        }
+        {
+            let mut blames = self.blame.lock().unwrap_or_else(PoisonError::into_inner);
+            for &key in keys {
+                blames.entry(key).or_default().banned = true;
             }
         }
-        disconnect
+        let ips: Vec<IpAddr> = {
+            let addrs = self.peer_ips.lock().unwrap_or_else(PoisonError::into_inner);
+            keys.iter().filter_map(|&key| addrs.get(key)).collect()
+        };
+        self.candidates().banned_ips.extend(ips);
+        let mut peers = self.peers.lock().unwrap_or_else(PoisonError::into_inner);
+        for &key in keys {
+            // Dropping the sender ends the peer's writer, and so its connection.
+            if peers.remove(&key).is_some() {
+                self.set_verdict(key, Verdict::Banned);
+            }
+        }
+    }
+
+    /// Records the address of a connected peer, for [`Shared::ban`].
+    pub(crate) fn peer_connected(&self, key: PeerKey, addr: SocketAddr) {
+        self.peer_ips
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, addr.ip());
+    }
+
+    /// Called when a peer's connection ends: its address is kept a little longer, for
+    /// [`Shared::ban`].
+    pub(crate) fn peer_disconnected(&self, key: PeerKey) {
+        self.peer_ips
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .ended(key);
+    }
+
+    /// Whether connections from `ip` are refused: a peer there sent bad data.
+    pub(crate) fn is_banned(&self, ip: IpAddr) -> bool {
+        self.candidates().banned_ips.contains(&ip)
     }
 
     /// Records why the torrent is disconnecting `key`.
@@ -1231,37 +1350,39 @@ impl Shared {
     }
 
     /// Verifies a completed piece on a blocking thread, stores it, and updates the scheduler.
+    /// Bans the peers the check shows sent bad data (see [`Scheduler::on_verified`]).
     pub(crate) fn complete_piece(self: &Arc<Self>, piece: u32, data: Vec<u8>) {
         let shared = Arc::clone(self);
+        let digests = self.sched().needs_block_digests(piece);
         tokio::spawn(async move {
             let check = Arc::clone(&shared);
             let len = data.len() as u64;
-            let verified = tokio::task::spawn_blocking(move || {
+            let checked = tokio::task::spawn_blocking(move || {
                 use sha1::Digest as _;
                 let ok = check
                     .meta
                     .piece_hash(piece)
                     .is_some_and(|expected| sha1::Sha1::digest(&data).as_slice() == expected);
-                if ok {
-                    check.store.write_piece(piece, &data).map(|()| true)
-                } else {
-                    Ok(false)
+                if !ok {
+                    return PieceCheck::Invalid(block_digests(&data));
+                }
+                match check.store.write_piece(piece, &data) {
+                    Ok(()) => PieceCheck::Valid(digests.then(|| block_digests(&data))),
+                    Err(error) => {
+                        tracing::warn!(%error, piece, "could not store piece");
+                        PieceCheck::NotStored
+                    }
                 }
             })
-            .await;
-            let ok = match verified {
-                Ok(Ok(ok)) => ok,
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, piece, "could not store piece");
-                    false
-                }
-                Err(error) => {
-                    tracing::warn!(%error, piece, "piece verification task failed");
-                    false
-                }
-            };
-            let bad_peers = shared.sched().on_verified(piece, ok);
-            if ok {
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, piece, "piece verification task failed");
+                PieceCheck::NotStored
+            });
+            let valid = matches!(checked, PieceCheck::Valid(_));
+            let failed = matches!(checked, PieceCheck::Invalid(_));
+            let verified = shared.sched().on_verified(piece, checked);
+            if valid {
                 trace!(piece, "piece verified");
                 shared.downloaded.fetch_add(len, Ordering::Relaxed);
                 shared.piece_done.notify_waiters();
@@ -1275,24 +1396,34 @@ impl Shared {
                 for key in keys {
                     shared.send(key, [Outgoing::Have(piece)]);
                 }
-            } else {
+                if !verified.banned.is_empty() {
+                    debug!(
+                        piece,
+                        peers = ?verified.banned,
+                        "banning peers that sent bad blocks of a piece that now verified"
+                    );
+                    shared.ban(&verified.banned);
+                }
+            } else if failed {
                 debug!(
                     piece,
-                    sources = bad_peers.len(),
+                    sources = verified.failed_by.len(),
                     "piece failed its hash check"
                 );
-                let disconnect = shared.blame(&bad_peers);
-                for key in &disconnect {
-                    shared.set_verdict(*key, Verdict::Banned);
-                }
-                let mut peers = shared.peers.lock().unwrap_or_else(PoisonError::into_inner);
-                for key in disconnect {
-                    peers.remove(&key);
-                }
+                let disconnect = shared.blame(&verified.failed_by);
+                shared.ban(&disconnect);
             }
             shared.request_replan(false);
         });
     }
+}
+
+/// The digest of each block of a piece, for smart ban.
+fn block_digests(data: &[u8]) -> Vec<BlockDigest> {
+    use sha1::Digest as _;
+    data.chunks(BLOCK_LEN as usize)
+        .map(|block| sha1::Sha1::digest(block).into())
+        .collect()
 }
 
 /// What is needed to (re)start tracker announces for a torrent.
@@ -1629,7 +1760,7 @@ impl Shared {
     /// bursts seconds apart, look snubbed, and have its blocks requested again elsewhere.
     pub(crate) fn read_cap(&self) -> usize {
         if self.rate_limit().is_some() {
-            crate::metainfo::BLOCK_LEN as usize
+            BLOCK_LEN as usize
         } else {
             usize::MAX
         }
@@ -1676,14 +1807,16 @@ impl Shared {
 
     /// Makes room for a peer that connected to us: it counts as handshaking until
     /// [`Shared::handshake_finished`]. Refused at the peer limit (counting connections being
-    /// made), while paused, and once the torrent stopped.
-    pub(crate) fn reserve_inbound(&self) -> bool {
+    /// made), while paused, once the torrent stopped, and from a banned address.
+    pub(crate) fn reserve_inbound(&self, addr: SocketAddr) -> bool {
         if self.paused.load(Ordering::Relaxed) || self.cancel.is_cancelled() {
             return false;
         }
         let live = self.live_peers();
         let mut c = self.candidates();
-        if live + c.connecting + c.handshaking >= self.cfg.peer_limit {
+        if c.banned_ips.contains(&addr.ip())
+            || live + c.connecting + c.handshaking >= self.cfg.peer_limit
+        {
             return false;
         }
         c.handshaking += 1;
@@ -1917,5 +2050,61 @@ mod tests {
         assert_eq!(c.known.len(), MAX_KNOWN);
         assert!(!c.offer(addr(u16::MAX), false), "full");
         assert!(!c.offer(addr(1), false), "still known and queued");
+    }
+
+    #[test]
+    fn a_banned_address_is_never_dialed_on_any_port() {
+        let mut c = Candidates::default();
+        let other = SocketAddr::from(([127, 0, 0, 2], 7));
+        c.offer(addr(1), false);
+        c.offer(other, false);
+        c.offer(addr(2), false);
+        c.banned_ips.insert(addr(1).ip());
+        assert!(!c.offer(addr(3), false), "another port of a banned address");
+        // Queued before the ban: skipped.
+        assert_eq!(take(&mut c), other);
+        assert!(c.next().is_none());
+        assert!(c.known[&addr(2)].banned);
+    }
+
+    #[test]
+    fn peer_addresses_outlive_their_connections_for_a_while() {
+        let mut ips = PeerIps::default();
+        ips.insert(1, addr(1).ip());
+        ips.ended(1);
+        assert_eq!(ips.get(1), Some(addr(1).ip()));
+        for key in 2..2 + RECENT_PEER_IPS as u64 {
+            ips.insert(key, addr(2).ip());
+            ips.ended(key);
+        }
+        assert_eq!(ips.get(1), None, "forgotten after enough others ended");
+        assert_eq!(ips.recent.len(), RECENT_PEER_IPS);
+    }
+
+    #[test]
+    fn a_peer_alone_with_two_bad_pieces_is_banned() {
+        let mut blames = HashMap::new();
+        assert!(blame(&mut blames, &[(1, 1)]).is_empty());
+        assert_eq!(blame(&mut blames, &[(1, 2)]), vec![1]);
+        // Pieces with its data say nothing about the others any more.
+        assert!(blame(&mut blames, &[(1, 3), (2, 9)]).is_empty());
+    }
+
+    #[test]
+    fn a_tie_never_bans_an_honest_peer() {
+        // An attacker spoils every piece an honest peer also sent blocks of: both are counted
+        // the same, and neither is banned however long it goes on (smart ban settles it).
+        let mut blames = HashMap::new();
+        for failures in 1..100 {
+            assert!(blame(&mut blames, &[(1, failures), (2, failures)]).is_empty());
+            assert!(blame(&mut blames, &[(2, failures), (1, failures), (3, 1)]).is_empty());
+        }
+    }
+
+    #[test]
+    fn the_worst_of_several_sources_is_banned_after_four_bad_pieces() {
+        let mut blames = HashMap::new();
+        assert!(blame(&mut blames, &[(1, 3), (2, 1)]).is_empty());
+        assert_eq!(blame(&mut blames, &[(1, 4), (2, 1)]), vec![1]);
     }
 }

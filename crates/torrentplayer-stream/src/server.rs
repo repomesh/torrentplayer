@@ -2,21 +2,23 @@
 
 //! The loopback HTTP range server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
 use std::fmt;
 use std::io::{self, SeekFrom};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::ops::RangeInclusive;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures_util::TryStreamExt as _;
 use futures_util::future::BoxFuture;
 use http::header::{
-    ACCEPT_RANGES, ACCESS_CONTROL_ALLOW_ORIGIN, ALLOW, CACHE_CONTROL, CONTENT_LENGTH,
+    ACCEPT_RANGES, ACCESS_CONTROL_ALLOW_ORIGIN, ALLOW, CACHE_CONTROL, CONNECTION, CONTENT_LENGTH,
     CONTENT_RANGE, CONTENT_TYPE, HOST, ORIGIN, RANGE, REFERRER_POLICY, VARY,
 };
 use http::{HeaderValue, Method, Request, Response, StatusCode};
@@ -26,9 +28,9 @@ use hyper::body::{Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioIo, TokioTimer};
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncSeek, AsyncSeekExt as _};
-use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncSeek, AsyncSeekExt as _, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -73,10 +75,22 @@ pub type StreamId = u64;
 /// Server limits.
 #[derive(Clone)]
 pub struct ServerConfig {
-    /// Maximum simultaneous connections. Extra connections are closed immediately.
+    /// Maximum simultaneous authenticated connections. A connection takes a slot with its
+    /// first authenticated request; when none is free, it is answered `503 Service
+    /// Unavailable`, unless a connection that has been stuck for
+    /// [`ServerConfig::stall_timeout`] can be closed to make room.
     pub max_connections: usize,
-    /// How long a client may take to send request headers.
+    /// Connections that have not authenticated yet, kept apart so that other local programs
+    /// cannot take the slots: when there are more, the oldest is closed.
+    pub max_unauthenticated: usize,
+    /// How long a client may take to send request headers, and to authenticate after
+    /// connecting.
     pub header_read_timeout: Duration,
+    /// An authenticated connection that has read or written nothing for this long (a client
+    /// that stopped reading a response, or an idle keep-alive connection) is closed when its
+    /// slot is needed. A player paused with its buffer full stalls like that, so it keeps its
+    /// connection until then.
+    pub stall_timeout: Duration,
     /// Optional metrics hook.
     pub observer: Option<Arc<dyn RequestObserver>>,
     /// Origins whose scripts may read live streams with `fetch` (answered with
@@ -88,7 +102,9 @@ impl Default for ServerConfig {
     fn default() -> Self {
         Self {
             max_connections: 16,
+            max_unauthenticated: 8,
             header_read_timeout: Duration::from_secs(10),
+            stall_timeout: Duration::from_secs(30),
             observer: None,
             allowed_origins: Vec::new(),
         }
@@ -99,7 +115,9 @@ impl fmt::Debug for ServerConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ServerConfig")
             .field("max_connections", &self.max_connections)
+            .field("max_unauthenticated", &self.max_unauthenticated)
             .field("header_read_timeout", &self.header_read_timeout)
+            .field("stall_timeout", &self.stall_timeout)
             .field("observer", &self.observer.is_some())
             .field("allowed_origins", &self.allowed_origins)
             .finish()
@@ -154,6 +172,39 @@ struct Inner {
     live: RwLock<HashMap<StreamId, Arc<dyn LiveSource>>>,
     next_id: AtomicU64,
     config: ServerConfig,
+    /// The connection slots (see [`ServerConfig::max_connections`]).
+    slots: Arc<Semaphore>,
+    /// Connections holding a slot, by connection id.
+    serving: Mutex<HashMap<u64, Arc<Conn>>>,
+    /// Connections that have not authenticated yet, oldest first.
+    pending: Mutex<VecDeque<Arc<Conn>>>,
+    /// The time base of [`Conn::last_io`].
+    epoch: Instant,
+}
+
+/// One client connection, shared by its task, its requests, and the server.
+struct Conn {
+    id: u64,
+    /// Closes the connection; cancelled once it has ended, too.
+    close: CancellationToken,
+    /// When it last read or wrote anything, in milliseconds after [`Inner::epoch`].
+    last_io: AtomicU64,
+    /// The slot its first authenticated request took.
+    slot: Mutex<Option<OwnedSemaphorePermit>>,
+}
+
+impl Conn {
+    fn authenticated(&self) -> bool {
+        self.slot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+}
+
+/// Milliseconds since `epoch`.
+fn millis_since(epoch: Instant) -> u64 {
+    u64::try_from(epoch.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// A published source, and the token of its own that also opens it, if any.
@@ -190,6 +241,10 @@ impl StreamServer {
             sources: RwLock::new(HashMap::new()),
             live: RwLock::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            slots: Arc::new(Semaphore::new(config.max_connections.max(1))),
+            serving: Mutex::new(HashMap::new()),
+            pending: Mutex::new(VecDeque::new()),
+            epoch: Instant::now(),
             config,
         });
         let shutdown = CancellationToken::new();
@@ -285,7 +340,7 @@ impl Drop for StreamServer {
 }
 
 async fn accept_loop(listener: TcpListener, inner: Arc<Inner>, shutdown: CancellationToken) {
-    let connections = Arc::new(Semaphore::new(inner.config.max_connections.max(1)));
+    let mut next_id: u64 = 0;
     loop {
         let (tcp, peer) = tokio::select! {
             () = shutdown.cancelled() => break,
@@ -303,70 +358,242 @@ async fn accept_loop(listener: TcpListener, inner: Arc<Inner>, shutdown: Cancell
         if !peer.ip().is_loopback() {
             continue;
         }
-        let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
-            debug!("stream server connection limit reached");
-            continue;
-        };
-        let _ = tcp.set_nodelay(true);
-        let inner = Arc::clone(&inner);
-        let shutdown = shutdown.clone();
-        let header_read_timeout = inner.config.header_read_timeout;
-        tokio::spawn(async move {
-            let _permit = permit;
-            let service = service_fn(move |req| handle(Arc::clone(&inner), req));
-            let conn = http1::Builder::new()
-                .timer(TokioTimer::new())
-                .header_read_timeout(header_read_timeout)
-                .max_buf_size(16 * 1024)
-                .serve_connection(TokioIo::new(tcp), service);
-            tokio::select! {
-                () = shutdown.cancelled() => {}
-                result = conn => if let Err(error) = result {
-                    debug!(%error, "stream connection ended with an error");
-                },
-            }
+        next_id += 1;
+        let conn = Arc::new(Conn {
+            id: next_id,
+            close: CancellationToken::new(),
+            last_io: AtomicU64::new(millis_since(inner.epoch)),
+            slot: Mutex::new(None),
         });
+        inner.add_pending(&conn);
+        let _ = tcp.set_nodelay(true);
+        tokio::spawn(serve_connection(
+            Arc::clone(&inner),
+            conn,
+            tcp,
+            shutdown.clone(),
+        ));
+    }
+}
+
+/// Serves one connection until it ends, the server stops, or the connection is closed to make
+/// room (see [`Inner::add_pending`] and [`Inner::admit`]).
+async fn serve_connection(
+    inner: Arc<Inner>,
+    conn: Arc<Conn>,
+    tcp: TcpStream,
+    shutdown: CancellationToken,
+) {
+    let header_read_timeout = inner.config.header_read_timeout;
+    let io = Watched {
+        io: tcp,
+        conn: Arc::clone(&conn),
+        epoch: inner.epoch,
+    };
+    let service = {
+        let inner = Arc::clone(&inner);
+        let conn = Arc::clone(&conn);
+        service_fn(move |req| handle(Arc::clone(&inner), Arc::clone(&conn), req))
+    };
+    let served = http1::Builder::new()
+        .timer(TokioTimer::new())
+        .header_read_timeout(header_read_timeout)
+        .max_buf_size(16 * 1024)
+        .serve_connection(TokioIo::new(io), service);
+    // A connection must authenticate as promptly as it must send headers.
+    let unauthenticated = async {
+        tokio::time::sleep(header_read_timeout).await;
+        if conn.authenticated() {
+            std::future::pending::<()>().await;
+        }
+    };
+    tokio::select! {
+        () = shutdown.cancelled() => {}
+        () = conn.close.cancelled() => {}
+        () = unauthenticated => debug!("stream connection did not authenticate in time"),
+        result = served => if let Err(error) = result {
+            debug!(%error, "stream connection ended with an error");
+        },
+    }
+    conn.close.cancel();
+    inner
+        .serving
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&conn.id);
+    conn.slot
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+}
+
+impl Inner {
+    /// Registers a connection that has not authenticated yet. Beyond
+    /// [`ServerConfig::max_unauthenticated`] the oldest such connection is closed, so other
+    /// local programs that open connections and send nothing cannot lock the player out: they
+    /// would have to outpace it between its connecting and its sending a request.
+    fn add_pending(&self, conn: &Arc<Conn>) {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        pending.retain(|c| !c.close.is_cancelled());
+        if pending.len() >= self.config.max_unauthenticated.max(1)
+            && let Some(oldest) = pending.pop_front()
+        {
+            debug!("too many unauthenticated stream connections; closing the oldest");
+            oldest.close.cancel();
+        }
+        pending.push_back(Arc::clone(conn));
+    }
+
+    /// Gives an authenticated connection a slot, unless it has one. When none is free, the
+    /// connection stuck the longest (for at least [`ServerConfig::stall_timeout`]) is closed to
+    /// make room; failing that, the request is refused.
+    async fn admit(&self, conn: &Arc<Conn>) -> Result<(), StatusCode> {
+        if conn.authenticated() {
+            return Ok(());
+        }
+        let permit = if let Ok(permit) = Arc::clone(&self.slots).try_acquire_owned() {
+            permit
+        } else {
+            if let Some(stuck) = self.stuck() {
+                debug!("stream connection limit reached; closing a stalled connection");
+                stuck.close.cancel();
+            }
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                Arc::clone(&self.slots).acquire_owned(),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or_else(|| {
+                debug!("stream connection limit reached");
+                StatusCode::SERVICE_UNAVAILABLE
+            })?
+        };
+        *conn.slot.lock().unwrap_or_else(PoisonError::into_inner) = Some(permit);
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|c| c.id != conn.id);
+        self.serving
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(conn.id, Arc::clone(conn));
+        Ok(())
+    }
+
+    /// The connection holding a slot that has read and written nothing for the longest, if
+    /// that is at least [`ServerConfig::stall_timeout`].
+    fn stuck(&self) -> Option<Arc<Conn>> {
+        let now = millis_since(self.epoch);
+        let limit = u64::try_from(self.config.stall_timeout.as_millis()).unwrap_or(u64::MAX);
+        self.serving
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .map(|c| (now.saturating_sub(c.last_io.load(Ordering::Relaxed)), c))
+            .filter(|(idle, c)| *idle >= limit && !c.close.is_cancelled())
+            .max_by_key(|(idle, _)| *idle)
+            .map(|(_, c)| Arc::clone(c))
+    }
+}
+
+/// A connection's socket, recording when it last made progress (see [`Inner::stuck`]).
+struct Watched {
+    io: TcpStream,
+    conn: Arc<Conn>,
+    epoch: Instant,
+}
+
+impl Watched {
+    fn progressed(&self) {
+        self.conn
+            .last_io
+            .store(millis_since(self.epoch), Ordering::Relaxed);
+    }
+}
+
+impl AsyncRead for Watched {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        let before = buf.filled().len();
+        let polled = Pin::new(&mut this.io).poll_read(cx, buf);
+        if matches!(polled, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            this.progressed();
+        }
+        polled
+    }
+}
+
+impl AsyncWrite for Watched {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.io).poll_write(cx, buf);
+        if matches!(polled, Poll::Ready(Ok(n)) if n > 0) {
+            this.progressed();
+        }
+        polled
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[io::IoSlice<'_>],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let polled = Pin::new(&mut this.io).poll_write_vectored(cx, bufs);
+        if matches!(polled, Poll::Ready(Ok(n)) if n > 0) {
+            this.progressed();
+        }
+        polled
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
     }
 }
 
 type Body = UnsyncBoxBody<Bytes, io::Error>;
 
-async fn handle(inner: Arc<Inner>, req: Request<Incoming>) -> Result<Response<Body>, Infallible> {
-    Ok(respond(&inner, &req).await.unwrap_or_else(simple))
+async fn handle(
+    inner: Arc<Inner>,
+    conn: Arc<Conn>,
+    req: Request<Incoming>,
+) -> Result<Response<Body>, Infallible> {
+    let mut response = respond(&inner, &conn, &req).await.unwrap_or_else(simple);
+    // Refused before authenticating: the connection has nothing more to do here.
+    if !conn.authenticated() {
+        response
+            .headers_mut()
+            .insert(CONNECTION, HeaderValue::from_static("close"));
+    }
+    Ok(response)
 }
 
-async fn respond(inner: &Inner, req: &Request<Incoming>) -> Result<Response<Body>, StatusCode> {
+async fn respond(
+    inner: &Inner,
+    conn: &Arc<Conn>,
+    req: &Request<Incoming>,
+) -> Result<Response<Body>, StatusCode> {
     // Authenticate before revealing anything, including whether a stream exists.
-    let host_ok = req
-        .headers()
-        .get(HOST)
-        .is_some_and(|h| h.as_bytes() == inner.host.as_bytes());
-    let presented = req
-        .uri()
-        .query()
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("t=")))
-        .map(str::as_bytes);
-    let session_ok = presented.is_some_and(|t| inner.token.matches(t));
-    let id: Option<StreamId> = req
-        .uri()
-        .path()
-        .strip_prefix("/s/")
-        .and_then(|s| s.parse().ok());
-    let published = id.and_then(|id| {
-        inner
-            .sources
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&id)
-            .map(|p| (Arc::clone(&p.source), p.token.clone()))
-    });
-    // A stream's own token opens only that stream.
-    let stream_ok = presented
-        .zip(published.as_ref().and_then(|(_, token)| token.as_ref()))
-        .is_some_and(|(presented, token)| token.matches(presented));
-    if !host_ok || !(session_ok || stream_ok) {
-        return Err(StatusCode::FORBIDDEN);
-    }
+    let stream = authenticate(inner, req)?;
+    inner.admit(conn).await?;
 
     let head = match *req.method() {
         Method::GET => false,
@@ -384,10 +611,7 @@ async fn respond(inner: &Inner, req: &Request<Incoming>) -> Result<Response<Body
         return respond_live(inner, req, live, head);
     }
 
-    let (id, source) = id
-        .zip(published.map(|(source, _)| source))
-        .ok_or(StatusCode::NOT_FOUND)?;
-
+    let (id, source) = stream.ok_or(StatusCode::NOT_FOUND)?;
     let len = source.byte_len();
     let range = parse_range(req.headers().get(RANGE).map(HeaderValue::as_bytes), len);
     let (status, range) = match range {
@@ -442,6 +666,45 @@ async fn respond(inner: &Inner, req: &Request<Incoming>) -> Result<Response<Body
     builder
         .body(body)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+/// A published stream and its id.
+type Found = (StreamId, Arc<dyn MediaSource>);
+
+/// Checks the `Host` header and the token. Returns the stream asked for, if it is published,
+/// with its id.
+fn authenticate(inner: &Inner, req: &Request<Incoming>) -> Result<Option<Found>, StatusCode> {
+    let host_ok = req
+        .headers()
+        .get(HOST)
+        .is_some_and(|h| h.as_bytes() == inner.host.as_bytes());
+    let presented = req
+        .uri()
+        .query()
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("t=")))
+        .map(str::as_bytes);
+    let session_ok = presented.is_some_and(|t| inner.token.matches(t));
+    let id: Option<StreamId> = req
+        .uri()
+        .path()
+        .strip_prefix("/s/")
+        .and_then(|s| s.parse().ok());
+    let published = id.and_then(|id| {
+        inner
+            .sources
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .map(|p| (Arc::clone(&p.source), p.token.clone()))
+    });
+    // A stream's own token opens only that stream.
+    let stream_ok = presented
+        .zip(published.as_ref().and_then(|(_, token)| token.as_ref()))
+        .is_some_and(|(presented, token)| token.matches(presented));
+    if !host_ok || !(session_ok || stream_ok) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    Ok(id.zip(published.map(|(source, _)| source)))
 }
 
 /// Serves a live stream: once, whole, with a CORS header for the app's own origins.

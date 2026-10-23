@@ -184,6 +184,47 @@ async fn seed(mut stream: TcpStream, data: Arc<Vec<u8>>) {
     }
 }
 
+fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(payload.len() + 1).unwrap();
+    [&len.to_be_bytes()[..], &[id], payload].concat()
+}
+
+/// Plays a malicious peer that claims every piece and answers every request with garbage. It
+/// also sends a garbage block of every piece unasked. Returns once TorrentPlayer closes the
+/// connection.
+async fn attack(mut stream: TcpStream) {
+    let pieces = LEN.div_ceil(PIECE as usize);
+    let mut hello = frame(5, &vec![0xFF; pieces.div_ceil(8)]);
+    hello.extend(frame(1, &[]));
+    for piece in 0..u32::try_from(pieces).unwrap() {
+        let mut payload = piece.to_be_bytes().to_vec();
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend(std::iter::repeat_n(0xEE, 16 * 1024));
+        hello.extend(frame(7, &payload));
+    }
+    if stream.write_all(&hello).await.is_err() {
+        return;
+    }
+    loop {
+        let mut len = [0u8; 4];
+        if stream.read_exact(&mut len).await.is_err() {
+            return;
+        }
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        if stream.read_exact(&mut body).await.is_err() {
+            return;
+        }
+        if body.first() == Some(&6) {
+            let length = u32::from_be_bytes(body[9..13].try_into().unwrap()) as usize;
+            let mut payload = body[1..9].to_vec();
+            payload.extend(std::iter::repeat_n(0xEE, length));
+            if stream.write_all(&frame(7, &payload)).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 async fn read_all(torrent: &Torrent) -> Vec<u8> {
     let mut reader = torrent.reader(0).unwrap();
     let mut all = Vec::with_capacity(LEN);
@@ -281,6 +322,49 @@ async fn a_seeder_that_connects_to_us_is_served_and_the_port_is_announced() {
     swarm.shutdown();
     net.shutdown();
     let _ = seeder.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_sending_bad_data_is_banned_and_refused_when_it_comes_back() {
+    let (bytes, data, _seed_dir) = torrent(Vec::new()).await;
+    let meta = Metainfo::from_bytes(&bytes).unwrap();
+    let info_hash = meta.info_hash;
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    let port = free_port();
+    net.set_incoming(incoming(port));
+    let (swarm, _dir) = swarm(&net, 40).await;
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    let torrent = swarm.add(meta, Vec::new()).unwrap();
+
+    // A thin swarm: one honest seeder and one attacker, both connected before playback.
+    let (honest, _) = connect_as_peer(port, info_hash).await.unwrap();
+    let honest = tokio::spawn(seed(honest, Arc::new(data.clone())));
+    let (attacker, _) = connect_as_peer(port, info_hash).await.unwrap();
+    let attacker = tokio::spawn(attack(attacker));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while torrent.stats().peers_live < 2 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("both peers are live");
+
+    // Pieces the attacker spoiled are fetched again and verify, so playback gets every byte.
+    let all = read_all(&torrent).await;
+    assert!(all == data, "downloaded bytes differ from the seeded file");
+    tokio::time::timeout(Duration::from_secs(10), attacker)
+        .await
+        .expect("the attacker is disconnected")
+        .unwrap();
+    assert_eq!(torrent.stats().peers_live, 1, "the honest seeder stays");
+    // Coming back from another port does not help.
+    assert!(connect_as_peer(port, info_hash).await.is_none());
+
+    swarm.shutdown();
+    net.shutdown();
+    let _ = honest.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

@@ -10,14 +10,16 @@
     clippy::unnecessary_literal_bound
 )]
 
-use std::io::{self, Cursor};
+use std::io::{self, Cursor, SeekFrom};
 use std::net::SocketAddr;
 use std::ops::RangeInclusive;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncWriteExt, ReadBuf};
 use tokio::net::TcpStream;
 use torrentplayer_stream::{
     LiveSource, MediaReader, MediaSource, RequestObserver, ServerConfig, StreamId, StreamServer,
@@ -405,4 +407,164 @@ async fn unpublished_live_streams_are_not_found() {
     server.unpublish(id);
     let r = send(server.local_addr(), &get(&path, &host, "")).await;
     assert_eq!(r.status, 404);
+}
+
+/// A source of `len` zero bytes, made as they are read, for responses larger than the
+/// connection's buffers.
+struct Zeros(u64);
+
+impl MediaSource for Zeros {
+    fn byte_len(&self) -> u64 {
+        self.0
+    }
+    fn content_type(&self) -> &str {
+        "video/mp4"
+    }
+    fn open(&self) -> BoxFuture<'static, io::Result<Box<dyn MediaReader>>> {
+        let len = self.0;
+        Box::pin(async move { Ok(Box::new(ZeroReader { len, pos: 0 }) as Box<dyn MediaReader>) })
+    }
+}
+
+struct ZeroReader {
+    len: u64,
+    pos: u64,
+}
+
+impl AsyncRead for ZeroReader {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let left = usize::try_from(self.len - self.pos).unwrap_or(usize::MAX);
+        let n = buf.remaining().min(left);
+        buf.initialize_unfilled_to(n).fill(0);
+        buf.advance(n);
+        self.pos += n as u64;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncSeek for ZeroReader {
+    fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+        let SeekFrom::Start(at) = position else {
+            return Err(io::ErrorKind::Unsupported.into());
+        };
+        self.pos = at.min(self.len);
+        Ok(())
+    }
+    fn poll_complete(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<u64>> {
+        Poll::Ready(Ok(self.pos))
+    }
+}
+
+/// A server with `config` publishing 1 GiB of zeros. Returns it, its host, and the path.
+async fn zeros_fixture(config: ServerConfig) -> (StreamServer, String, String) {
+    let server = StreamServer::start(config).await.unwrap();
+    let published = server.publish(Arc::new(Zeros(1 << 30)));
+    let url = published.url.strip_prefix("http://").unwrap().to_owned();
+    let (host, path) = url.split_at(url.find('/').unwrap());
+    (server, host.to_owned(), path.to_owned())
+}
+
+/// Opens a connection that asks for the whole stream and then reads nothing, as a player
+/// whose buffer is full does. Returns once the server can no longer write to it.
+async fn stalled_client(addr: SocketAddr, host: &str, path: &str) -> TcpStream {
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n");
+    tcp.write_all(request.as_bytes()).await.unwrap();
+    // Loopback buffers hold a few MiB; the server fills them well within this.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    tcp
+}
+
+#[tokio::test]
+async fn local_programs_holding_connections_open_cannot_lock_the_player_out() {
+    let (server, host, path) = zeros_fixture(ServerConfig {
+        max_connections: 2,
+        max_unauthenticated: 2,
+        ..ServerConfig::default()
+    })
+    .await;
+    let addr = server.local_addr();
+    // Another program opens many connections and sends nothing.
+    let mut idle = Vec::new();
+    for _ in 0..10 {
+        idle.push(TcpStream::connect(addr).await.unwrap());
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let r = send(addr, &get(&path, &host, "Range: bytes=0-99\r\n")).await;
+    assert_eq!(r.status, 206);
+    assert_eq!(r.body.len(), 100);
+}
+
+#[tokio::test]
+async fn connections_that_do_not_authenticate_are_closed() {
+    let (server, host, path) = zeros_fixture(ServerConfig {
+        header_read_timeout: Duration::from_millis(300),
+        ..ServerConfig::default()
+    })
+    .await;
+    let addr = server.local_addr();
+    let closed = |mut tcp: TcpStream| async move {
+        let mut buf = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(3), tcp.read_to_end(&mut buf))
+            .await
+            .expect("the server keeps the connection open");
+        buf
+    };
+
+    // Silent.
+    closed(TcpStream::connect(addr).await.unwrap()).await;
+
+    // A wrong token on a keep-alive connection: refused, and the connection is closed rather
+    // than left open for more tries.
+    let mut tcp = TcpStream::connect(addr).await.unwrap();
+    let no_token = path.split('?').next().unwrap();
+    let request = format!("GET {no_token} HTTP/1.1\r\nHost: {host}\r\n\r\n");
+    tcp.write_all(request.as_bytes()).await.unwrap();
+    let reply = closed(tcp).await;
+    let reply = String::from_utf8_lossy(&reply);
+    assert!(reply.starts_with("HTTP/1.1 403"), "{reply}");
+    assert!(reply.to_ascii_lowercase().contains("connection: close"));
+}
+
+#[tokio::test]
+async fn a_client_that_stops_reading_gives_up_its_slot_when_it_is_needed() {
+    let (server, host, path) = zeros_fixture(ServerConfig {
+        max_connections: 1,
+        stall_timeout: Duration::from_millis(300),
+        ..ServerConfig::default()
+    })
+    .await;
+    let addr = server.local_addr();
+    let mut stalled = stalled_client(addr, &host, &path).await;
+
+    // The only slot is taken by a connection that has made no progress for longer than the
+    // stall timeout: it is closed for the new request.
+    let r = send(addr, &get(&path, &host, "Range: bytes=0-99\r\n")).await;
+    assert_eq!(r.status, 206);
+    assert_eq!(r.body.len(), 100);
+    let mut sink = vec![0u8; 1 << 20];
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while matches!(stalled.read(&mut sink).await, Ok(n) if n > 0) {}
+    })
+    .await
+    .expect("the stalled connection is closed");
+}
+
+#[tokio::test]
+async fn working_clients_keep_their_slots() {
+    let (server, host, path) = zeros_fixture(ServerConfig {
+        max_connections: 1,
+        ..ServerConfig::default()
+    })
+    .await;
+    let addr = server.local_addr();
+    // Stalled for less than the stall timeout: a player paused a moment ago.
+    let _paused = stalled_client(addr, &host, &path).await;
+    let r = send(addr, &get(&path, &host, "Range: bytes=0-99\r\n")).await;
+    assert_eq!(r.status, 503);
+    assert_eq!(r.header("connection"), Some("close"));
 }
