@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Current schema version. Bump it and add a step to [`crate::migrate`] when the shape changes.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Slowest and fastest playback speeds.
 pub const SPEED_RANGE: (f64, f64) = (0.5, 3.0);
@@ -255,10 +255,24 @@ pub struct NetworkSettings {
     /// The user dismissed the note that recommends a VPN in Direct mode (shown in Settings →
     /// Network, the status bar, and when seeding starts).
     pub vpn_hint_dismissed: bool,
+    /// Why traffic is held, if it is: set when loading could not keep the connection the user
+    /// chose (see [`NetworkHold`]). While this is set and the mode is Direct, TorrentPlayer holds
+    /// all traffic and shows a notice; confirming the notice clears it.
+    pub hold: Option<NetworkHold>,
+}
+
+/// Why traffic is held until the user confirms the connection mode (`network.hold`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum NetworkHold {
     /// The settings used the VPN adapter mode, which was removed in 0.3.0, and were moved to
-    /// Direct (see [`crate::migrate`]). While this is set and the mode is Direct, TorrentPlayer
-    /// holds all traffic and shows a notice; dismissing the notice clears it.
-    pub vpn_adapter_mode_removed: bool,
+    /// Direct (see [`crate::migrate`]).
+    VpnAdapterModeRemoved,
+    /// `settings.json` existed but could not be read, or its connection mode (or the whole
+    /// network section) was invalid, so the mode the user chose is unknown. See
+    /// [`crate::SettingsStore::load`].
+    SettingsUnreadable,
 }
 
 impl Default for NetworkSettings {
@@ -272,7 +286,7 @@ impl Default for NetworkSettings {
             show_public_ip: true,
             incoming_peers: IncomingPeersSettings::default(),
             vpn_hint_dismissed: false,
-            vpn_adapter_mode_removed: false,
+            hold: None,
         }
     }
 }

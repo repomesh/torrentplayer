@@ -934,9 +934,10 @@ the backend follows every `update_settings`, `set_secret`, and `clear_secret` (t
 command). A Settings page saves the network section, then shows `network-status` events or
 calls `network_status`. A protected mode with incomplete settings (no host, no WireGuard
 configuration, a username without a stored password) is reported as state `error` with a
-reason, and blocks traffic. So is Direct mode while `network.vpnAdapterModeRemoved` is set
-(settings migrated from the removed VPN adapter mode): traffic is held until
-`update_settings` clears it (see [Network](network.md#using-a-vpn-app)).
+reason, and blocks traffic. So is Direct mode while `network.hold` is set
+(settings migrated from the removed VPN adapter mode, or settings that could not be read):
+traffic is held until `update_settings` clears it with `{"network": {"hold": null}}` (see
+[Network](network.md#using-a-vpn-app)).
 
 #### `network_status`
 

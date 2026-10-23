@@ -43,6 +43,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (about two hours of traffic, sooner when handshakes repeat) every later one was refused as a
   flood and stalled for at least 5 seconds, or failed with a server that ignores WireGuard
   cookies, until the app was restarted.
+- Settings that cannot be read no longer switch a VPN or proxy user to a direct connection. When
+  `settings.json` exists but is damaged, unreadable (for example locked by an antivirus or sync
+  client, or too large), or names a connection mode this version does not know, TorrentPlayer now
+  starts with all traffic paused and a notice ("Your network settings could not be read…") until
+  you choose a connection in Settings → VPN and network or select **Connect directly**. The file
+  is kept as `settings.invalid.json` and is never overwritten while it cannot be backed up. One
+  bad network value (such as an unknown IPv6 policy) now resets only itself, not the connection
+  mode. A first run without a settings file still starts in Direct mode.
 - FFmpeg runs for durations and seek-bar thumbnails no longer follow the `http_proxy` environment
   variable, which sent the private stream address (with its access token) to that proxy. They
   now share the hardening of the audio conversion.

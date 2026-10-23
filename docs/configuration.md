@@ -46,11 +46,23 @@ file that is flushed and then renamed over the old one), so a crash cannot leave
 file. On Linux and macOS it is created readable only by you (mode `0600`, folder `0700`); on
 Windows the per-user config folder is already private to your account.
 
-Loading never fails:
+Loading never fails, and it never turns a VPN or proxy into a direct connection:
 
-- A missing file means the defaults.
-- A damaged file (not JSON) is renamed to `settings.invalid.json` and the defaults are used.
-- A section with a wrong type (for example text where a number belongs) is reset to its
+- A missing file (the first run) means the defaults: Direct mode.
+- A file that exists but cannot be read (too large, locked by another program such as an
+  antivirus or a sync client, a disk error) or is not JSON gives the defaults with traffic
+  **held** (`network.hold = "settingsUnreadable"`): no torrent traffic or searches until you
+  choose a connection in Settings → VPN and network or select **Connect directly** in the notice.
+  The file is copied to `settings.invalid.json` and left in place: nothing is written while
+  loading, so the next start reads it again (and holds again if it is still unreadable). If the
+  copy cannot be made, TorrentPlayer refuses to save settings (each save tries the copy again)
+  rather than replace your settings with defaults.
+- The network section is read value by value. A network section that is not an object, or a
+  `network.mode` (or `network.hold`) that is not recognized (a typo, or a mode from a newer
+  version), holds traffic the same way and keeps a copy as `settings.invalid.json`; the other
+  network values are kept. Any other bad network value (for example an unknown `ipv6` policy)
+  is reset to its default on its own, and the mode is kept.
+- A section other than `network` with a wrong type (for example text where a number belongs) is reset to its
   defaults; the other sections are kept. Out-of-range values are reset individually.
 - A file written by a newer TorrentPlayer is read as far as possible, and a copy is kept as
   `settings.newer.json`, because saving drops the fields this version does not know.
@@ -65,6 +77,8 @@ incoming connections off, and an out-of-range port is reset to 0 (random). Versi
 removed the VPN adapter mode: `network.mode = "bindInterface"` becomes `direct` with
 `network.vpnAdapterModeRemoved` set, and `network.interface` is dropped. This rewrite applies to
 a file of any version (a hand-edited one too) and is saved at once; see [Network](#network).
+Version 5 (0.3.1) generalised that flag: `network.vpnAdapterModeRemoved = true` becomes
+`network.hold = "vpnAdapterModeRemoved"`, and a removed mode found later is migrated the same way.
 
 ## Settings
 
@@ -172,23 +186,23 @@ turns the metadata prefetch of the other results on screen on or off (see
 The network layer (`torrentplayer-net`) applies these as soon as they are saved; see
 [Network modes and kill switch](network.md).
 
-| Setting                         | Default   | Valid values                                          | Applies                    |
-| ------------------------------- | --------- | ----------------------------------------------------- | -------------------------- |
-| `network.mode`                  | `direct`  | `direct`, `socks5`, `wireGuard`                       | now                        |
-| `network.socks5.host`           | `""`      | a host name or IP address, without scheme or port     | now                        |
-| `network.socks5.port`           | `1080`    | 1–65535                                               | now                        |
-| `network.socks5.username`       | `null`    | 1–255 bytes                                           | now                        |
-| `network.socks5.proxyDns`       | `true`    | on: the proxy resolves names; off: TorrentPlayer does | now                        |
-| `network.socks5.proxyTrackers`  | `true`    | on: trackers through the proxy; off: none at all      | now                        |
-| `network.socks5.proxyDht`       | `true`    | DHT through UDP ASSOCIATE; requires proxy UDP support | now                        |
-| `network.wireguard`             | empty     | set by importing a `.conf` file (non-secret parts)    | now in WireGuard mode      |
-| `network.encryption`            | `prefer`  | `prefer`, `require`, `off`                            | later                      |
-| `network.ipv6`                  | `disable` | `disable`, `tunnel`                                   | now (protected modes only) |
-| `network.incomingPeers.enabled` | `false`   | on: accept incoming peer connections                  | now (never in SOCKS5 mode) |
-| `network.incomingPeers.port`    | `0`       | 0 (random 10000–49151, kept per run), 1024–65535      | now                        |
-| `network.incomingPeers.upnp`    | `false`   | on: ask the router to forward the port (UPnP)         | now (direct mode only)     |
-| `network.vpnHintDismissed`      | `false`   | on: the VPN recommendation is no longer shown         | now                        |
-| `network.vpnAdapterModeRemoved` | `false`   | set by the upgrade from the VPN adapter mode          | now                        |
+| Setting                         | Default   | Valid values                                                                           | Applies                    |
+| ------------------------------- | --------- | -------------------------------------------------------------------------------------- | -------------------------- |
+| `network.mode`                  | `direct`  | `direct`, `socks5`, `wireGuard`                                                        | now                        |
+| `network.socks5.host`           | `""`      | a host name or IP address, without scheme or port                                      | now                        |
+| `network.socks5.port`           | `1080`    | 1–65535                                                                                | now                        |
+| `network.socks5.username`       | `null`    | 1–255 bytes                                                                            | now                        |
+| `network.socks5.proxyDns`       | `true`    | on: the proxy resolves names; off: TorrentPlayer does                                  | now                        |
+| `network.socks5.proxyTrackers`  | `true`    | on: trackers through the proxy; off: none at all                                       | now                        |
+| `network.socks5.proxyDht`       | `true`    | DHT through UDP ASSOCIATE; requires proxy UDP support                                  | now                        |
+| `network.wireguard`             | empty     | set by importing a `.conf` file (non-secret parts)                                     | now in WireGuard mode      |
+| `network.encryption`            | `prefer`  | `prefer`, `require`, `off`                                                             | later                      |
+| `network.ipv6`                  | `disable` | `disable`, `tunnel`                                                                    | now (protected modes only) |
+| `network.incomingPeers.enabled` | `false`   | on: accept incoming peer connections                                                   | now (never in SOCKS5 mode) |
+| `network.incomingPeers.port`    | `0`       | 0 (random 10000–49151, kept per run), 1024–65535                                       | now                        |
+| `network.incomingPeers.upnp`    | `false`   | on: ask the router to forward the port (UPnP)                                          | now (direct mode only)     |
+| `network.vpnHintDismissed`      | `false`   | on: the VPN recommendation is no longer shown                                          | now                        |
+| `network.hold`                  | `null`    | set when loading: `vpnAdapterModeRemoved`, `settingsUnreadable`; cleared by the notice | now (Direct mode only)     |
 
 **Kill switch:** always on in the SOCKS5 and WireGuard modes, so there is no setting for it.
 If the proxy or tunnel stops working, torrent traffic pauses and searches are refused; traffic
@@ -204,12 +218,14 @@ provide DHT, and TorrentPlayer never sends it around them.
 use the WireGuard mode with your provider's WireGuard configuration. TorrentPlayer does not run
 OpenVPN itself or import `.ovpn` files (see [ADR 0008](adr/0008-application-wireguard-tunnel.md)).
 
-**Removed VPN adapter mode:** 0.3.0 removed the mode that bound traffic to a VPN app's adapter
-([ADR 0009](adr/0009-remove-vpn-adapter-mode.md)). Settings that used it load as Direct with
-`network.vpnAdapterModeRemoved` set. Until the notice in Settings → Network or beside the status
-bar's network indicator is dismissed (which clears the setting), all torrent traffic and searches
-stay paused, so nothing is sent outside the VPN without your confirmation. Choosing SOCKS5 or
-WireGuard instead lifts the pause too.
+**Held traffic:** when loading cannot keep the connection you chose, Direct mode starts with
+`network.hold` set and a notice in Settings → VPN and network and beside the status bar's network
+indicator. Until the notice is dismissed (**Connect directly**, which clears the setting), all
+torrent traffic and searches stay paused, so nothing is sent outside your VPN without your
+confirmation. Choosing SOCKS5 or WireGuard instead lifts the pause too. It happens when
+`settings.json` or its connection mode could not be read (`settingsUnreadable`, see above), and
+after the upgrade from the VPN adapter mode, which 0.3.0 removed
+([ADR 0009](adr/0009-remove-vpn-adapter-mode.md); `vpnAdapterModeRemoved`).
 
 **WireGuard:** choose **WireGuard** and import a provider's `.conf` file to connect inside TorrentPlayer.
 **Check configuration** previews it without keys; **Save configuration** stores the keys in the
