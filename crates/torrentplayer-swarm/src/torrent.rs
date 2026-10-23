@@ -381,7 +381,15 @@ impl Swarm {
     pub fn add(&self, meta: Metainfo, peers: Vec<SocketAddr>) -> Result<Torrent, SwarmError> {
         let meta = Arc::new(meta);
         let dir = self.cfg.download_dir.join(meta.info_hash_hex());
-        let store = PieceStore::create(&dir, meta.piece_count())?;
+        // Held until the new instance is registered, so two adds of one torrent cannot both
+        // create the cache file.
+        let mut torrents = self.torrents.lock().unwrap_or_else(PoisonError::into_inner);
+        // A previous instance still in use (by a reader finishing a request) keeps reading the
+        // cache file: append to it instead of truncating it under that reader.
+        let store = match torrents.get(&meta.info_hash).and_then(Weak::upgrade) {
+            Some(previous) => previous.store.share(meta.piece_count()),
+            None => PieceStore::create(&dir, meta.piece_count())?,
+        };
         let shared = Arc::new(Shared {
             sched: Mutex::new(Scheduler::new(
                 Arc::clone(&meta),
@@ -394,7 +402,9 @@ impl Swarm {
             upload_limiter: Arc::clone(&self.upload_limiter),
             upload_slots: Arc::clone(&self.upload_slots),
             own_limit: RateLimiter::unlimited(),
-            upload_enabled: AtomicBool::new(true),
+            // Off until the caller enables it (see `Torrent::set_upload_enabled`), so peers that
+            // connect right after the add are never unchoked against the user's setting.
+            upload_enabled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             selected: Mutex::new(Vec::new()),
             peer_id: self.peer_id,
@@ -416,12 +426,10 @@ impl Swarm {
             downloaded_web: AtomicU64::new(0),
             cancel: self.cancel.child_token(),
         });
+        torrents.retain(|_, t| t.strong_count() > 0);
+        torrents.insert(meta.info_hash, Arc::downgrade(&shared));
+        drop(torrents);
         shared.add_candidates(peers);
-        {
-            let mut torrents = self.torrents.lock().unwrap_or_else(PoisonError::into_inner);
-            torrents.retain(|_, t| t.strong_count() > 0);
-            torrents.insert(meta.info_hash, Arc::downgrade(&shared));
-        }
         if let Some(node) = &self.dht {
             tokio::spawn(crate::dht::discover(
                 Arc::clone(node),
@@ -583,7 +591,7 @@ impl Torrent {
     }
 
     /// Enables or disables serving verified pieces to peers. Existing peers are choked or
-    /// unchoked at once.
+    /// unchoked at once. Off when the torrent is added.
     pub fn set_upload_enabled(&self, enabled: bool) {
         // Serialize the state change and choke with the final upload enqueue. This prevents an
         // already-read block from slipping into a peer's queue after its choke.

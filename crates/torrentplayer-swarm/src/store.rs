@@ -13,13 +13,21 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 /// Stores verified pieces for one torrent.
 #[derive(Debug)]
 pub(crate) struct PieceStore {
+    file: Arc<CacheFile>,
+    /// Where each stored piece starts in the file, and its length.
+    index: RwLock<Vec<Option<(u64, u32)>>>,
+}
+
+/// The cache file, which instances of the same torrent may share (see [`PieceStore::share`]).
+#[derive(Debug)]
+struct CacheFile {
     file: File,
-    index: RwLock<Vec<Option<u64>>>,
+    /// Where the next piece is appended.
     next: AtomicU64,
 }
 
@@ -34,30 +42,46 @@ impl PieceStore {
             .truncate(true)
             .open(dir.join("pieces.dat"))?;
         Ok(Self {
-            file,
+            file: Arc::new(CacheFile {
+                file,
+                next: AtomicU64::new(0),
+            }),
             index: RwLock::new(vec![None; piece_count as usize]),
-            next: AtomicU64::new(0),
         })
+    }
+
+    /// An empty store that appends to the same cache file as `self`. For a torrent added again
+    /// while its previous instance is still in use (a reader finishing a request): truncating
+    /// the file under that reader would hand it zeros or other pieces' bytes. The previous
+    /// instance's pieces stay in the file until it is next created.
+    pub(crate) fn share(&self, piece_count: u32) -> Self {
+        Self {
+            file: Arc::clone(&self.file),
+            index: RwLock::new(vec![None; piece_count as usize]),
+        }
     }
 
     /// Appends a verified piece. Blocking: call from a blocking thread.
     pub(crate) fn write_piece(&self, piece: u32, data: &[u8]) -> io::Result<()> {
-        let at = self.next.fetch_add(data.len() as u64, Ordering::Relaxed);
-        write_all_at(&self.file, data, at)?;
+        let len = u32::try_from(data.len())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "piece too large"))?;
+        let at = self.file.next.fetch_add(u64::from(len), Ordering::Relaxed);
+        write_all_at(&self.file.file, data, at)?;
         if let Some(slot) = self
             .index
             .write()
             .unwrap_or_else(PoisonError::into_inner)
             .get_mut(piece as usize)
         {
-            *slot = Some(at);
+            *slot = Some((at, len));
         }
         Ok(())
     }
 
-    /// Reads `buf.len()` bytes starting `offset` bytes into a stored piece. Blocking.
+    /// Reads `buf.len()` bytes starting `offset` bytes into a stored piece. Blocking. Fails
+    /// rather than read past the end of the piece, into whichever piece was stored after it.
     pub(crate) fn read(&self, piece: u32, offset: u32, buf: &mut [u8]) -> io::Result<()> {
-        let base = self
+        let (base, len) = self
             .index
             .read()
             .unwrap_or_else(PoisonError::into_inner)
@@ -65,7 +89,13 @@ impl PieceStore {
             .copied()
             .flatten()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "piece is not stored"))?;
-        read_exact_at(&self.file, buf, base + u64::from(offset))
+        if u64::from(offset) + buf.len() as u64 > u64::from(len) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "read past the end of the piece",
+            ));
+        }
+        read_exact_at(&self.file.file, buf, base + u64::from(offset))
     }
 }
 
@@ -134,5 +164,51 @@ mod tests {
             "reading past the piece fails"
         );
         assert!(store.read(99, 0, &mut buf).is_err());
+    }
+
+    #[test]
+    fn reads_never_cross_into_the_next_stored_piece() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PieceStore::create(dir.path(), 4).unwrap();
+        store.write_piece(1, b"first").unwrap();
+        store.write_piece(2, b"second").unwrap();
+
+        // Piece 2 follows piece 1 in the file: these reads would return "stse" and "rst" + "s".
+        let mut buf = [0u8; 4];
+        assert_eq!(
+            store.read(1, 3, &mut buf).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            store.read(1, 2, &mut buf).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert!(store.read(1, u32::MAX, &mut buf).is_err());
+        store.read(1, 1, &mut buf).unwrap();
+        assert_eq!(&buf, b"irst");
+        store.read(1, 5, &mut []).unwrap();
+    }
+
+    #[test]
+    fn a_shared_store_leaves_the_previous_instances_pieces_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = PieceStore::create(dir.path(), 4).unwrap();
+        old.write_piece(0, b"old piece").unwrap();
+        let new = old.share(4);
+        new.write_piece(0, b"new piece").unwrap();
+
+        let mut buf = [0u8; 9];
+        old.read(0, 0, &mut buf).unwrap();
+        assert_eq!(
+            &buf, b"old piece",
+            "the old instance still reads its own data"
+        );
+        new.read(0, 0, &mut buf).unwrap();
+        assert_eq!(&buf, b"new piece");
+        assert_eq!(
+            new.read(1, 0, &mut buf).unwrap_err().kind(),
+            io::ErrorKind::NotFound,
+            "the new instance starts empty"
+        );
     }
 }

@@ -43,6 +43,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (about two hours of traffic, sooner when handshakes repeat) every later one was refused as a
   flood and stalled for at least 5 seconds, or failed with a server that ignores WireGuard
   cookies, until the app was restarted.
+- Adding a torrent again while the player was still finishing a request on its previous
+  instance no longer empties the engine's piece cache under that request, which could hand the
+  player zeros or the bytes of other pieces. Reads from the cache also stay inside the piece
+  they ask for.
+- A torrent added to TorrentPlayer's engine no longer serves pieces to peers that connect in the
+  moment before the app applies the upload setting: uploading is now off until it is turned on.
 
 ## [0.3.0] - 2026-10-21
 

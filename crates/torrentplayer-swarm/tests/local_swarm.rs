@@ -278,12 +278,78 @@ async fn downloads_a_whole_selected_file_correctly() {
     f.swarm.shutdown();
 }
 
+/// Reads frames until a choke (`true`) or an unchoke (`false`).
+async fn choked(stream: &mut tokio::net::TcpStream) -> bool {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match read_frame(stream).await.first() {
+                Some(0) => return true,
+                Some(1) => return false,
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("the torrent never said whether it uploads")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn adding_a_torrent_again_leaves_readers_of_the_old_instance_intact() {
+    let f = fixture(None).await;
+    let mut reader = f.torrent.reader(0).unwrap();
+    let mut start = vec![0u8; 1024 * 1024];
+    tokio::time::timeout(Duration::from_secs(20), reader.read_exact(&mut start))
+        .await
+        .expect("timed out waiting for data")
+        .unwrap();
+    drop(reader);
+
+    // The stream server lets a request finish after its stream is closed: its reader outlives
+    // the torrent, which is then added again.
+    let mut old = f.torrent.stored_reader(0).unwrap();
+    f.torrent.stop();
+    let again = f.swarm.add(f.torrent.meta().clone(), Vec::new()).unwrap();
+    assert!(again.have_pieces().iter().all(|h| !h));
+
+    let mut buf = vec![0u8; start.len()];
+    old.read_exact(&mut buf).await.unwrap();
+    assert!(buf == f.data[..buf.len()], "the old reader got other bytes");
+    f.swarm.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn uploads_stay_off_until_enabled() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let f = fixture_with_peer(None, Some(addr)).await;
+    assert!(!f.torrent.upload_enabled());
+
+    // A peer connected right after the add is choked, not unchoked.
+    let (mut stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+        .await
+        .expect("the torrent dials the peer")
+        .unwrap();
+    let mut handshake = [0_u8; 68];
+    stream.read_exact(&mut handshake).await.unwrap();
+    handshake[48..].copy_from_slice(b"-TS0001-requester001");
+    stream.write_all(&handshake).await.unwrap();
+    assert!(
+        choked(&mut stream).await,
+        "a new torrent must not unchoke peers"
+    );
+
+    f.torrent.set_upload_enabled(true);
+    assert!(!choked(&mut stream).await, "enabling uploads unchokes");
+    f.swarm.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn uploads_verified_pieces_and_obeys_the_global_limit() {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let requester = tokio::spawn(request_first_piece(listener));
     let f = fixture_with_peer(None, Some(addr)).await;
+    f.torrent.set_upload_enabled(true);
     // A 64 KiB burst is immediate; the remaining 192 KiB takes about three seconds.
     f.swarm.set_upload_limit(NonZeroU32::new(64 * 1024));
     f.torrent.select_file(0).unwrap();
