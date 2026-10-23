@@ -27,6 +27,8 @@ import {
   moveBy,
   nextItem,
   remove,
+  removeItem,
+  restoreRemoved,
   resolveTorrent,
   sameEntry,
   sanitizeQueue,
@@ -547,5 +549,52 @@ describe('one file of one torrent is queued once (issue #55)', () => {
     expect(queue.items.map((i) => i.id)).toEqual(['a', 'c']);
     expect(queue.current).toBe('a');
     expect(mergeDuplicates(queue).queue).toBe(queue);
+  });
+});
+
+describe('undoing a removal', () => {
+  const OTHER = '0123456789abcdef0123456789abcdef01234567';
+
+  it('puts the item back at its place and keeps what changed meanwhile', () => {
+    const start: Queue = {
+      ...emptyQueue(),
+      items: [item('a', 0), item('b', 1), item('c', 2)],
+      current: 'a',
+    };
+    const { queue: removedB, removed } = removeItem(start, 'b');
+    expect(removed).not.toBeNull();
+    if (removed === null) {
+      return;
+    }
+    // While the toast is up: a is played, the cursor moves on, and a video is queued.
+    let changed = markPlayed(removedB, 'a');
+    changed = setCurrent(changed, 'c');
+    changed = enqueue(changed, [item('d', 0, OTHER)]).queue;
+    const undone = restoreRemoved(changed, removed);
+    expect(undone.items.map((i) => i.id)).toEqual(['a', 'b', 'c', 'd']);
+    expect(isPlayed(undone, 'a')).toBe(true);
+    expect(undone.current).toBe('c');
+  });
+
+  it('restores the cursor only if it has not moved since', () => {
+    const start: Queue = { ...emptyQueue(), items: [item('a', 0), item('b', 1)], current: 'b' };
+    const { queue: after, removed } = removeItem(start, 'b');
+    expect(after.current).toBe('a');
+    if (removed === null) {
+      return;
+    }
+    expect(restoreRemoved(after, removed).current).toBe('b');
+    expect(restoreRemoved(setCurrent(after, null), removed).current).toBeNull();
+  });
+
+  it('does not add an item queued again meanwhile', () => {
+    const start: Queue = { ...emptyQueue(), items: [item('a', 0)] };
+    const { queue: after, removed } = removeItem(start, 'a');
+    if (removed === null) {
+      return;
+    }
+    const again = enqueue(after, [item('a2', 0)]).queue;
+    expect(restoreRemoved(again, removed)).toBe(again);
+    expect(removeItem(start, 'missing').removed).toBeNull();
   });
 });

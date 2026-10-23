@@ -264,6 +264,50 @@ export function remove(queue: Queue, id: string): Queue {
   return { ...queue, items, current };
 }
 
+/** What {@link restoreRemoved} needs to undo {@link remove}. */
+export interface Removed {
+  item: QueueItem;
+  /** Its index before it was removed. */
+  index: number;
+  /** Whether it was the cursor, and where {@link remove} moved the cursor. */
+  cursor: { from: string; to: string | null } | null;
+}
+
+/** Removes an item (see {@link remove}), returning what {@link restoreRemoved} needs. */
+export function removeItem(queue: Queue, id: string): { queue: Queue; removed: Removed | null } {
+  const index = queue.items.findIndex((i) => i.id === id);
+  const item = queue.items[index];
+  if (item === undefined) {
+    return { queue, removed: null };
+  }
+  const after = remove(queue, id);
+  const cursor = queue.current === id ? { from: id, to: after.current } : null;
+  return { queue: after, removed: { item, index, cursor } };
+}
+
+/**
+ * Undo for {@link removeItem}: puts the item back where it was, keeping every change made since
+ * (items played, added, or moved). It joins its torrent's group if its old place is now
+ * elsewhere, and it is the cursor again only if the cursor has not moved since. An item queued
+ * again meanwhile is not added twice.
+ */
+export function restoreRemoved(
+  queue: Queue,
+  removed: Removed,
+  mainFile: MainFile = UNKNOWN_MAIN,
+): Queue {
+  if (queue.items.length >= MAX_QUEUE_ITEMS || findEntry(queue, removed.item, mainFile)) {
+    return queue;
+  }
+  const items = [...queue.items];
+  items.splice(Math.min(removed.index, items.length), 0, removed.item);
+  const current =
+    removed.cursor !== null && queue.current === removed.cursor.to
+      ? removed.cursor.from
+      : queue.current;
+  return { ...queue, items: keepGroupsTogether(items), current };
+}
+
 /**
  * Moves an item to `index`, clamped to its torrent's group (groups move as a whole with
  * {@link moveGroup}), keeping the cursor on the same item.

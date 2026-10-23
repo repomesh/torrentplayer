@@ -75,6 +75,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   other settings change can slip in during the import.
 - Cache clean-up no longer removes the torrent whose video the file explorer is previewing, and
   closing the explorer now ends its video preview instead of leaving it published.
+- Undoing the removal of a queued video puts that video back in its place instead of restoring
+  the whole queue as it was, which lost anything played, moved, or queued in the meantime.
 
 ## [0.3.0] - 2026-10-21
 

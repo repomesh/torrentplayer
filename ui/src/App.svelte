@@ -86,6 +86,8 @@
     putFirst,
     queueEntryState,
     remove,
+    removeItem,
+    restoreRemoved,
     resolveTorrent,
     restoreOrder,
     sanitizeQueue,
@@ -1051,16 +1053,20 @@
   }
 
   function removeFromQueue(id: string): void {
-    const before = queue;
-    const item = queue.items.find((i) => i.id === id);
-    queue = remove(queue, id);
-    if (nowPlaying?.queueId === id) {
+    const { queue: after, removed } = removeItem(queue, id);
+    queue = after;
+    const wasPlaying = nowPlaying?.queueId === id;
+    if (nowPlaying && wasPlaying) {
       nowPlaying = { ...nowPlaying, queueId: null };
     }
-    if (item) {
-      showToast(`Removed ${item.title}`, {
+    if (removed) {
+      showToast(`Removed ${removed.item.title}`, {
+        // Puts the item back, keeping what changed while the toast was up.
         undo: () => {
-          queue = before;
+          queue = restoreRemoved(queue, removed, mainFile);
+          if (wasPlaying && nowPlaying?.queueId === null && queue.items.includes(removed.item)) {
+            nowPlaying = { ...nowPlaying, queueId: id };
+          }
         },
       });
     }
