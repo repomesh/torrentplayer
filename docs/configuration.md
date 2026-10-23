@@ -216,7 +216,10 @@ had a `network.killSwitch` toggle that had no effect; it is dropped on upgrade.
 
 **DHT:** uses sockets inside the WireGuard tunnel in WireGuard mode. In SOCKS5 mode,
 `proxyDht` enables discovery through UDP ASSOCIATE; proxies without UDP support cannot
-provide DHT, and TorrentPlayer never sends it around them.
+provide DHT, and TorrentPlayer never sends it around them. In every mode, a torrent looks
+up peers in the DHT when added, every 20 seconds or so while it downloads with few peers,
+every 5 minutes once it has enough, and not while it is paused or has nothing to download
+(see [Network modes](network.md#what-each-kind-of-traffic-does)).
 
 **VPN app:** connect your VPN provider's app first (OpenVPN-based apps included) and keep
 **Direct** selected; the VPN app's own kill switch applies. For a kill switch inside TorrentPlayer,
@@ -243,7 +246,9 @@ the tunnel. UDP trackers and DHT use the tunnel too. See [Network modes](network
 appears. Turned on, it listens on every interface in direct mode (expect a firewall prompt;
 forward the port on your router or turn on UPnP), and only inside the tunnel in WireGuard mode; behind a VPN, peers reach the port only if the provider
 forwards it. A SOCKS5 proxy cannot accept incoming connections, so TorrentPlayer does not
-listen at all in that mode. Settings shows whether it is listening. See
+listen at all in that mode. Settings shows whether it is listening. While it listens,
+TorrentPlayer's engine also announces the port in the DHT (never in SOCKS5 mode); while
+incoming peers are off, it announces nothing there. See
 [Incoming peer connections](network.md#incoming-peer-connections).
 
 **VPN recommendation:** in Direct mode, Settings → Network & VPN, a **VPN recommended** button

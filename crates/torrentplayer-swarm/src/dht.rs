@@ -6,19 +6,25 @@
 //! peers. With a network manager its UDP sockets and bootstrap names use the selected network
 //! lease. The node stops on every epoch change, when DHT is disabled, or when the kill switch
 //! engages, and starts again once allowed. It never falls back to unbound sockets.
-//! TorrentPlayer does not announce itself (it accepts no connections), and only public addresses from
-//! the DHT are used: anyone can put an address there.
+//! Only public addresses from the DHT are used: anyone can put an address there.
+//!
+//! Each torrent looks up its peers at once when added, then as often as it needs them (see
+//! [`next_lookup`]): every 20 seconds or so while it downloads with few peers, every few
+//! minutes once it has enough, and not at all while paused or with nothing to download.
+//! TorrentPlayer announces itself in its lookups only while it accepts incoming peers and the
+//! current mode listens for them (see [`announce_port`]); never in SOCKS5 mode.
 //!
 //! In direct mode the routing tables (and with them the node id) are kept in a file between
 //! runs, so the next start finds peers without bootstrapping from scratch. A protected mode
 //! neither loads nor saves them: the same node id seen directly and through a VPN or proxy
 //! would link the two.
 
+use std::collections::HashSet;
 use std::io::{self, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt as _;
 use librqbit_dht::{Dht, DhtBuilder, DhtConfig, Id20};
@@ -327,8 +333,93 @@ pub(crate) async fn follow_policy(node: Arc<DhtNode>, mut policy: watch::Receive
     }
 }
 
+/// What a torrent needs from the DHT right now, for [`next_lookup`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Demand {
+    /// Paused: no lookups, and so no announces.
+    pub(crate) paused: bool,
+    /// Nothing to download now: every piece is verified, or nothing is playing or being read
+    /// and every selected piece is verified.
+    pub(crate) idle: bool,
+    pub(crate) live_peers: usize,
+    pub(crate) peer_limit: usize,
+    /// The port incoming peers are accepted on, while they are (`network.incomingPeers`).
+    pub(crate) listen_port: Option<u16>,
+}
+
+impl Demand {
+    /// Downloading with fewer peers than it could use.
+    fn wanting(self) -> bool {
+        !self.paused && !self.idle && self.live_peers < enough_peers(self.peer_limit)
+    }
+}
+
+/// Live peers past which more are not worth frequent lookups: half the peer limit.
+fn enough_peers(peer_limit: usize) -> usize {
+    (peer_limit / 2).max(1)
+}
+
+/// The shortest wait between lookups for a torrent that wants peers. It doubles after each
+/// lookup that finds fewer than [`NEW_PEERS`] new addresses, up to [`SATISFIED_EVERY`].
+const WANTING_EVERY: Duration = Duration::from_secs(20);
+/// New addresses a lookup must find to keep [`WANTING_EVERY`] from growing.
+const NEW_PEERS: usize = 10;
+/// The wait between lookups once a torrent downloads with enough peers.
+const SATISFIED_EVERY: Duration = Duration::from_secs(5 * 60);
+/// The wait between lookups of a torrent with nothing to download that announces itself:
+/// DHT nodes keep an announced peer for about 30 minutes.
+const REANNOUNCE_EVERY: Duration = Duration::from_secs(15 * 60);
+/// How often a waiting torrent's demand is checked, so a resumed or newly played torrent
+/// looks up within this time rather than after the wait it had before.
+const DEMAND_POLL: Duration = Duration::from_secs(5);
+/// DHT addresses remembered per torrent, to count new ones; all forgotten past this.
+const SEEN_LIMIT: usize = 8192;
+
+/// How long after a lookup ended the next one is due, or `None` until the demand changes:
+/// never while paused, nor while there is nothing to download unless the torrent announces
+/// itself; every [`WANTING_EVERY`] while it wants peers, doubled for each of `misses` (the
+/// lookups since one last found new peers); every [`SATISFIED_EVERY`] otherwise.
+fn next_lookup(demand: Demand, announcing: bool, misses: u32) -> Option<Duration> {
+    if demand.paused {
+        return None;
+    }
+    if demand.idle {
+        return announcing.then_some(REANNOUNCE_EVERY);
+    }
+    if !demand.wanting() {
+        return Some(SATISFIED_EVERY);
+    }
+    Some(
+        WANTING_EVERY
+            .saturating_mul(1 << misses.min(8))
+            .min(SATISFIED_EVERY),
+    )
+}
+
+/// The port to announce in DHT lookups (BEP 5 `announce_peer`, with the port given rather
+/// than implied: the DHT's UDP port is not the peer port). Only while the engine accepts
+/// incoming peers on `listen_port` and the network listens on that port in the current mode:
+/// never in SOCKS5 mode, which cannot accept connections, nor while the WireGuard tunnel's
+/// listener is closed. Peers that find the announcement connect to the address the DHT nodes
+/// saw (the VPN server's, in WireGuard mode), so that address must forward the port, as for
+/// trackers.
+fn announce_port(
+    listen_port: Option<u16>,
+    mode: torrentplayer_net::ModeKind,
+    incoming: &torrentplayer_net::IncomingStatus,
+) -> Option<u16> {
+    let port = listen_port?;
+    let listening = matches!(
+        incoming,
+        torrentplayer_net::IncomingStatus::Listening { port: open, .. } if *open == port
+    );
+    (mode != torrentplayer_net::ModeKind::Socks5 && listening).then_some(port)
+}
+
 /// Finds peers for a torrent through the DHT while the policy allows it, until `cancel` fires
-/// or the torrent is gone.
+/// or the torrent is gone. The first lookup starts at once (unless the torrent is paused),
+/// later ones as [`next_lookup`] says. Each lookup ends by itself, and every address it finds
+/// goes to the torrent as soon as it arrives.
 pub(crate) async fn discover(
     node: Arc<DhtNode>,
     shared: Weak<Shared>,
@@ -336,6 +427,9 @@ pub(crate) async fn discover(
     mut policy: Option<watch::Receiver<Policy>>,
     cancel: CancellationToken,
 ) {
+    let network = shared.upgrade().and_then(|s| s.cfg.network.clone());
+    let mut pace = Pace::default();
+    let mut seen = HashSet::new();
     loop {
         while !allowed(policy.as_ref()) {
             tokio::select! {
@@ -343,6 +437,12 @@ pub(crate) async fn discover(
                 ok = changed(&mut policy) => if !ok { return },
             }
         }
+        let demand = match pace.wait(&shared, &mut policy, &cancel).await {
+            Due::Now(demand) => demand,
+            // Check the policy again.
+            Due::PolicyChanged => continue,
+            Due::Stop => return,
+        };
         let Some(dht) = node.get(policy.as_ref()).await else {
             if !allowed(policy.as_ref()) {
                 // The policy changed since the check above: wait for it again.
@@ -353,41 +453,175 @@ pub(crate) async fn discover(
                 () = tokio::time::sleep(RESTART_AFTER) => continue,
             }
         };
-        // No announce: TorrentPlayer accepts no connections.
-        let mut peers = dht.get_peers(Id20::new(info_hash), None);
-        let lookup_epoch = policy.as_ref().map_or(0, |p| p.borrow().epoch);
+        let announce = network.as_ref().and_then(|network| {
+            let status = network.status();
+            announce_port(demand.listen_port, status.mode, &status.incoming)
+        });
+        let started = Instant::now();
+        let lookup = Lookup {
+            dht: &dht,
+            shared: &shared,
+            seen: &mut seen,
+            found: 0,
+            new: 0,
+        };
+        let Some((finished, found, new)) =
+            lookup.run(info_hash, announce, &mut policy, &cancel).await
+        else {
+            return;
+        };
+        debug!(
+            found,
+            new,
+            announced = announce.is_some(),
+            elapsed_ms = started.elapsed().as_millis(),
+            finished,
+            "DHT lookup"
+        );
+        pace.lookup_ended(finished, announce.is_some(), new);
+    }
+}
+
+/// When one torrent's next lookup is due.
+struct Pace {
+    /// When the last lookup ended, and whether it announced.
+    last: Option<(Instant, bool)>,
+    /// Lookups since one found [`NEW_PEERS`] new addresses.
+    misses: u32,
+    was_wanting: bool,
+}
+
+impl Default for Pace {
+    fn default() -> Self {
+        Self {
+            last: None,
+            misses: 0,
+            was_wanting: true,
+        }
+    }
+}
+
+enum Due {
+    Now(Demand),
+    PolicyChanged,
+    /// The torrent is gone or discovery was cancelled.
+    Stop,
+}
+
+impl Pace {
+    /// Waits until a lookup is due, checking the torrent's demand every [`DEMAND_POLL`].
+    async fn wait(
+        &mut self,
+        shared: &Weak<Shared>,
+        policy: &mut Option<watch::Receiver<Policy>>,
+        cancel: &CancellationToken,
+    ) -> Due {
         loop {
+            let Some(demand) = shared.upgrade().map(|s| s.dht_demand()) else {
+                return Due::Stop;
+            };
+            let wanting = demand.wanting();
+            if wanting && !self.was_wanting {
+                self.misses = 0;
+            }
+            self.was_wanting = wanting;
+            let due = match self.last {
+                None => !demand.paused,
+                Some((ended, announced)) => next_lookup(demand, announced, self.misses)
+                    .is_some_and(|wait| ended.elapsed() >= wait),
+            };
+            if due {
+                return Due::Now(demand);
+            }
             tokio::select! {
-                () = cancel.cancelled() => return,
-                () = dht.cancellation_token().cancelled() => {
-                    tokio::select! {
-                        () = cancel.cancelled() => return,
-                        () = tokio::time::sleep(RESTART_AFTER) => {},
-                    }
-                    break;
-                },
-                addr = peers.next() => {
-                    let Some(addr) = addr else {
-                        // The node was stopped.
-                        break;
-                    };
-                    let Some(shared) = shared.upgrade() else {
-                        return;
-                    };
-                    if usable(addr) {
-                        shared.add_candidates([addr]);
-                    }
-                }
-                ok = changed(&mut policy) => {
-                    if !ok {
-                        return;
-                    }
-                    if !allowed(policy.as_ref()) || policy.as_ref().is_some_and(|p| p.borrow().epoch != lookup_epoch) {
-                        break;
-                    }
+                () = cancel.cancelled() => return Due::Stop,
+                () = tokio::time::sleep(DEMAND_POLL) => {},
+                ok = changed(policy) => {
+                    return if ok { Due::PolicyChanged } else { Due::Stop };
                 }
             }
         }
+    }
+
+    /// Records a lookup that ended by itself (`finished`), or was stopped by a mode change or
+    /// a stopped node, after which the next node looks up at once.
+    fn lookup_ended(&mut self, finished: bool, announced: bool, new: usize) {
+        if finished {
+            self.last = Some((Instant::now(), announced));
+            self.misses = if new >= NEW_PEERS { 0 } else { self.misses + 1 };
+        } else {
+            self.last = None;
+        }
+    }
+}
+
+/// One lookup of a torrent's peers.
+struct Lookup<'a> {
+    dht: &'a Dht,
+    shared: &'a Weak<Shared>,
+    /// Addresses earlier lookups found, to count new ones.
+    seen: &'a mut HashSet<SocketAddr>,
+    found: usize,
+    new: usize,
+}
+
+impl Lookup<'_> {
+    /// Hands every usable address to the torrent as it arrives. Returns whether the lookup
+    /// finished (rather than being stopped by a policy change or a stopped node), with the
+    /// addresses found and how many of them were new; `None` if the torrent is gone or
+    /// discovery was cancelled.
+    async fn run(
+        mut self,
+        info_hash: [u8; 20],
+        announce: Option<u16>,
+        policy: &mut Option<watch::Receiver<Policy>>,
+        cancel: &CancellationToken,
+    ) -> Option<(bool, usize, usize)> {
+        let mut peers = self.dht.get_peers_once(Id20::new(info_hash), announce);
+        let epoch = policy.as_ref().map_or(0, |p| p.borrow().epoch);
+        let finished = loop {
+            tokio::select! {
+                () = cancel.cancelled() => return None,
+                () = self.dht.cancellation_token().cancelled() => {
+                    tokio::select! {
+                        () = cancel.cancelled() => return None,
+                        () = tokio::time::sleep(RESTART_AFTER) => {},
+                    }
+                    break false;
+                },
+                addr = peers.next() => {
+                    let Some(addr) = addr else {
+                        break true;
+                    };
+                    self.add(addr)?;
+                }
+                ok = changed(policy) => {
+                    if !ok {
+                        return None;
+                    }
+                    if !allowed(policy.as_ref()) || policy.as_ref().is_some_and(|p| p.borrow().epoch != epoch) {
+                        break false;
+                    }
+                }
+            }
+        };
+        Some((finished, self.found, self.new))
+    }
+
+    /// `None` if the torrent is gone.
+    fn add(&mut self, addr: SocketAddr) -> Option<()> {
+        let shared = self.shared.upgrade()?;
+        if usable(addr) {
+            self.found += 1;
+            if self.seen.len() >= SEEN_LIMIT {
+                self.seen.clear();
+            }
+            if self.seen.insert(addr) {
+                self.new += 1;
+            }
+            shared.add_candidates([addr]);
+        }
+        Some(())
     }
 }
 
@@ -396,7 +630,16 @@ fn usable(addr: SocketAddr) -> bool {
     addr.port() != 0 && torrentplayer_net::is_public_ip(addr.ip())
 }
 
-/// Finds a bounded set of DHT peers through the selected network for magnet metadata.
+/// The most peers [`bootstrap_peers`] returns.
+const BOOTSTRAP_PEERS: usize = 200;
+/// How long [`bootstrap_peers`] keeps collecting after the first peer: a lookup finds most of
+/// a swarm's DHT peers within a second or two of the first.
+const BOOTSTRAP_SETTLE: Duration = Duration::from_secs(2);
+
+/// Finds a bounded set of DHT peers through the selected network for magnet metadata: up to
+/// 200, collected for 2 seconds after the first one, until the lookup ends, or until
+/// `deadline`. They are all the peers the metadata fetch gets, and many addresses in the DHT
+/// are stale or unreachable, so a handful is not enough.
 /// The temporary node is cancelled on return or when the caller is cancelled.
 pub async fn bootstrap_peers(
     network: torrentplayer_net::Network,
@@ -412,13 +655,24 @@ pub async fn bootstrap_peers(
         let Some(dht) = node.get(Some(&policy)).await else {
             return;
         };
-        let mut stream = dht.get_peers(Id20::new(info_hash), None);
+        let mut stream = dht.get_peers_once(Id20::new(info_hash), None);
+        let settled = tokio::time::sleep(deadline);
+        tokio::pin!(settled);
         loop {
             tokio::select! {
                 () = dht.cancellation_token().cancelled() => break,
+                () = &mut settled => break,
                 peer = stream.next() => match peer {
                     Some(peer) if usable(peer) && !peers.contains(&peer) => {
-                        peers.push(peer); if peers.len() >= 20 { break; }
+                        if peers.is_empty() {
+                            settled
+                                .as_mut()
+                                .reset(tokio::time::Instant::now() + BOOTSTRAP_SETTLE);
+                        }
+                        peers.push(peer);
+                        if peers.len() >= BOOTSTRAP_PEERS {
+                            break;
+                        }
                     },
                     Some(_) => {},
                     None => break,
@@ -482,6 +736,182 @@ mod tests {
             "no scoped network transport"
         );
         assert!(node.running.lock().await.is_none(), "nothing was started");
+    }
+
+    fn demand(live_peers: usize) -> Demand {
+        Demand {
+            paused: false,
+            idle: false,
+            live_peers,
+            peer_limit: 40,
+            listen_port: None,
+        }
+    }
+
+    #[test]
+    fn looks_up_often_only_while_peers_are_wanted() {
+        let few = demand(3);
+        assert_eq!(next_lookup(few, false, 0), Some(WANTING_EVERY));
+        assert_eq!(next_lookup(few, false, 1), Some(WANTING_EVERY * 2));
+        assert_eq!(next_lookup(few, false, 2), Some(WANTING_EVERY * 4));
+        assert_eq!(
+            next_lookup(few, false, 30),
+            Some(SATISFIED_EVERY),
+            "lookups that find nothing new back off to the satisfied pace"
+        );
+        assert_eq!(
+            next_lookup(demand(20), false, 0),
+            Some(SATISFIED_EVERY),
+            "half the peer limit is enough"
+        );
+        assert_eq!(next_lookup(demand(19), false, 0), Some(WANTING_EVERY));
+
+        let paused = Demand {
+            paused: true,
+            ..few
+        };
+        assert_eq!(next_lookup(paused, false, 0), None, "never while paused");
+        assert_eq!(next_lookup(paused, true, 0), None, "not even to announce");
+
+        let idle = Demand { idle: true, ..few };
+        assert_eq!(
+            next_lookup(idle, false, 0),
+            None,
+            "nothing to download: no lookups"
+        );
+        assert_eq!(
+            next_lookup(idle, true, 0),
+            Some(REANNOUNCE_EVERY),
+            "an announcing torrent stays announced"
+        );
+        assert!(REANNOUNCE_EVERY < Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn announces_only_while_incoming_peers_are_accepted_in_the_current_mode() {
+        use torrentplayer_net::{IncomingStatus, ModeKind};
+        let listening = |port| IncomingStatus::Listening {
+            port,
+            addresses: vec!["0.0.0.0".into()],
+            upnp: false,
+        };
+        assert_eq!(
+            announce_port(Some(6881), ModeKind::Direct, &listening(6881)),
+            Some(6881)
+        );
+        assert_eq!(
+            announce_port(Some(6881), ModeKind::WireGuard, &listening(6881)),
+            Some(6881),
+            "the tunnel's listener is open"
+        );
+        assert_eq!(
+            announce_port(None, ModeKind::Direct, &listening(6881)),
+            None,
+            "incoming peers are off for this engine"
+        );
+        assert_eq!(
+            announce_port(Some(6881), ModeKind::Socks5, &listening(6881)),
+            None,
+            "never through a proxy"
+        );
+        assert_eq!(
+            announce_port(Some(6881), ModeKind::Direct, &listening(7000)),
+            None,
+            "another port"
+        );
+        for closed in [
+            IncomingStatus::Off,
+            IncomingStatus::Paused {
+                reason: "kill switch".into(),
+            },
+            IncomingStatus::Failed {
+                reason: "in use".into(),
+            },
+            IncomingStatus::Idle {
+                reason: "no engine".into(),
+            },
+        ] {
+            assert_eq!(
+                announce_port(Some(6881), ModeKind::WireGuard, &closed),
+                None,
+                "{closed:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_lookup_ends_by_itself() {
+        // The responder names only itself, so the IPv4 lookup runs out of nodes to ask after
+        // one query, and the IPv6 one (no IPv6 contacts) gives up after a second.
+        let (contact, responder) = fake_contact().await;
+        let node = local_node(vec![contact.to_string()]).await;
+        knows_a_node(&node).await;
+        let mut lookup = node.get_peers_once(Id20::new([7; 20]), None);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while lookup.next().await.is_some() {}
+        })
+        .await
+        .expect("the lookup ends once no query is left");
+        node.cancellation_token().cancel();
+        responder.abort();
+    }
+
+    #[tokio::test]
+    async fn a_lookup_announces_the_listening_port_to_close_nodes() {
+        // A responder whose id is the info hash itself (as close as a node can be), giving a
+        // token with every reply and recording the announcements it gets.
+        const ID: &[u8; 20] = b"ABCDEFGHIJKLMNOPQRST";
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let contact = socket.local_addr().unwrap();
+        let (tx, mut announced) = tokio::sync::mpsc::unbounded_channel();
+        let responder = tokio::spawn(async move {
+            let mut buf = [0; 1500];
+            while let Ok((len, from)) = socket.recv_from(&mut buf).await {
+                let Ok(request) = crate::bencode::decode(&buf[..len]) else {
+                    continue;
+                };
+                let field = |key: &[u8]| {
+                    request
+                        .get(b"a")
+                        .and_then(|a| a.get(key))
+                        .and_then(crate::bencode::Value::as_int)
+                };
+                if request.get(b"q").and_then(crate::bencode::Value::as_bytes)
+                    == Some(&b"announce_peer"[..])
+                {
+                    let _ = tx.send((field(b"port"), field(b"implied_port")));
+                }
+                let Some(transaction) = request.get(b"t").and_then(crate::bencode::Value::as_bytes)
+                else {
+                    continue;
+                };
+                let mut reply = b"d1:rd2:id20:".to_vec();
+                reply.extend(ID);
+                reply.extend(b"5:nodes26:");
+                reply.extend(ID);
+                reply.extend([127, 0, 0, 1]);
+                reply.extend(contact.port().to_be_bytes());
+                reply.extend(b"5:token4:test");
+                reply.extend(format!("e1:t{}:", transaction.len()).bytes());
+                reply.extend(transaction);
+                reply.extend(b"1:y1:re");
+                let _ = socket.send_to(&reply, from).await;
+            }
+        });
+        let node = local_node(vec![contact.to_string()]).await;
+        knows_a_node(&node).await;
+        let mut lookup = node.get_peers_once(Id20::new(*ID), Some(51413));
+        while lookup.next().await.is_some() {}
+        let announcement = tokio::time::timeout(Duration::from_secs(5), announced.recv())
+            .await
+            .expect("the close node gets an announcement");
+        assert_eq!(
+            announcement,
+            Some((Some(51413), Some(0))),
+            "the given port, not the DHT's own"
+        );
+        node.cancellation_token().cancel();
+        responder.abort();
     }
 
     #[test]

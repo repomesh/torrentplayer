@@ -514,3 +514,39 @@ of the same cold path measured 3123 / 15805 and 1348 / 16445 for metadata: the p
 much noisier than earlier in the day, and the difference between identical configurations
 shows the spread. The swarm engine kept its saved state and still found its first peer sooner
 with it: 2344 / 3921 against 12095 / 12991 cold (three runs each).
+
+**DHT lookups in 0.3.1**, swarm engine, `--seeks 0.5 --download-mibps 4`, medians / p95 in
+ms of three runs per row, cold DHT unless noted; the DHT-only rows were repeated three times,
+interleaved, as were the Sintel ones, and each cell lists the sets:
+
+| Source                                   | Before: first peer                       | After: first peer                     | Before: start-up  | After: start-up  |
+| ---------------------------------------- | ---------------------------------------- | ------------------------------------- | ----------------- | ---------------- |
+| Ubuntu server ISO `.torrent`, DHT only   | 12160 / 39270, 4380 / 8747, 1974 / 3730  | 1131 / 1415, 836 / 1904, 737 / 898    | 12657, 5310, 2933 | 1844, 2048, 2444 |
+| same, saved DHT state (`--dht-state`)    | 2509 / 3258                              | 2049 / 2967                           | 3649              | 2810             |
+| same, with its trackers                  | 481 / 570                                | 488 / 549                             | 3348              | 2562             |
+| Sintel, trackerless magnet (metadata)    | 3066 / 3732, 5425 / 15026, 6774 / 9913   | 2541 / 3151, 2907 / 4064, 2656 / 4106 | 685, 733, 686     | 3834, 924, 697   |
+| Sintel magnet through WireGuard (2 runs) | failed: "input address stream exhausted" | metadata 2340 / 3797                  | –                 | 1822 / 3415      |
+| Ubuntu, DHT only, through WireGuard (2)  | 3115 / 3187                              | 1045 / 2699                           | 3820              | 2202             |
+
+Peers seen per session were about the same or higher (289–368 before, 351–382 after, for the
+Ubuntu ISO), and live peers stayed near the peer limit. Three changes made the difference. The
+vendored librqbit-dht sent every lookup query twice and waited for both replies, so each hop
+took two round trips: in a standalone measurement the first peer from a populated routing
+table took 0.27 s instead of 0.51 s once it sent each query once. A lookup used to ask the 8
+closest nodes the routing table had when it started and, once it had asked any, nothing more
+for up to 60 s (`n` × 7.5 s with `n` < 8 roots), so a cold node that started its lookup from
+the first few bootstrap contacts could wait half a minute; torrentplayer-swarm now runs single
+lookups that wait up to a second for 8 roots, and looks up again 20 s after one ends while a
+torrent wants peers. Through WireGuard, a trackerless magnet's metadata fetch got only the
+first 20 DHT peers, all stale or unreachable in the failing runs; it now gets up to 200.
+
+Datagrams (counted by a standalone node with a counting transport, IPv4, public DHT): one
+lookup costs 700–1000 queries; the node's own maintenance (pings, bucket refreshes) is about
+0.1 per second. Before, every torrent's lookup was repeated every 60 s for as long as it was
+in the engine, about 1,100 datagrams a minute (some 19 per second) for each torrent, paused and
+complete ones included. Now a paused torrent, or one with nothing to download, sends none
+(one lookup every 15 minutes while it announces itself), a downloading torrent with enough
+peers one lookup every 5 minutes (about 3 per second), and one that wants peers one every 20 s
+to 5 minutes. Start-up times above include other 0.3.1 changes to the engine; the first-peer
+and metadata times depend on the DHT alone. The Sintel magnet's start-up is noisy because its
+swarm is small (about 10 live peers).

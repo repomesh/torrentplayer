@@ -56,12 +56,24 @@ reason shown, until the settings are fixed.
 "Off" means the traffic is not sent at all, never sent around the mode. WireGuard also carries
 DHT and UDP trackers inside its tunnel. In protected modes, peers found by scoped DHT and UDP
 trackers bootstrap librqbit's magnet metadata lookup; torrentplayer-swarm continues discovery while
-streaming. Trackerless magnets can therefore find peers too. Protected-mode DHT nodes never
+streaming. Trackerless magnets can therefore find peers too: the DHT hands the metadata lookup
+up to 200 peers (those it finds within 2 seconds of the first), since many DHT addresses are
+stale and librqbit gets no others in these modes. Protected-mode DHT nodes never
 load or save the routing tables kept between runs in Direct mode (see
 [Configuration](configuration.md#where-settings-are-stored)), so their node id cannot link the
 two. A TCP-only SOCKS5 proxy cannot
 provide these UDP paths: HTTP trackers and peer exchange still work, but UDP failures never
 trigger a direct fallback. `.torrent` files work through torrentplayer-swarm.
+
+torrentplayer-swarm paces its DHT lookups by what each torrent needs, in every mode. A lookup
+starts as soon as a torrent is added and ends by itself, usually within 15 seconds; every
+address it finds goes to the torrent as it arrives. The next one follows 20 seconds later while
+the torrent downloads with fewer live peers than half its peer limit (doubling, up to
+5 minutes, while lookups find fewer than 10 new addresses), every 5 minutes once it has
+enough, and never while it is paused or has nothing to download, except every 15 minutes to
+renew its announcement while it announces itself (see
+[Incoming peer connections](#incoming-peer-connections)). A paused torrent that resumes, or one
+that starts playing, looks up within 5 seconds.
 
 In SOCKS5 mode, turning off "Send tracker requests through the proxy" turns trackers off
 entirely for that mode; trackers are never contacted directly.
@@ -104,7 +116,13 @@ epochs as outgoing connections.
 - **Engines.** torrentplayer-swarm reads the handshake of each accepted connection (at most 32
   at once, within the handshake timeout), hands it to the torrent it names, and serves it like
   an outgoing peer. Unknown torrents, paused torrents, our own peer id, and torrents at their
-  peer limit (connected plus connecting) are refused. Trackers are told the listening port.
+  peer limit (connected plus connecting) are refused. Trackers are told the listening port,
+  and torrentplayer-swarm announces it in its DHT lookups (BEP 5 `announce_peer`, with the
+  port itself rather than the DHT's UDP port) while the listener is open on it in the current
+  mode: never in SOCKS5 mode, and in WireGuard mode only while the tunnel's listener is open.
+  DHT nodes record the address they see, the VPN server's in WireGuard mode, so as with
+  trackers the announcement brings peers only if the provider forwards the port. With incoming
+  peers off, TorrentPlayer announces nothing to the DHT.
   librqbit listens itself only when it is the engine for every torrent (`advanced.engine` =
   `rqbit`) and only in direct mode, TCP only, on `[::]` (dual stack); its listener cannot be
   moved into a tunnel, so it never listens in a protected mode. With the automatic

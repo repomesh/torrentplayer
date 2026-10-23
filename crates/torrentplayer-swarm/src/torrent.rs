@@ -1920,6 +1920,17 @@ impl Shared {
         self.cfg.network.as_ref()?.incoming_port()
     }
 
+    /// What DHT peer discovery needs to pace its lookups.
+    pub(crate) fn dht_demand(&self) -> crate::dht::Demand {
+        crate::dht::Demand {
+            paused: self.paused.load(Ordering::Relaxed),
+            idle: self.idle.load(Ordering::Relaxed),
+            live_peers: self.live_peers(),
+            peer_limit: self.cfg.peer_limit,
+            listen_port: self.incoming_port(),
+        }
+    }
+
     /// Called by a peer task when the handshake after [`Shared::tcp_finished`] ends.
     pub(crate) fn handshake_finished(&self) {
         let mut c = self.candidates();
