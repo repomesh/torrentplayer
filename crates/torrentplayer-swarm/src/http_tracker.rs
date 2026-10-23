@@ -6,9 +6,12 @@
 //! librqbit can reach HTTP trackers only through a `socks5://` proxy URL, so its HTTP client
 //! resolves tracker host names with the system resolver, outside the protected mode and even
 //! while the kill switch is engaged. In a protected mode these announces go through the
-//! network's own HTTP client instead ([`Network::configure_http`]), which passes host names to
-//! the loopback bridge unresolved (`socks5h`): the tunnel or proxy resolves them. Responses are
-//! untrusted: their size is bounded, and peer addresses on the user's own network are refused.
+//! network's own HTTP client instead ([`Network::configure_http_public`]), which passes host
+//! names to the loopback bridge unresolved (`socks5h`): the tunnel or proxy resolves them.
+//! Tracker URLs come from untrusted magnet links, so only public hosts are contacted: a
+//! `tr=http://192.168.1.1/...` must not make TorrentPlayer send requests to the user's own
+//! network, or to the proxy's. Responses are untrusted too: their size is bounded, and peer
+//! addresses on the user's own network are refused.
 
 use std::fmt::Write as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
@@ -29,8 +32,9 @@ const BOOTSTRAP_PEERS: usize = 20;
 /// Most trackers asked at once.
 const MAX_AT_ONCE: usize = 8;
 
-/// Announces once to up to 8 of `trackers` (HTTP and HTTPS ones only) at the same time,
-/// through `network`, and returns the peers they name, without duplicates, within `deadline`.
+/// Announces once to up to 8 of `trackers` (HTTP and HTTPS ones on public hosts only) at the
+/// same time, through `network`, and returns the peers they name, without duplicates, within
+/// `deadline`.
 /// For finding peers of a magnet link in a protected mode, where librqbit must not contact
 /// HTTP trackers itself; failures are skipped. Nothing is sent while the network's policy
 /// forbids traffic or trackers.
@@ -50,7 +54,8 @@ pub async fn announce_all(
     let peer_id = crate::torrent::generate_peer_id();
     let mut announces = trackers
         .iter()
-        .filter(|u| matches!(u.scheme(), "http" | "https"))
+        // Literal addresses and `localhost` here; other names when the bridge resolves them.
+        .filter(|u| crate::webseed::url_allowed(u))
         .take(MAX_AT_ONCE)
         .map(|url| announce(&client, announce_url(url, &info_hash, &peer_id)))
         .collect::<FuturesUnordered<_>>();
@@ -77,8 +82,9 @@ pub async fn announce_all(
     peers
 }
 
-/// The client for announces: through the network's bridge, host names unresolved, and no
-/// redirects (a tracker that moves is skipped rather than followed somewhere else).
+/// The client for announces: through the network's public-only bridge, host names unresolved
+/// (the bridge refuses names that resolve to non-public addresses), and no redirects (a
+/// tracker that moves is skipped rather than followed somewhere else).
 fn client(network: &Network) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .user_agent(concat!("TorrentPlayer/", env!("CARGO_PKG_VERSION")))
@@ -86,7 +92,7 @@ fn client(network: &Network) -> Result<reqwest::Client, String> {
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none());
     network
-        .configure_http(builder)
+        .configure_http_public(builder)
         .map_err(|e| e.to_string())?
         .build()
         .map_err(|e| e.to_string())

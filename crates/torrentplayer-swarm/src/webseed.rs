@@ -91,8 +91,8 @@ impl FetchError {
     }
 }
 
-/// Whether a web seed URL's host may be contacted: http or https, and a literal address only
-/// if it is public. Names are checked when they are resolved (by the bridge or
+/// Whether a web seed (or HTTP tracker) URL's host may be contacted: http or https, and a
+/// literal address only if it is public. Names are checked when they are resolved (by the bridge or
 /// [`PublicResolver`]); `localhost` names are refused here.
 pub(crate) fn url_allowed(url: &Url) -> bool {
     if !matches!(url.scheme(), "http" | "https") {
