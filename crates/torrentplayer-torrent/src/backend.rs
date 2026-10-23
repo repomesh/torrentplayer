@@ -155,9 +155,10 @@ pub struct StreamEngineConfig {
     /// librqbit keeps none: restored from a saved table, it fetched magnet metadata more
     /// slowly than from a fresh start (see docs/performance.md).
     pub dht_state_dir: Option<PathBuf>,
-    /// Download `.torrent` links (and follow their redirects) to the local network too. Off in
-    /// the app: links come from untrusted search results and sites, and must not reach the
-    /// user's router, other devices, or local services. For tests with a local server.
+    /// Download `.torrent` links (and follow their redirects) to the local network too, and
+    /// announce to HTTP trackers there. Off in the app: links and magnet links come from
+    /// untrusted search results and sites, and must not reach the user's router, other devices,
+    /// or local services. For tests with a local server or tracker.
     pub allow_local_links: bool,
 }
 
@@ -376,6 +377,7 @@ impl StreamEngine {
         swarm_config.enable_dht = config.public_discovery;
         swarm_config.dht_state_file = config.dht_state_dir.as_ref().map(|d| d.join("swarm.json"));
         swarm_config.network.clone_from(&network);
+        swarm_config.allow_local_trackers = config.allow_local_links;
         // The main engine serves peers that connect to us, when that is turned on (see
         // `StreamEngine::set_incoming`); the thumbnail engine never does.
         swarm_config.accept_incoming = network.is_some();
@@ -797,7 +799,13 @@ impl StreamEngine {
         let Some(network) = self.network.as_ref() else {
             return Vec::new();
         };
-        protected_magnet_peers(network, link, self.config.public_discovery).await
+        protected_magnet_peers(
+            network,
+            link,
+            self.config.public_discovery,
+            self.config.allow_local_links,
+        )
+        .await
     }
 
     /// Follows a link: downloads the `.torrent` file it serves, or stops at the magnet link it
@@ -986,6 +994,7 @@ impl StreamEngine {
                 let mut c = SwarmConfig::new(dir);
                 c.enable_trackers = self.config.public_discovery;
                 c.network.clone_from(&self.network);
+                c.allow_local_trackers = self.config.allow_local_links;
                 c.peer_limit = 8;
                 c.max_connecting = 4;
                 c.download_limit_bps = thumbnail_rate(self.limits().0);
@@ -1931,11 +1940,13 @@ fn remove_stale_preloads(dir: &Path) {
 /// bridge, which passes their host names unresolved to the tunnel or proxy. Returns the first
 /// source's peers, or waits for the others while one finds none. Empty in direct mode
 /// (librqbit uses its own DHT and trackers), while the mode blocks traffic, or with
-/// `public_discovery` off.
+/// `public_discovery` off. HTTP trackers on loopback or private addresses are skipped unless
+/// `allow_local_trackers` (for tests with a local tracker).
 pub async fn protected_magnet_peers(
     network: &torrentplayer_net::Network,
     link: &str,
     public_discovery: bool,
+    allow_local_trackers: bool,
 ) -> Vec<SocketAddr> {
     use futures_util::StreamExt as _;
     use futures_util::stream::FuturesUnordered;
@@ -1959,7 +1970,11 @@ pub async fn protected_magnet_peers(
     let mut sources: FuturesUnordered<BoxFuture<'_, Vec<SocketAddr>>> = FuturesUnordered::new();
     if policy.trackers_allowed {
         sources.push(Box::pin(torrentplayer_swarm::http_tracker::announce_all(
-            network, &trackers, info_hash, deadline,
+            network,
+            &trackers,
+            info_hash,
+            deadline,
+            allow_local_trackers,
         )));
         if policy.bound_udp_allowed {
             sources.push(Box::pin(torrentplayer_swarm::udp_tracker::announce_all(

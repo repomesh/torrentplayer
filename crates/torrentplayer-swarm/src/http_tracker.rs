@@ -32,30 +32,33 @@ const BOOTSTRAP_PEERS: usize = 20;
 /// Most trackers asked at once.
 const MAX_AT_ONCE: usize = 8;
 
-/// Announces once to up to 8 of `trackers` (HTTP and HTTPS ones on public hosts only) at the
-/// same time, through `network`, and returns the peers they name, without duplicates, within
-/// `deadline`.
+/// Announces once to up to 8 of `trackers` (HTTP and HTTPS ones on public hosts only, unless
+/// `allow_local`) at the same time, through `network`, and returns the peers they name,
+/// without duplicates, within `deadline`.
 /// For finding peers of a magnet link in a protected mode, where librqbit must not contact
 /// HTTP trackers itself; failures are skipped. Nothing is sent while the network's policy
-/// forbids traffic or trackers.
+/// forbids traffic or trackers. `allow_local` also announces to trackers on loopback and
+/// private addresses: only for tests and benchmarks with a local tracker.
 pub async fn announce_all(
     network: &Network,
     trackers: &[Url],
     info_hash: [u8; 20],
     deadline: Duration,
+    allow_local: bool,
 ) -> Vec<SocketAddr> {
     let policy = network.policy();
     if !policy.traffic_allowed || !policy.trackers_allowed {
         return Vec::new();
     }
-    let Ok(client) = client(network) else {
+    let Ok(client) = client(network, allow_local) else {
         return Vec::new();
     };
     let peer_id = crate::torrent::generate_peer_id();
     let mut announces = trackers
         .iter()
+        .filter(|u| matches!(u.scheme(), "http" | "https"))
         // Literal addresses and `localhost` here; other names when the bridge resolves them.
-        .filter(|u| crate::webseed::url_allowed(u))
+        .filter(|u| allow_local || crate::webseed::url_allowed(u))
         .take(MAX_AT_ONCE)
         .map(|url| announce(&client, announce_url(url, &info_hash, &peer_id)))
         .collect::<FuturesUnordered<_>>();
@@ -84,15 +87,20 @@ pub async fn announce_all(
 
 /// The client for announces: through the network's public-only bridge, host names unresolved
 /// (the bridge refuses names that resolve to non-public addresses), and no redirects (a
-/// tracker that moves is skipped rather than followed somewhere else).
-fn client(network: &Network) -> Result<reqwest::Client, String> {
+/// tracker that moves is skipped rather than followed somewhere else). With `allow_local`,
+/// through the ordinary bridge.
+fn client(network: &Network, allow_local: bool) -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
         .user_agent(concat!("TorrentPlayer/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::none());
-    network
-        .configure_http_public(builder)
+    let builder = if allow_local {
+        network.configure_http(builder)
+    } else {
+        network.configure_http_public(builder)
+    };
+    builder
         .map_err(|e| e.to_string())?
         .build()
         .map_err(|e| e.to_string())

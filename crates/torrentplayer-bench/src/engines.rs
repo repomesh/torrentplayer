@@ -257,6 +257,7 @@ impl BenchEngine {
                     c.network = Some(network.clone());
                 }
                 c.allow_local_web_seeds = config.local_web_seeds;
+                c.allow_local_trackers = config.local_tracker;
                 c.enable_web_seeds = config.web_seeds;
                 c.download_limit_bps = config.download_limit_bps;
                 if let Some(limit) = config.peer_limit {
@@ -312,7 +313,10 @@ impl BenchEngine {
             } => {
                 if let (TorrentSource::Magnet(link), Some(network)) = (&source, protected.as_ref())
                 {
-                    peers.extend(protected_magnet_peers(network, link, *public_discovery).await);
+                    // Protected modes run on public swarms only, never with the local tracker.
+                    peers.extend(
+                        protected_magnet_peers(network, link, *public_discovery, false).await,
+                    );
                 }
                 let info = engine.add_with_peers(source, peers).await?;
                 *id = Some(info.id);
@@ -341,7 +345,8 @@ impl BenchEngine {
                     TorrentSource::Magnet(link) => {
                         if let Some(network) = protected.as_ref() {
                             peers.extend(
-                                protected_magnet_peers(network, &link, *public_discovery).await,
+                                protected_magnet_peers(network, &link, *public_discovery, false)
+                                    .await,
                             );
                         }
                         let (bytes, seen) =

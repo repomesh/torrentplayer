@@ -130,6 +130,10 @@ pub struct SwarmConfig {
     /// Allow web seeds on loopback and private addresses. Only for tests and benchmarks: a
     /// torrent could otherwise make TorrentPlayer send requests to the user's own network.
     pub allow_local_web_seeds: bool,
+    /// Announce to HTTP trackers on loopback and private addresses (and follow redirects
+    /// there). Only for tests and benchmarks with a local tracker: a magnet link could
+    /// otherwise make TorrentPlayer send requests to the user's own network.
+    pub allow_local_trackers: bool,
 }
 
 impl SwarmConfig {
@@ -155,6 +159,7 @@ impl SwarmConfig {
             network: None,
             enable_web_seeds: true,
             allow_local_web_seeds: false,
+            allow_local_trackers: false,
         }
     }
 }
@@ -314,18 +319,7 @@ impl Swarm {
     pub async fn start(cfg: SwarmConfig) -> Result<Self, SwarmError> {
         tokio::fs::create_dir_all(&cfg.download_dir).await?;
         let cancel = CancellationToken::new();
-        let mut http = reqwest::Client::builder()
-            .user_agent(concat!("TorrentPlayer/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30));
-        if let Some(network) = &cfg.network {
-            http = network
-                .configure_http(http)
-                .map_err(|e| SwarmError::Trackers(e.to_string()))?;
-        }
-        let http = http
-            .build()
-            .map_err(|e| SwarmError::Trackers(e.to_string()))?;
+        let http = tracker_client(&cfg)?;
         let web = web_client(&cfg)?;
         let dht = cfg.enable_dht.then(|| {
             Arc::new(DhtNode::new(
@@ -480,7 +474,7 @@ impl Swarm {
             Some(Trackers {
                 info_hash: Id20::new(meta.info_hash),
                 peer_id: Id20::new(self.peer_id),
-                urls: meta.trackers.iter().cloned().collect(),
+                urls: tracker_urls(&meta, self.cfg.allow_local_trackers),
                 shared: Arc::downgrade(&shared),
                 port: self.cfg.announce_port,
                 http: self.http.clone(),
@@ -1883,6 +1877,41 @@ impl TorrentStatsProvider for TrackerStats {
             torrent_state: TrackerCommsStatsState::Live,
         }
     }
+}
+
+/// The trackers of `meta` to announce to: HTTP ones on the user's own network (a literal
+/// non-public address or a `localhost` name) only if `allow_local`. Names are checked when
+/// they are resolved (see [`tracker_client`]). UDP trackers are not checked here.
+fn tracker_urls(meta: &Metainfo, allow_local: bool) -> HashSet<url::Url> {
+    meta.trackers
+        .iter()
+        .filter(|u| {
+            !matches!(u.scheme(), "http" | "https") || allow_local || crate::webseed::url_allowed(u)
+        })
+        .cloned()
+        .collect()
+}
+
+/// The HTTP client for trackers. Their URLs come from magnet links and torrent files, so unless
+/// [`SwarmConfig::allow_local_trackers`], as for web seeds: only public destinations, through
+/// the network manager's public-only bridge (or, without one, a resolver that drops non-public
+/// addresses), with checked redirects. Literal addresses are checked by [`tracker_urls`].
+fn tracker_client(cfg: &SwarmConfig) -> Result<reqwest::Client, SwarmError> {
+    let allow_local = cfg.allow_local_trackers;
+    let http = reqwest::Client::builder()
+        .user_agent(concat!("TorrentPlayer/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .redirect(crate::webseed::redirect_policy(allow_local));
+    match (&cfg.network, allow_local) {
+        (Some(network), false) => network.configure_http_public(http),
+        (Some(network), true) => network.configure_http(http),
+        (None, false) => Ok(http.dns_resolver(crate::webseed::PublicResolver)),
+        (None, true) => Ok(http),
+    }
+    .map_err(|e| SwarmError::Trackers(e.to_string()))?
+    .build()
+    .map_err(|e| SwarmError::Trackers(e.to_string()))
 }
 
 /// The HTTP client for web seeds: through the network manager's public-only bridge (or, without

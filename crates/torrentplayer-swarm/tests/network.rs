@@ -151,6 +151,8 @@ async fn swarm(network: &Network, trackers: bool) -> (Swarm, tempfile::TempDir) 
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = SwarmConfig::new(dir.path().to_path_buf());
     cfg.enable_trackers = trackers;
+    // The test trackers are on loopback.
+    cfg.allow_local_trackers = true;
     cfg.network = Some(network.clone());
     (Swarm::start(cfg).await.unwrap(), dir)
 }
@@ -464,6 +466,7 @@ async fn magnet_trackers_on_the_users_own_network_are_never_contacted() {
         &trackers,
         [1; 20],
         Duration::from_secs(3),
+        false,
     )
     .await;
     assert!(peers.is_empty());

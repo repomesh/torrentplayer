@@ -109,8 +109,8 @@ pub(crate) fn url_allowed(url: &Url) -> bool {
     }
 }
 
-/// Resolves names to their public addresses only, for web seeds when no network manager is
-/// configured (with one, its bridge does the same).
+/// Resolves names to their public addresses only, for web seeds and trackers when no network
+/// manager is configured (with one, its bridge does the same).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PublicResolver;
 
@@ -123,7 +123,7 @@ impl reqwest::dns::Resolve for PublicResolver {
                 .filter(|a| torrentplayer_net::is_public_ip(a.ip()))
                 .collect();
             if addrs.is_empty() {
-                return Err("the web seed has no public address".into());
+                return Err("the host has no public address".into());
             }
             Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
         })

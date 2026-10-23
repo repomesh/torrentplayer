@@ -219,7 +219,8 @@ async fn magnets_through_librqbit_use_only_the_proxy() {
             upload_limit_bps: None,
             peer_limit: 40,
             dht_state_dir: None,
-            allow_local_links: false,
+            // The HTTP tracker is on loopback.
+            allow_local_links: true,
         },
         Some(net.clone()),
     )
@@ -292,7 +293,8 @@ async fn protected_modes_resolve_tracker_names_through_the_proxy_and_librqbit_ne
             upload_limit_bps: None,
             peer_limit: 40,
             dht_state_dir: None,
-            allow_local_links: false,
+            // The tracker is on loopback.
+            allow_local_links: true,
         },
         Some(net.clone()),
     )

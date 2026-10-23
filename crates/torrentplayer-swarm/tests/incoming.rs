@@ -93,6 +93,8 @@ async fn swarm(network: &Network, peer_limit: usize) -> (Swarm, tempfile::TempDi
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = SwarmConfig::new(dir.path().to_path_buf());
     cfg.enable_trackers = true;
+    // The test tracker is on loopback.
+    cfg.allow_local_trackers = true;
     cfg.network = Some(network.clone());
     cfg.accept_incoming = true;
     cfg.peer_limit = peer_limit;
@@ -471,4 +473,32 @@ async fn protected_modes_that_cannot_listen_safely_open_no_port() {
     assert!(connect_as_peer(port, meta.info_hash).await.is_some());
     swarm.shutdown();
     net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trackers_on_the_users_own_network_are_contacted_only_when_allowed() {
+    let (tracker, announces) = http_tracker().await;
+    let port = tracker.port();
+    let (bytes, _data, _seed_dir) = torrent(vec![
+        format!("http://127.0.0.1:{port}/announce"),
+        format!("http://localhost:{port}/announce"),
+    ])
+    .await;
+    for allow in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = SwarmConfig::new(dir.path().to_path_buf());
+        cfg.enable_trackers = true;
+        cfg.allow_local_trackers = allow;
+        let swarm = Swarm::start(cfg).await.unwrap();
+        let _torrent = swarm.add(Metainfo::from_bytes(&bytes).unwrap(), Vec::new());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let seen = announces.lock().unwrap().len();
+        // The control: allowed, the same tracker is announced to.
+        assert_eq!(
+            seen > 0,
+            allow,
+            "{seen} announces with allow_local_trackers {allow}"
+        );
+        swarm.shutdown();
+    }
 }
