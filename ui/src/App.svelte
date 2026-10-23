@@ -49,7 +49,7 @@
     type TorrentSummary,
     type ReadinessState,
   } from './lib/ipc';
-  import { followLibrary, libraryKey } from './lib/library';
+  import { followLibrary, libraryKey, resumeStart } from './lib/library';
   import {
     back,
     canGoBack,
@@ -114,6 +114,8 @@
     autoSeeks: number[];
     /** Where to continue when the player is shown again. */
     resumeAt: number;
+    /** `Continuing from 12:34`, shown over the video when it continued from a saved position. */
+    resumeChip: string | null;
     /** The queue item playing, if it came from the queue. */
     queueId: string | null;
   }
@@ -408,7 +410,12 @@
     if (!fromPlayer && next.current.name === 'player' && nowPlaying) {
       if (nowPlaying.stream.streamId === shownStream) {
         // Shown again: the player remounts and continues where the video was.
-        nowPlaying = { ...nowPlaying, startedAt: performance.now(), resumeAt: playback.position };
+        nowPlaying = {
+          ...nowPlaying,
+          startedAt: performance.now(),
+          resumeAt: playback.position,
+          resumeChip: null,
+        };
       }
       shownStream = nowPlaying.stream.streamId;
     }
@@ -730,16 +737,6 @@
     return findEntry(queue, item, mainFile)?.id ?? null;
   }
 
-  function formatResumeTime(seconds: number): string {
-    const total = Math.max(0, Math.floor(seconds));
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const rest = (total % 60).toString().padStart(2, '0');
-    return hours > 0
-      ? `${String(hours)}:${minutes.toString().padStart(2, '0')}:${rest}`
-      : `${String(minutes)}:${rest}`;
-  }
-
   async function play(
     torrent: TorrentSummary,
     file: FileSummary,
@@ -788,14 +785,9 @@
         await stopStream(stream.streamId).catch(() => undefined);
         return false;
       }
-      const saved = stream.resumePositionSecs;
-      const resumeAt =
-        saved !== null &&
-        globalThis.confirm(
-          `Resume ${stream.fileName} from ${formatResumeTime(saved)}?\n\nChoose Cancel to start from the beginning.`,
-        )
-          ? saved
-          : 0;
+      // No question: with "Resume where I left off" on it continues (the chip offers to start
+      // over); with it off, the backend sends no position.
+      const { startAt: resumeAt, chip: resumeChip } = resumeStart(stream.resumePositionSecs);
       playback.position = resumeAt;
       playback.duration = Number.NaN;
       // The file becomes the queue's current item, wherever it was played from.
@@ -807,6 +799,7 @@
         startedAt,
         autoSeeks: options.autoSeeks ?? [],
         resumeAt,
+        resumeChip,
         queueId,
       };
       if (queueId !== null) {
@@ -1535,6 +1528,7 @@
                     startedAt={playing.startedAt}
                     autoSeeks={playing.autoSeeks}
                     startAt={playing.resumeAt}
+                    resumeChip={playing.resumeChip}
                     fullscreenTarget={stageEl}
                     audio={playing.file.kind === 'audio'
                       ? { title: fileName(playing.file.path), album: playing.torrent.name }

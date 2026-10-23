@@ -3,6 +3,7 @@
 /** Playback-library helpers and its event-driven subscription. */
 
 import { listen } from '@tauri-apps/api/event';
+import { formatClock } from './format';
 import { LIBRARY_CHANGED_EVENT, libraryItems, type LibraryItem } from './ipc';
 
 /** Stable key for a playable file. */
@@ -54,6 +55,18 @@ export function resumePosition(item: LibraryItem): number | null {
     return null;
   }
   return item.positionSecs;
+}
+
+/**
+ * Where a new stream starts, and the chip over the video that says so. The backend offers a
+ * saved position only while "Resume where I left off" is on: then playback continues there
+ * without asking, and the chip offers to start over. Otherwise it starts at the beginning.
+ */
+export function resumeStart(saved: number | null): { startAt: number; chip: string | null } {
+  if (saved === null || !Number.isFinite(saved) || saved <= 0) {
+    return { startAt: 0, chip: null };
+  }
+  return { startAt: saved, chip: `Continuing from ${formatClock(saved)}` };
 }
 
 export interface LibraryCourse {

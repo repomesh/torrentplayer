@@ -62,6 +62,8 @@
     autoSeeks?: number[];
     /** Seconds to continue from once the duration is known (returning to the player). */
     startAt?: number;
+    /** `Continuing from 12:34`: shown over the video for a while, with "Start over". */
+    resumeChip?: string | null;
     onBack: () => void;
     /** The video played to its end (it stays there; nothing plays next on its own). */
     onEnded?: () => void;
@@ -87,6 +89,7 @@
     startedAt,
     autoSeeks = [],
     startAt = 0,
+    resumeChip = null,
     onBack,
     onEnded,
     onTime,
@@ -105,6 +108,8 @@
   const HIDE_AFTER_MS = 2500;
   /** How often the audio decoder counters are sampled. */
   const AUDIO_SAMPLE_MS = 500;
+  /** The "Continuing from…" chip leaves after this long, or at the first play, pause, or seek. */
+  const RESUME_CHIP_MS = 8000;
   /** A seek hold is released this long after `seeked` even if no frame was seen painted. */
   const SEEK_HOLD_MAX_MS = 1000;
 
@@ -135,6 +140,9 @@
   let fullscreen = $state(false);
   // The video played to its end: the end card shows until it plays or seeks again.
   let ended = $state(false);
+  let chipDismissed = $state(false);
+  let chipTimer: ReturnType<typeof setTimeout> | undefined;
+  const chip = $derived(chipDismissed || ended ? null : resumeChip);
   let endPrimary: HTMLButtonElement | undefined = $state();
   const card = $derived(endCard(onPlayNext ? nextTitle : null));
   // Seek-bar pictures of this video (not of audio). The duration is read when one is asked
@@ -293,6 +301,7 @@
       firstFrameSeen = true;
       poke();
       scheduleAutoSeeks();
+      chipTimer = setTimeout(dismissChip, RESUME_CHIP_MS);
     }
   }
 
@@ -586,7 +595,20 @@
     }
   }
 
+  function dismissChip(): void {
+    chipDismissed = true;
+    clearTimeout(chipTimer);
+  }
+
+  /** The chip's "Start over": back to the beginning. */
+  function startOver(): void {
+    dismissChip();
+    seekTo(0);
+    poke();
+  }
+
   function seekBy(secs: number): void {
+    dismissChip();
     if (!video) {
       return;
     }
@@ -596,6 +618,7 @@
   }
 
   function togglePlay(): void {
+    dismissChip();
     if (!video) {
       return;
     }
@@ -830,6 +853,7 @@
     clearInterval(reportTimer);
     clearInterval(statsTimer);
     clearTimeout(hideTimer);
+    clearTimeout(chipTimer);
     clearTimeout(seekHoldTimer);
     timeouts.forEach(clearTimeout);
     if (video) {
@@ -994,8 +1018,14 @@
     <div class="pill">Press Space or the play button to start</div>
   {/if}
 
-  {#if autoMuted || audioMessage || subtitleLoading || subtitleError}
+  {#if chip || autoMuted || audioMessage || subtitleLoading || subtitleError}
     <div class="notices">
+      {#if chip}
+        <div class="notice chip" role="status">
+          <span>{chip} ·</span>
+          <button type="button" class="start-over" onclick={startOver}>Start over</button>
+        </div>
+      {/if}
       {#if autoMuted}
         <button
           type="button"
@@ -1080,6 +1110,7 @@
     bind:menuOpen
     onTogglePlay={togglePlay}
     onSeek={(fraction: number) => {
+      dismissChip();
       seekTo(fraction);
     }}
     onRate={(value: number) => {
@@ -1458,6 +1489,27 @@
     padding: 0.55rem 0.5rem 0.55rem 0.9rem;
     border-radius: 0.6rem;
     line-height: 1.4;
+  }
+
+  .chip {
+    align-items: center;
+    padding-right: 0.6rem;
+  }
+
+  .start-over {
+    padding: 0.1rem 0.35rem;
+    border: none;
+    border-radius: 0.3rem;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .start-over:hover,
+  .start-over:focus-visible {
+    background: rgb(255 255 255 / 10%);
   }
 
   .dismiss {

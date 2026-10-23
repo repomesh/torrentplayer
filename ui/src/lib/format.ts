@@ -41,6 +41,17 @@ export function formatMillis(ms: number | null | undefined): string {
   return ms >= 10_000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms).toString()} ms`;
 }
 
+/** A playback position as a clock: `4:05`, `1:02:09`. */
+export function formatClock(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = (total % 60).toString().padStart(2, '0');
+  return hours > 0
+    ? `${String(hours)}:${minutes.toString().padStart(2, '0')}:${rest}`
+    : `${String(minutes)}:${rest}`;
+}
+
 /** The status line shown while waiting for video. */
 export function loadingMessage(state: {
   firstFrameSeen: boolean;

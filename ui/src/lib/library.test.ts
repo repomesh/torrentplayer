@@ -14,6 +14,7 @@ const {
   libraryKey,
   mergeLibrary,
   resumePosition,
+  resumeStart,
   watchedFraction,
   watchedLabel,
 } = await import('./library');
@@ -107,5 +108,16 @@ describe('followLibrary', () => {
     expect(unlisten).toHaveBeenCalled();
     handler?.({ payload: item({ positionSecs: 70 }) });
     expect(seen.at(-1)?.[0]?.positionSecs).toBe(60);
+  });
+});
+
+describe('resumeStart', () => {
+  it('continues from a saved position without asking, and says so', () => {
+    expect(resumeStart(754)).toEqual({ startAt: 754, chip: 'Continuing from 12:34' });
+  });
+
+  it('starts at the beginning when nothing was saved (or the setting is off)', () => {
+    expect(resumeStart(null)).toEqual({ startAt: 0, chip: null });
+    expect(resumeStart(Number.NaN)).toEqual({ startAt: 0, chip: null });
   });
 });

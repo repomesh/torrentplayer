@@ -1,7 +1,23 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import { describe, expect, it } from 'vitest';
-import { formatBytes, formatMillis, formatPercent, formatRate, loadingMessage } from './format';
+import {
+  formatBytes,
+  formatClock,
+  formatMillis,
+  formatPercent,
+  formatRate,
+  loadingMessage,
+} from './format';
+
+describe('formatClock', () => {
+  it('shows minutes and seconds, and hours when there are some', () => {
+    expect(formatClock(0)).toBe('0:00');
+    expect(formatClock(754.9)).toBe('12:34');
+    expect(formatClock(3729)).toBe('1:02:09');
+    expect(formatClock(-5)).toBe('0:00');
+  });
+});
 
 describe('formatBytes', () => {
   it('uses decimal units with sensible precision', () => {
