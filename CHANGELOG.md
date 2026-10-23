@@ -67,6 +67,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the same torrent with and without its hash. Such entries merge as soon as the torrent's files
   are known, queues saved with duplicates are cleaned up, and the "Queued" mark on search
   results shows them. Queueing other episodes of a season pack still works. (#55)
+- A download folder chosen inside the app's own data folder from before the rename (for example
+  `%LOCALAPPDATA%\io.torrentstream.desktop\downloads`) is now followed when that folder moves to
+  its new name, instead of the settings still pointing at the old path.
 
 ## [0.3.0] - 2026-10-21
 

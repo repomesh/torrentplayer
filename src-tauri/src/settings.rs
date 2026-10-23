@@ -96,6 +96,20 @@ impl SettingsState {
         }
     }
 
+    /// At start-up, before anything uses the download folder: points `storage.downloadDir` at
+    /// `dir`, where the chosen folder moved with the app's data (see
+    /// [`crate::migrate::relocated`]), and saves that.
+    pub(crate) fn move_download_dir(&mut self, dir: &Path) {
+        let mut settings = self.current();
+        settings.storage.download_dir = Some(dir.to_string_lossy().into_owned());
+        if let Err(error) = self.store.save(&settings) {
+            tracing::warn!(%error, "could not save the moved download folder");
+        }
+        tracing::info!("the download folder moved with the app's data");
+        self.startup = settings.clone();
+        self.changes.send_replace(settings);
+    }
+
     /// The current settings.
     pub(crate) fn current(&self) -> Settings {
         self.changes.borrow().clone()
@@ -816,6 +830,28 @@ mod tests {
             root.join("downloads"),
             None,
         )
+    }
+
+    #[test]
+    fn a_moved_download_folder_is_saved_and_used_from_the_start() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        let moved = root
+            .path()
+            .join("io.torrentplayer.desktop")
+            .join("downloads");
+        state.move_download_dir(&moved);
+        assert_eq!(state.active_download_dir(), moved);
+        assert_eq!(state.engine_config().download_dir, moved);
+        assert!(state.restart_required(&state.current()).is_empty());
+        let saved = SettingsStore::new(root.path().join("config"))
+            .load()
+            .settings;
+        assert_eq!(
+            saved.storage.download_dir.as_deref(),
+            moved.to_str(),
+            "saved, so the next start uses it too"
+        );
     }
 
     #[test]

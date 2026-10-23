@@ -84,9 +84,67 @@ pub(crate) fn migrate(old: &Path, new: &Path) -> usize {
     moved
 }
 
+/// Where a chosen download folder is now, if it was inside an old-identifier folder that
+/// [`from_old_identifier`] moved into one of `folders` (for example
+/// `%LOCALAPPDATA%\io.torrentstream.desktop\downloads`). `None` if it was elsewhere, or is
+/// still where it was (its move failed, and is tried again at the next start).
+pub(crate) fn relocated(dir: &Path, folders: &[&Path]) -> Option<PathBuf> {
+    if dir.exists() {
+        return None;
+    }
+    folders.iter().find_map(|new| {
+        OLD_IDENTIFIERS.iter().find_map(|name| {
+            let rest = strip_prefix(dir, &new.with_file_name(name))?;
+            let moved = new.join(rest);
+            moved.exists().then_some(moved)
+        })
+    })
+}
+
+/// `path` relative to `prefix`, comparing names case-insensitively on Windows (a path typed or
+/// saved by an older version may differ in case from the folder's real name).
+fn strip_prefix(path: &Path, prefix: &Path) -> Option<PathBuf> {
+    let same = |a: &std::ffi::OsStr, b: &std::ffi::OsStr| {
+        if cfg!(windows) {
+            a.to_string_lossy().to_lowercase() == b.to_string_lossy().to_lowercase()
+        } else {
+            a == b
+        }
+    };
+    let mut parts = path.components();
+    for want in prefix.components() {
+        if !same(parts.next()?.as_os_str(), want.as_os_str()) {
+            return None;
+        }
+    }
+    Some(parts.as_path().to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_download_folder_inside_an_old_identifier_folder_moves_with_it() {
+        let root = tempfile::tempdir().unwrap();
+        let local = root.path().join("io.torrentplayer.desktop");
+        let old = root.path().join(OLD_IDENTIFIERS[0]);
+        fs::create_dir_all(old.join("downloads").join("torrentplayer-swarm")).unwrap();
+        let chosen = old.join("downloads");
+        // Elsewhere, or not moved yet: left alone.
+        assert_eq!(relocated(&chosen, &[&local]), None);
+        assert_eq!(relocated(&root.path().join("Videos"), &[&local]), None);
+
+        assert_eq!(from_old_identifier(&[&local]), 1);
+        assert_eq!(relocated(&chosen, &[&local]), Some(local.join("downloads")));
+        if cfg!(windows) {
+            let shouting = PathBuf::from(chosen.to_string_lossy().to_uppercase());
+            assert_eq!(
+                relocated(&shouting, &[&local]).map(|p| p.to_string_lossy().to_lowercase()),
+                Some(local.join("downloads").to_string_lossy().to_lowercase())
+            );
+        }
+    }
 
     #[test]
     fn moves_a_whole_folder_when_the_new_one_is_missing() {
