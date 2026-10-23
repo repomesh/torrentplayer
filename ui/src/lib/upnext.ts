@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 /**
- * When to preload the next queued video, and the countdown before it plays.
+ * When to preload the next queued video. It only downloads: nothing plays it until the user
+ * does.
  *
  * Preloading the next video shares bandwidth with the current one, so it waits until the
  * current file cannot starve: it is fully downloaded, or playback is nearly over and the rest
@@ -12,8 +13,6 @@
 export const PRELOAD_NEXT_LEAD_SECS = 120;
 /** The rest of the file must arrive this many times faster than it plays. */
 const SAFETY_FACTOR = 2;
-/** Seconds the "Up next" countdown runs before the next video plays. */
-export const AUTOPLAY_COUNTDOWN_SECS = 5;
 
 export interface NextPreloadInput {
   /** Downloaded and verified bytes of the current file. */
@@ -41,49 +40,4 @@ export function shouldPreloadNext(input: NextPreloadInput): boolean {
   }
   const missing = Math.max(0, fileLength - fileDownloaded);
   return (missing / downloadBps) * SAFETY_FACTOR < remaining;
-}
-
-/** A cancellable countdown that ticks once a second, then calls `onDone`. */
-export class Countdown {
-  #timer: ReturnType<typeof setInterval> | undefined;
-  #left = 0;
-  readonly #onTick: (secondsLeft: number) => void;
-  readonly #onDone: () => void;
-
-  constructor(onTick: (secondsLeft: number) => void, onDone: () => void) {
-    this.#onTick = onTick;
-    this.#onDone = onDone;
-  }
-
-  /** Seconds left, or 0 when not running. */
-  get secondsLeft(): number {
-    return this.#left;
-  }
-
-  get running(): boolean {
-    return this.#timer !== undefined;
-  }
-
-  /** Starts (or restarts) the countdown from `seconds`. */
-  start(seconds: number = AUTOPLAY_COUNTDOWN_SECS): void {
-    this.cancel();
-    this.#left = Math.max(1, Math.round(seconds));
-    this.#onTick(this.#left);
-    this.#timer = setInterval(() => {
-      this.#left -= 1;
-      if (this.#left > 0) {
-        this.#onTick(this.#left);
-        return;
-      }
-      this.cancel();
-      this.#onDone();
-    }, 1000);
-  }
-
-  /** Stops without calling `onDone`. */
-  cancel(): void {
-    clearInterval(this.#timer);
-    this.#timer = undefined;
-    this.#left = 0;
-  }
 }

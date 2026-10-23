@@ -62,11 +62,11 @@
     /** Seconds to continue from once the duration is known (returning to the player). */
     startAt?: number;
     onBack: () => void;
-    /** The video played to its end (the queue may play the next one). */
+    /** The video played to its end (it stays there; nothing plays next on its own). */
     onEnded?: () => void;
     /** The position changed; `duration` is NaN until known. */
     onTime?: (currentTime: number, duration: number) => void;
-    /** Shown over the video, also in fullscreen (the "Up next" card). */
+    /** Shown over the video, also in fullscreen. */
     children?: Snippet;
     /**
      * The element to show fullscreen, if not the player itself: one that outlives this

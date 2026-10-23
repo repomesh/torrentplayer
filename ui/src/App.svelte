@@ -19,7 +19,6 @@
   import OpenTorrent from './lib/components/OpenTorrent.svelte';
   import Player from './lib/components/Player.svelte';
   import PlaylistPanel from './lib/components/PlaylistPanel.svelte';
-  import UpNext from './lib/components/UpNext.svelte';
   import VpnHint from './lib/components/VpnHint.svelte';
   import SettingsPage from './lib/components/settings/SettingsPage.svelte';
   import type { FileSummary } from './lib/bindings/FileSummary';
@@ -78,11 +77,11 @@
     enqueue,
     findEntry,
     groupKey,
-    markPlayed,
     moveGroup,
     newItemId,
     nextItem,
     optimizeQueue,
+    playbackEnded,
     putFirst,
     queueEntryState,
     remove,
@@ -103,7 +102,7 @@
   } from './lib/queue';
   import { preloadActive, preloadLabel } from './lib/search';
   import type { SettingsSection } from './lib/settings';
-  import { Countdown, shouldPreloadNext } from './lib/upnext';
+  import { shouldPreloadNext } from './lib/upnext';
   import { TorrentLoads, torrentLoadKeys } from './lib/torrent-loads';
 
   /** The video open in the player (it may be hidden while the user browses). */
@@ -174,22 +173,6 @@
   let seedingHintShown = false;
   let seedingHintError = $state<string | null>(null);
   const seedingHint = $derived(seedingHintOpen && vpnHintApplies);
-
-  let upNext = $state<{ item: QueueItem; secondsLeft: number } | null>(null);
-  const countdown = new Countdown(
-    (secondsLeft) => {
-      if (upNext) {
-        upNext = { ...upNext, secondsLeft };
-      }
-    },
-    () => {
-      const item = upNext?.item;
-      upNext = null;
-      if (item) {
-        void playQueueItem(item);
-      }
-    },
-  );
 
   // The next item's preload: asked once per (stream, item); its status shown in the queue.
   let nextPreloadKey: string | null = null;
@@ -442,10 +425,6 @@
       chooser = null;
       return;
     }
-    if (upNext) {
-      cancelUpNext();
-      return;
-    }
     if (canGoBack(history)) {
       go(back(history));
     }
@@ -488,9 +467,6 @@
       if (active instanceof HTMLElement && el.contains(active)) {
         focused[key] = active;
       }
-    }
-    if (view.name === 'player') {
-      cancelUpNext();
     }
   }
 
@@ -750,7 +726,6 @@
 
   /** Closes the open stream. `forget` also drops the player from the history. */
   async function closeStream(forget: boolean): Promise<void> {
-    cancelUpNext();
     const streamId = nowPlaying?.stream.streamId;
     if (nowPlaying) {
       nowPlaying = null;
@@ -1082,7 +1057,6 @@
 
   /** Plays a queued item: adds its torrent again if needed (a preloaded one is reused). */
   async function playQueueItem(item: QueueItem): Promise<void> {
-    cancelUpNext();
     const request = ++selection;
     pendingPlayback = { request, source: item.source, infoHash: item.infoHash };
     try {
@@ -1129,33 +1103,11 @@
     }
   });
 
-  // --- Up next --------------------------------------------------------------------------
+  // --- End of a video -------------------------------------------------------------------
 
+  /** The video stops on its last frame; the user picks what plays next. */
   function onEnded(): void {
-    const finished = nowPlaying?.queueId;
-    if (finished !== null && finished !== undefined) {
-      queue = markPlayed(queue, finished);
-    }
-    const item = nextItem(queue);
-    const stream = nowPlaying?.stream.streamId;
-    if (!item || stream === undefined) {
-      return;
-    }
-    getSettings()
-      .then((v) => v.settings.playback.autoplayNext)
-      .catch(() => true)
-      .then((autoplay) => {
-        if (autoplay && nowPlaying?.stream.streamId === stream && view.name === 'player') {
-          upNext = { item, secondsLeft: 0 };
-          countdown.start();
-        }
-      })
-      .catch(() => undefined);
-  }
-
-  function cancelUpNext(): void {
-    countdown.cancel();
-    upNext = null;
+    queue = playbackEnded(queue, nowPlaying?.queueId ?? null);
   }
 
   function onTime(currentTime: number, duration: number): void {
@@ -1165,10 +1117,6 @@
     }
     playback.position = currentTime;
     playback.duration = duration;
-    // Seeking back after the end cancels the countdown.
-    if (upNext && Number.isFinite(duration) && currentTime < duration - 2) {
-      cancelUpNext();
-    }
   }
 
   /**
@@ -1420,7 +1368,6 @@
       .catch(() => undefined);
 
     return () => {
-      countdown.cancel();
       clearTimeout(toastTimer);
       clearTimeout(nextPreloadTimer);
       stopLibrary();
@@ -1612,22 +1559,7 @@
                     onBack={goBack}
                     {onEnded}
                     {onTime}
-                  >
-                    {#if upNext}
-                      <UpNext
-                        title={upNext.item.title}
-                        secondsLeft={upNext.secondsLeft}
-                        onPlayNow={() => {
-                          const item = upNext?.item;
-                          cancelUpNext();
-                          if (item) {
-                            void playQueueItem(item);
-                          }
-                        }}
-                        onCancel={cancelUpNext}
-                      />
-                    {/if}
-                  </Player>
+                  />
                 {/key}
               {:else}
                 <!-- Between two videos of the queue, or after playback failed. -->

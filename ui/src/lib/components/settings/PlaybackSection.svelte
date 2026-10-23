@@ -41,19 +41,6 @@
     </select>
   </Field>
   <Field
-    id="playback-autoplay"
-    label="Play the next item in the queue automatically"
-    path="playback.autoplayNext"
-  >
-    <Toggle
-      id="playback-autoplay"
-      checked={p.autoplayNext}
-      onchange={(v) => {
-        update('playback.autoplayNext', v);
-      }}
-    />
-  </Field>
-  <Field
     id="playback-optimize-queue"
     label="Play ready videos first"
     path="playback.optimizeQueue"

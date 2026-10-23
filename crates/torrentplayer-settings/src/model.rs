@@ -83,8 +83,6 @@ impl Default for Settings {
 pub struct PlaybackSettings {
     /// Speed new lectures start at (0.5–3).
     pub default_speed: f64,
-    /// Play the next lecture when one ends.
-    pub autoplay_next: bool,
     /// Resume lectures where they were left off.
     pub resume_position: bool,
     /// Hardware video decoding (used by the libmpv player).
@@ -105,7 +103,6 @@ impl Default for PlaybackSettings {
     fn default() -> Self {
         Self {
             default_speed: 1.0,
-            autoplay_next: true,
             resume_position: true,
             hardware_decoding: HardwareDecoding::Auto,
             optimize_queue: false,
@@ -873,7 +870,8 @@ mod tests {
 
     #[test]
     fn queue_settings_default_for_older_files() {
-        // A playback section saved before the queue options existed.
+        // A playback section saved before the queue options existed, with the autoplay
+        // setting removed in 0.3.1.
         let old: PlaybackSettings =
             serde_json::from_str(r#"{"defaultSpeed": 1.5, "autoplayNext": false}"#).unwrap();
         assert!(!old.optimize_queue, "off unless chosen");
@@ -882,6 +880,7 @@ mod tests {
         let json = serde_json::to_value(PlaybackSettings::default()).unwrap();
         assert_eq!(json["optimizeQueue"], false);
         assert_eq!(json["keepCourseOrder"], true);
+        assert!(json.get("autoplayNext").is_none());
     }
 
     #[test]

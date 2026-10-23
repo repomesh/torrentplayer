@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  AUTOPLAY_COUNTDOWN_SECS,
-  Countdown,
-  PRELOAD_NEXT_LEAD_SECS,
-  shouldPreloadNext,
-} from './upnext';
+import { describe, expect, it } from 'vitest';
+import { PRELOAD_NEXT_LEAD_SECS, shouldPreloadNext } from './upnext';
 
 describe('shouldPreloadNext', () => {
   const base = {
@@ -30,43 +25,5 @@ describe('shouldPreloadNext', () => {
     expect(shouldPreloadNext({ ...nearEnd, downloadBps: 5 }), '100 s to go: too slow').toBe(false);
     expect(shouldPreloadNext({ ...nearEnd, downloadBps: 0 })).toBe(false);
     expect(shouldPreloadNext({ ...nearEnd, duration: Number.NaN }), 'duration unknown').toBe(false);
-  });
-});
-
-describe('Countdown', () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it('ticks down once a second and then fires', () => {
-    vi.useFakeTimers();
-    const ticks: number[] = [];
-    const done = vi.fn();
-    const countdown = new Countdown((s) => ticks.push(s), done);
-    countdown.start(3);
-    expect(countdown.running).toBe(true);
-    vi.advanceTimersByTime(2000);
-    expect(ticks).toEqual([3, 2, 1]);
-    expect(done).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1000);
-    expect(done).toHaveBeenCalledOnce();
-    expect(countdown.running).toBe(false);
-    expect(countdown.secondsLeft).toBe(0);
-  });
-
-  it('can be cancelled or restarted', () => {
-    vi.useFakeTimers();
-    const done = vi.fn();
-    const countdown = new Countdown(() => undefined, done);
-    countdown.start();
-    expect(countdown.secondsLeft).toBe(AUTOPLAY_COUNTDOWN_SECS);
-    vi.advanceTimersByTime(2000);
-    countdown.cancel();
-    vi.advanceTimersByTime(10_000);
-    expect(done).not.toHaveBeenCalled();
-    countdown.start(2);
-    countdown.start(2);
-    vi.advanceTimersByTime(2000);
-    expect(done).toHaveBeenCalledOnce();
   });
 });

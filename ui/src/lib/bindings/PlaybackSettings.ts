@@ -10,10 +10,6 @@ export type PlaybackSettings = {
  */
 defaultSpeed: number, 
 /**
- * Play the next lecture when one ends.
- */
-autoplayNext: boolean, 
-/**
  * Resume lectures where they were left off.
  */
 resumePosition: boolean, 
