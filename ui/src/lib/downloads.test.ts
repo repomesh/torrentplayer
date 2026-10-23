@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  barTitle,
   byId,
   canPause,
   describeDownload,
@@ -137,6 +138,20 @@ describe('download status', () => {
       'Speed ≈ 12.0 MB/s · 9.8 MB/s in use · 3 of max 4 downloading',
     );
     expect(describeLink({ ...link, capacityBps: 0, usedBps: 0, active: 0 })).toBeNull();
+  });
+});
+
+describe('progress bar tooltip', () => {
+  it('says why the bar is where it is', () => {
+    expect(barTitle(d({ state: 'paused' }))).toBe('Paused by you');
+    expect(barTitle(d({ state: 'queued', downloaded: 0, waitReason: 'limit' }), 2)).toBe(
+      'Waiting: up to 2 queued videos download at once (Settings → Bandwidth)',
+    );
+    expect(barTitle(d({ startable: true }))).toBe('Ready to play');
+    expect(barTitle(d({ startable: false }))).toBe('Downloading, not ready to play yet');
+    expect(barTitle(d({ startable: false, state: 'connecting', peersLive: 0 }))).toBe(
+      'Waiting for peers',
+    );
   });
 });
 

@@ -162,6 +162,31 @@ export function withPause(paused: boolean, d: ItemDownload | undefined): ItemDow
   return d.state === 'paused' ? { ...d, state: 'queued' } : d;
 }
 
+/**
+ * The progress bar's tooltip: the user's pause, what a waiting item waits for (its status line),
+ * or what the colour means.
+ */
+export function barTitle(d: ItemDownload, maxActive: number | null = null): string {
+  switch (d.state) {
+    case 'paused':
+      return 'Paused by you';
+    case 'queued':
+    case 'starting':
+    case 'failed':
+      return describeDownload(d, maxActive) ?? 'Waiting';
+    default:
+      break;
+  }
+  switch (toneOf(d)) {
+    case 'playable':
+      return 'Ready to play';
+    case 'downloading':
+      return 'Downloading, not ready to play yet';
+    case 'waiting':
+      return 'Waiting for peers';
+  }
+}
+
 /** Whether an item is moving data now (for a live progress bar). */
 export function isMoving(d: ItemDownload): boolean {
   return MOVING.has(d.state);

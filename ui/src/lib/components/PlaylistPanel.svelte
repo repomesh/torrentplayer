@@ -146,7 +146,7 @@
 {:else}
   <aside class="panel" aria-label="Queue">
     <header>
-      <h2>Queue</h2>
+      <h2 title="Shift+N plays the next video">Queue</h2>
       {#if upcoming > 0}
         <span class="sub">{upcoming} to play</span>
       {/if}
@@ -179,6 +179,9 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6l-6 6 6 6" /></svg>
       </button>
     </header>
+    {#if queue.items.length > 0}
+      <p class="keys" aria-hidden="true">↑↓ move · Enter play · P pause · Del remove</p>
+    {/if}
 
     {#if menuOpen}
       <!-- A non-modal dialog: the player leaves keys inside dialogs alone. -->
@@ -329,6 +332,7 @@
           downloads={byItem}
           {watchProgress}
           {onTogglePause}
+          maxActive={downloads?.link.maxActive ?? null}
         />
       {/if}
     </div>
@@ -470,6 +474,12 @@
 
   .blocked button:hover {
     background: rgb(232 144 122 / 10%);
+  }
+
+  .keys {
+    margin: -0.35rem 0.9rem 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.7rem;
   }
 
   .link {

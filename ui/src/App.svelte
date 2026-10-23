@@ -300,7 +300,7 @@
     if (playing && items.some((i) => i.id === playing.queueId)) {
       nowPlaying = { ...playing, queueId: null };
     }
-    showToast(`Removed ${String(items.length)} files`, {
+    showToast(`Removed ${String(items.length)} ${items.length === 1 ? 'video' : 'videos'}`, {
       undo: () => {
         queue = before;
       },
@@ -1491,7 +1491,17 @@
                 });
               }}
               onClearPlayed={() => {
+                const before = queue;
                 queue = clearPlayed(queue);
+                const cleared = before.items.length - queue.items.length;
+                showToast(
+                  `Cleared ${String(cleared)} played ${cleared === 1 ? 'video' : 'videos'}`,
+                  {
+                    undo: () => {
+                      queue = before;
+                    },
+                  },
+                );
               }}
             />
             <div class="stage" bind:this={stageEl}>
