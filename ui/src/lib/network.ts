@@ -158,6 +158,19 @@ export function pausedMessage(status: NetworkStatus | null): string | null {
 }
 
 /**
+ * The banner above the queue while torrent traffic is blocked, or null when it is not: rows
+ * would otherwise say "Finding peers…" with no hint why.
+ */
+export function queueBlockedNotice(status: NetworkStatus | null): string | null {
+  if (status === null || !trafficPaused(status)) {
+    return null;
+  }
+  return status.mode === 'direct'
+    ? 'Downloads are blocked until you choose a connection in Network & VPN settings.'
+    : 'Downloads are blocked: the VPN or proxy is not connected. They continue by themselves when it reconnects.';
+}
+
+/**
  * Calls `onStatus` with the current network status and then with every change, until the
  * returned function is called.
  */

@@ -2,7 +2,7 @@
 <script lang="ts">
   /*
    * The notice shown while traffic is held (see `src/lib/networkHold.ts`): why, whether traffic
-   * is paused, and a button that dismisses it for good. `onOpen`, if given, adds a button to
+   * is blocked, and a button that dismisses it for good. `onOpen`, if given, adds a button to
    * Settings → Network & VPN; `onClose` one that only hides it for now.
    */
   import type { NetworkHold } from '../bindings/NetworkHold';

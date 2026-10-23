@@ -16,6 +16,7 @@ const {
   formatUptime,
   hostOf,
   pausedMessage,
+  queueBlockedNotice,
   trafficPaused,
   describeIncoming,
   INCOMING_HELP,
@@ -205,6 +206,17 @@ describe('helpers', () => {
     expect(
       pausedMessage(status({ ...socks, killSwitchEngaged: true, state: { kind: 'connecting' } })),
     ).toBe('Connecting to the VPN or proxy…');
+  });
+
+  it('explains blocked downloads above the queue', () => {
+    expect(queueBlockedNotice(null)).toBeNull();
+    expect(queueBlockedNotice(status())).toBeNull();
+    expect(queueBlockedNotice(status({ ...socks, killSwitchEngaged: true }))).toBe(
+      'Downloads are blocked: the VPN or proxy is not connected. They continue by themselves when it reconnects.',
+    );
+    expect(queueBlockedNotice(status({ killSwitchEngaged: true }))).toMatch(
+      /choose a connection in Network & VPN settings/,
+    );
   });
 });
 

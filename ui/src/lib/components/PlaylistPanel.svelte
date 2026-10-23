@@ -8,6 +8,8 @@
   import type { LibraryItem } from '../bindings/LibraryItem';
   import type { ReadinessState } from '../bindings/ReadinessState';
   import { byId, describeLink, type DownloadsSnapshot } from '../downloads';
+  import type { NetworkStatus } from '../ipc';
+  import { followNetwork, queueBlockedNotice } from '../network';
   import {
     currentIndex,
     groupKey,
@@ -52,6 +54,8 @@
     onTogglePause?: (ids: readonly string[], paused: boolean) => void;
     /** Reorders the queue once by `key` ("Sort by…"); it never re-sorts on its own. */
     onSort?: (key: SortKey) => void;
+    /** Opens Settings → Network & VPN (from the banner shown while traffic is blocked). */
+    onNetworkSettings?: () => void;
   }
 
   let {
@@ -79,7 +83,17 @@
     watchProgress = new Map(),
     onTogglePause,
     onSort,
+    onNetworkSettings,
   }: Props = $props();
+
+  // The kill switch: while it blocks traffic, rows would say "Finding peers…" with no reason.
+  let network = $state<NetworkStatus | null>(null);
+  $effect(() =>
+    followNetwork((next) => {
+      network = next;
+    }),
+  );
+  const blockedNotice = $derived(queueBlockedNotice(network));
 
   const linkLine = $derived(downloads ? describeLink(downloads.link) : null);
   const byItem = $derived(byId(downloads));
@@ -249,6 +263,15 @@
           >
         {/if}
       </dialog>
+    {/if}
+
+    {#if blockedNotice}
+      <div class="blocked" role="status">
+        <p>{blockedNotice}</p>
+        {#if onNetworkSettings}
+          <button type="button" onclick={onNetworkSettings}>Network settings</button>
+        {/if}
+      </div>
     {/if}
 
     {#if queue.items.length > 0 && linkLine}
@@ -421,6 +444,32 @@
     stroke-width: 1.7;
     stroke-linecap: round;
     stroke-linejoin: round;
+  }
+
+  .blocked {
+    margin: 0 0.6rem 0.5rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid #6b3a30;
+    border-radius: 0.5rem;
+    background: rgb(232 144 122 / 8%);
+    font-size: 0.8rem;
+    line-height: 1.4;
+  }
+
+  .blocked p {
+    margin: 0 0 0.4rem;
+    color: var(--text);
+  }
+
+  .blocked button {
+    padding: 0.2rem 0.55rem;
+    border: 1px solid #6b3a30;
+    border-radius: 0.35rem;
+    color: #e8907a;
+  }
+
+  .blocked button:hover {
+    background: rgb(232 144 122 / 10%);
   }
 
   .link {

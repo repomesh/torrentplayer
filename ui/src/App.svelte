@@ -1463,6 +1463,9 @@
                 queue = setPaused(queue, ids, paused);
               }}
               onSort={sortBy}
+              onNetworkSettings={() => {
+                openSettings('network');
+              }}
               filesOf={(key: string) => torrentOf(key)?.files ?? null}
               {playingFile}
               onPlayFile={(key: string, file: FileSummary) => {
