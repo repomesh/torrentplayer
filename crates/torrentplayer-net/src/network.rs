@@ -308,6 +308,9 @@ pub(crate) struct Inner {
     bridge_addr: SocketAddr,
     pub(crate) bridge_token: Secret,
     cancel: CancellationToken,
+    /// Test seam: how long host name lookups through the system resolver take.
+    #[cfg(test)]
+    pub(crate) resolve_delay: Mutex<Duration>,
 }
 
 impl Drop for Inner {
@@ -587,6 +590,8 @@ impl Network {
             bridge_addr,
             bridge_token: token,
             cancel: cancel.clone(),
+            #[cfg(test)]
+            resolve_delay: Mutex::default(),
         });
         tokio::spawn(monitor(Arc::downgrade(&inner), wake, cancel.clone()));
         tokio::spawn(bridge::serve(
@@ -937,7 +942,7 @@ impl Network {
         let mut last = None;
         let addresses = match &route {
             Route::WireGuard(tunnel) => tunnel.resolve(host, port, ipv4_only).await?,
-            _ => tokio::net::lookup_host((host, port)).await?.collect(),
+            _ => self.system_lookup(host, port).await?,
         };
         for addr in addresses {
             if ipv4_only && addr.is_ipv6() {
@@ -946,6 +951,13 @@ impl Network {
             if public_only && !is_public_ip(addr.ip()) {
                 last.get_or_insert(NetError::NotPublic);
                 continue;
+            }
+            // The route was chosen before the lookup and the previous attempts, which can
+            // take seconds: a direct route must not dial once the mode is protected.
+            if !lease.is_valid() {
+                return Err(NetError::KillSwitch(
+                    "the network settings changed while connecting".into(),
+                ));
             }
             match self.dial(&route, addr, ipv4_only, &lease).await {
                 Ok(stream) => return Self::check_lease(stream, lease),
@@ -958,6 +970,20 @@ impl Network {
                 "no usable address for the host",
             ))
         }))
+    }
+
+    /// Resolves `host` with the system resolver.
+    async fn system_lookup(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        #[cfg(test)]
+        {
+            let delay = *self
+                .inner
+                .resolve_delay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            tokio::time::sleep(delay).await;
+        }
+        Ok(tokio::net::lookup_host((host, port)).await?.collect())
     }
 
     pub(crate) fn route(&self) -> Result<(Route, Lease, bool), NetError> {
