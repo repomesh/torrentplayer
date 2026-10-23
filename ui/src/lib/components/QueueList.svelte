@@ -559,7 +559,7 @@
       }}
     >
       <span class="title">
-        {#if label === 'Playing'}<span class="eq" aria-hidden="true">▶</span>{/if}
+        {#if isPlaying(node.group, row)}<span class="eq" aria-hidden="true">▶</span>{/if}
         {rowTitle(row)}
       </span>
       {#if label || size !== null}
