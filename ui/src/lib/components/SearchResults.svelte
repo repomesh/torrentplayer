@@ -208,7 +208,7 @@
                     {queued === 'playing'
                       ? 'Playing'
                       : queued === 'upNext'
-                        ? 'Up next'
+                        ? 'Next in queue'
                         : 'In queue'}
                   </span>
                 {/if}

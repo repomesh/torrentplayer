@@ -246,14 +246,14 @@
     if (index === cursor + 1) {
       if (nextStatus !== null) {
         return watchedState === null
-          ? `Up next · ${nextStatus}`
-          : `Up next · ${watchedState} · ${nextStatus}`;
+          ? `Next · ${nextStatus}`
+          : `Next · ${watchedState} · ${nextStatus}`;
       }
       return watchedState === null
         ? isReady(item)
-          ? 'Up next · Ready'
-          : 'Up next'
-        : `Up next · ${watchedState}`;
+          ? 'Next · Ready'
+          : 'Next'
+        : `Next · ${watchedState}`;
     }
     if (item.played) {
       return 'Played';

@@ -93,7 +93,7 @@ describe('adding', () => {
     expect(findEntry(queueOf('a', 'b'), item('z', 1))?.id).toBe('b');
   });
 
-  it('describes whether a matching entry is playing, up next, queued, or absent', () => {
+  it('describes whether a matching entry is playing, next, queued, or absent', () => {
     const q = setCurrent(queueOf('a', 'b', 'c'), 'a');
     expect(queueEntryState(q, item('x', 0), 'a')).toBe('playing');
     expect(queueEntryState(q, item('x', 1), 'a')).toBe('upNext');
@@ -201,7 +201,7 @@ describe('reordering', () => {
 });
 
 describe('skipping', () => {
-  it('keeps skipped items but passes over them for up next', () => {
+  it('keeps skipped items but passes over them for next', () => {
     const q = queueFrom([item('a', 1), item('b', 2), item('c', 3)], 'a');
     const skipped = setSkipped(q, ['b'], true);
     expect(skipped.items.map((i) => i.id)).toEqual(['a', 'b', 'c']);

@@ -743,7 +743,7 @@
   /**
    * The queue entry of a file that starts playing. Played from search, a torrent's files or the
    * file chooser (`first`), it is added to the queue, or moved, to the front, so what plays is
-   * always queued and everything else stays up next. A file of a queued torrent played from
+   * always queued and everything else stays queued. A file of a queued torrent played from
    * the queue (`group`) joins its torrent's items in lecture order. Otherwise it is the file's
    * entry if it is queued.
    */
@@ -1565,7 +1565,7 @@
                 <!-- Between two videos of the queue, or after playback failed. -->
                 <p class="between" aria-live="polite">
                   {pendingPlayback?.request === selection || starting?.request === selection
-                    ? 'Starting the next video…'
+                    ? 'Starting the video…'
                     : 'Pick something from the queue or search.'}
                 </p>
               {/if}

@@ -130,7 +130,7 @@
           <span class="label">
             {item.label}
             {#if item.view === 'player' && upcoming > 0}
-              <span class="sr-only">, {upcoming} up next</span>
+              <span class="sr-only">, {upcoming} to play in the queue</span>
             {/if}
           </span>
         </button>

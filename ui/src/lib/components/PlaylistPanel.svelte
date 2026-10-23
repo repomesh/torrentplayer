@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 <script lang="ts">
   /*
-   * The playlist beside the player: what is playing, the queue, and what plays next. It
+   * The playlist beside the player: what is playing, and the queue to pick from. It
    * collapses to a slim strip (Q toggles it), and is hidden in fullscreen.
    */
   import type { FileSummary } from '../bindings/FileSummary';
@@ -131,7 +131,7 @@
       type="button"
       class="toggle"
       aria-expanded="false"
-      aria-label={`Show the queue${upcoming > 0 ? `, ${String(upcoming)} up next` : ''}`}
+      aria-label={`Show the queue${upcoming > 0 ? `, ${String(upcoming)} to play` : ''}`}
       title="Show the queue (Q)"
       onclick={onToggle}
     >
@@ -146,7 +146,7 @@
     <header>
       <h2>Queue</h2>
       {#if upcoming > 0}
-        <span class="sub">{upcoming} up next</span>
+        <span class="sub">{upcoming} to play</span>
       {/if}
       <button
         bind:this={menuButton}
@@ -298,8 +298,8 @@
     <div class="body">
       {#if queue.items.length === 0}
         <p class="empty">
-          Nothing queued yet. Use <strong>Queue</strong> on a search result or a file to line up what
-          plays next.
+          Nothing queued yet. Use <strong>Queue</strong> on a search result or a file to line up videos
+          to watch.
         </p>
       {:else}
         {#if playingId === null && playingTitle === null}
