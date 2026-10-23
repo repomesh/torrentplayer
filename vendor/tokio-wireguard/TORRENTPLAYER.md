@@ -24,3 +24,10 @@ refused and answered with a cookie reply, so each rekey stalled for at least `RE
 (or failed with a server that ignores cookies). torrentplayer-net's
 `handshakes_keep_completing_after_many_rekeys` test rekeys 80 times and requires the next
 handshake to complete at once.
+
+Ephemeral port allocation (`src/interface/allocations.rs`, `Allocations::acquire`, marked
+"Modified for TorrentPlayer"): a bind to port 0 starts at a random ephemeral port and must try
+each one once. The loop's "back at the start" check matched on the first attempt, so a bind
+whose random start port was taken failed with "not a suitable bind address" instead of moving
+on. torrentplayer-net's `a_random_port_that_is_taken_moves_on_to_the_next_free_one` test takes
+1024 ports and binds 300 more.

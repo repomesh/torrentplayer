@@ -1780,6 +1780,53 @@ mod tests {
         server.close();
     }
 
+    #[tokio::test]
+    async fn a_random_port_that_is_taken_moves_on_to_the_next_free_one() {
+        // With 1024 of the 16382 ephemeral ports taken, each random pick has a 1 in 16 chance
+        // of starting on a taken port. That used to fail the bind at once ("not a suitable
+        // bind address"); 300 binds hit it with near certainty.
+        let (key, _) = x25519::keypair();
+        let (_, peer) = x25519::keypair();
+        let mut options = tokio_wireguard::interface::Options::default();
+        options.udp.recv_buffer_size = 1024;
+        options.udp.send_buffer_size = 1024;
+        let interface = Interface::new_with(
+            config::Config {
+                interface: config::Interface {
+                    address: "10.44.0.2/32".parse().unwrap(),
+                    listen_port: None,
+                    private_key: key,
+                    mtu: None,
+                },
+                peers: vec![config::Peer {
+                    endpoint: None,
+                    allowed_ips: vec!["10.44.0.1/32".parse().unwrap()],
+                    public_key: peer,
+                    preshared_key: None,
+                    persistent_keepalive: None,
+                }],
+            },
+            options,
+        )
+        .unwrap();
+        let mut taken = Vec::new();
+        for port in (49152u16..).step_by(16).take(1024) {
+            taken.push(
+                tokio_wireguard::UdpSocket::bind(("10.44.0.2", port), &interface)
+                    .await
+                    .unwrap(),
+            );
+        }
+        for _ in 0..300 {
+            let socket = tokio_wireguard::UdpSocket::bind("10.44.0.2:0", &interface)
+                .await
+                .expect("a free port was available");
+            assert_ne!(socket.local_addr().unwrap().port() % 16, 0);
+        }
+        drop(taken);
+        interface.close();
+    }
+
     #[test]
     fn dns_questions_accept_valid_names_and_reject_invalid_input() {
         for host in [

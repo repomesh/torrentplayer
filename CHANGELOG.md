@@ -45,6 +45,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (about two hours of traffic, sooner when handshakes repeat) every later one was refused as a
   flood and stalled for at least 5 seconds, or failed with a server that ignores WireGuard
   cookies, until the app was restarted.
+- In WireGuard mode, opening a connection or UDP socket no longer fails now and then with "not a
+  suitable bind address" when the randomly chosen tunnel port is already in use; the next free port
+  is used.
 
 ## [0.3.0] - 2026-10-21
 
