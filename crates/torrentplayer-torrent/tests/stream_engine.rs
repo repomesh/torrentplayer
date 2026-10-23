@@ -732,3 +732,80 @@ async fn a_stopped_thumbnail_download_leaves_nothing_behind() {
     assert!(!cache.exists(), "the stopped download's cache is deleted");
     engine.shutdown().await;
 }
+
+/// A single-file torrent with these lengths and enough zeroed piece hashes (at least one).
+fn torrent_with_lengths(len: u64, piece_len: u64) -> Vec<u8> {
+    let hashes = usize::try_from(len.checked_div(piece_len).unwrap_or(0).clamp(1, 4) + 1).unwrap();
+    let mut t = format!(
+        "d4:infod6:lengthi{len}e4:name11:lecture.mp412:piece lengthi{piece_len}e6:pieces{}:",
+        hashes * 20
+    )
+    .into_bytes();
+    t.extend(std::iter::repeat_n(0u8, hashes * 20));
+    t.extend_from_slice(b"ee");
+    t
+}
+
+/// `.torrent` files whose lengths would make librqbit's checks panic (or allocate a huge
+/// buffer per piece) are refused by both engines, for adds, prefetches, and preloads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn torrents_with_unusable_lengths_are_refused_without_a_panic() {
+    let bad = [
+        ("zero piece length", torrent_with_lengths(10, 0)),
+        ("huge piece length", torrent_with_lengths(10, 1 << 30)),
+        ("empty", torrent_with_lengths(0, 16_384)),
+        ("overflowing lengths", {
+            let mut t = b"d4:infod5:filesl".to_vec();
+            for name in ["a", "b"] {
+                t.extend_from_slice(
+                    format!("d6:lengthi9223372036854775808e4:pathl1:{name}ee").as_bytes(),
+                );
+            }
+            t.extend_from_slice(b"e4:name1:x12:piece lengthi16384e6:pieces20:");
+            t.extend_from_slice(&[0u8; 20]);
+            t.extend_from_slice(b"ee");
+            t
+        }),
+    ];
+    for choice in [EngineChoice::Rqbit, EngineChoice::Swarm] {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = StreamEngine::start(StreamEngineConfig {
+            download_dir: dir.path().to_path_buf(),
+            choice,
+            public_discovery: false,
+            download_limit_bps: None,
+            upload_limit_bps: None,
+            peer_limit: 40,
+            dht_state_dir: None,
+        })
+        .await
+        .unwrap();
+        for (what, bytes) in &bad {
+            let source = || TorrentSource::from_file_bytes(bytes.clone()).unwrap();
+            let added = engine.add(source()).await;
+            assert!(
+                matches!(added, Err(EngineError::InvalidTorrent(_))),
+                "{choice:?}, {what}: {added:?}"
+            );
+            let prefetched = engine.prefetch_metadata(source()).await;
+            assert!(
+                matches!(prefetched, Err(EngineError::InvalidTorrent(_))),
+                "{choice:?}, {what}: {prefetched:?}"
+            );
+            if let Some(status) = engine.preload(source()).await {
+                assert_eq!(
+                    status.phase,
+                    torrentplayer_torrent::PreloadPhase::Failed,
+                    "{what}"
+                );
+            }
+        }
+        // A normal torrent still opens.
+        let fine = engine
+            .add(TorrentSource::from_file_bytes(torrent_with_lengths(40_000, 16_384)).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(fine.total_len, 40_000);
+        engine.shutdown().await;
+    }
+}

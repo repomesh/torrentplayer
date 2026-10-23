@@ -7,10 +7,12 @@ use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use librqbit::api::{Api, TorrentIdOrHash};
 use librqbit::dht::DhtPersistenceConfig;
@@ -398,10 +400,10 @@ impl Engine {
                 Ok(AddTorrent::from_url(self.session_magnet(link, has_peers)?))
             }
             _ if self.inner.protected => Err(EngineError::Unsupported(PROTECTED_TORRENT_FILE)),
-            TorrentSource::Url(url) => Ok(AddTorrent::from_bytes(
+            TorrentSource::Url(url) => Ok(AddTorrent::from_bytes(checked_torrent(
                 fetch_torrent_file(&self.inner.http, &url).await?,
-            )),
-            TorrentSource::File(bytes) => Ok(AddTorrent::from_bytes(bytes)),
+            )?)),
+            TorrentSource::File(bytes) => Ok(AddTorrent::from_bytes(checked_torrent(bytes)?)),
         }
     }
 
@@ -477,19 +479,7 @@ impl Engine {
         let first = self.session_source(source, !peers.is_empty()).await?;
 
         // Step 1: fetch and inspect the metadata without creating any files.
-        let list_only = AddTorrentOptions {
-            list_only: true,
-            initial_peers: Some(peers.clone()),
-            ..AddTorrentOptions::default()
-        };
-        let listed = tokio::time::timeout(
-            self.inner.config.metadata_timeout,
-            session.add_torrent(first, Some(list_only)),
-        )
-        .await
-        .map_err(|_| EngineError::MetadataTimeout)?
-        .map_err(engine_err)?;
-        let listed = match listed {
+        let listed = match self.list_only(first, peers.clone()).await? {
             AddTorrentResponse::ListOnly(listed) => listed,
             AddTorrentResponse::AlreadyManaged(id, _) | AddTorrentResponse::Added(id, _) => {
                 return self.info(id);
@@ -538,19 +528,7 @@ impl Engine {
         peers: Vec<SocketAddr>,
     ) -> Result<Option<Resolved>, EngineError> {
         let first = self.session_source(source, !peers.is_empty()).await?;
-        let list_only = AddTorrentOptions {
-            list_only: true,
-            initial_peers: Some(peers),
-            ..AddTorrentOptions::default()
-        };
-        let listed = tokio::time::timeout(
-            self.inner.config.metadata_timeout,
-            self.inner.session.add_torrent(first, Some(list_only)),
-        )
-        .await
-        .map_err(|_| EngineError::MetadataTimeout)?
-        .map_err(engine_err)?;
-        let AddTorrentResponse::ListOnly(listed) = listed else {
+        let AddTorrentResponse::ListOnly(listed) = self.list_only(first, peers).await? else {
             return Ok(None);
         };
         validate_metadata(&listed.info)?;
@@ -558,6 +536,33 @@ impl Engine {
             torrent_bytes: listed.torrent_bytes,
             seen_peers: listed.seen_peers,
         }))
+    }
+
+    /// Fetches a torrent's metadata (from peers, for a magnet link) without adding it.
+    async fn list_only(
+        &self,
+        source: AddTorrent<'static>,
+        peers: Vec<SocketAddr>,
+    ) -> Result<AddTorrentResponse, EngineError> {
+        let list_only = AddTorrentOptions {
+            list_only: true,
+            initial_peers: Some(peers),
+            ..AddTorrentOptions::default()
+        };
+        // `.torrent` files are checked before they get here (`session_source`), but metadata
+        // from peers is not: librqbit's checks panic on some invalid lengths.
+        let fetch = AssertUnwindSafe(self.inner.session.add_torrent(source, Some(list_only)))
+            .catch_unwind();
+        let listed = tokio::time::timeout(self.inner.config.metadata_timeout, fetch)
+            .await
+            .map_err(|_| EngineError::MetadataTimeout)?
+            .map_err(|_| EngineError::InvalidTorrent("the torrent's lengths are invalid".into()))?
+            .map_err(engine_err)?;
+        if let AddTorrentResponse::ListOnly(listed) = &listed {
+            torrentplayer_swarm::check_lengths(&listed.torrent_bytes)
+                .map_err(|e| EngineError::InvalidTorrent(e.to_string()))?;
+        }
+        Ok(listed)
     }
 
     fn handle(&self, id: TorrentId) -> Result<Arc<ManagedTorrent>, EngineError> {
@@ -816,6 +821,14 @@ impl Engine {
             content_type: mime_type(&entry.path),
         })
     }
+}
+
+/// A `.torrent` file whose lengths librqbit can be given (see
+/// [`torrentplayer_swarm::check_lengths`]): its own checks panic on some invalid ones.
+fn checked_torrent(bytes: bytes::Bytes) -> Result<bytes::Bytes, EngineError> {
+    torrentplayer_swarm::check_lengths(&bytes)
+        .map_err(|e| EngineError::InvalidTorrent(e.to_string()))?;
+    Ok(bytes)
 }
 
 /// Refuses torrents whose names or file paths could escape the download directory.

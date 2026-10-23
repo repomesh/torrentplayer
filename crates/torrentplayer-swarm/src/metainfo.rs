@@ -4,7 +4,7 @@
 
 use std::borrow::Cow;
 
-use librqbit_core::torrent_metainfo::torrent_from_bytes;
+use librqbit_core::torrent_metainfo::{TorrentMetaV1Info, torrent_from_bytes};
 use url::Url;
 
 use crate::bencode::{self, Value};
@@ -74,6 +74,7 @@ impl Metainfo {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, MetainfoError> {
         let meta =
             torrent_from_bytes(bytes).map_err(|e| MetainfoError::Malformed(format!("{e:#}")))?;
+        check_info(&meta.info.data)?;
         let mut trackers = Vec::new();
         for raw in meta.iter_announce() {
             if let Some(url) = std::str::from_utf8(raw.as_ref())
@@ -206,6 +207,64 @@ impl Metainfo {
     }
 }
 
+/// Largest piece length accepted: 64 MiB.
+///
+/// Every piece being downloaded is held in memory whole (pieces the playhead needs urgently
+/// even beyond the scheduler's in-progress budget), and librqbit buffers pieces the same way,
+/// so a huge piece length is a memory exhaustion lever. Torrent creators choose 16 MiB at most
+/// on their own, even for content of hundreds of gigabytes; 64 MiB leaves room for the larger
+/// sizes some offer as a manual choice, and is a common cap among clients.
+pub const MAX_PIECE_LEN: u32 = 64 * 1024 * 1024;
+
+/// Checks the lengths in a `.torrent` file before anything trusts them: a piece length that
+/// is neither 0 nor above [`MAX_PIECE_LEN`], a total length that is not 0 and does not
+/// overflow, and at most `u32::MAX` pieces with a hash for each.
+///
+/// [`Metainfo::from_bytes`] does this itself. Call it before handing a `.torrent` file to
+/// librqbit, whose own checks divide by the piece length and add up file lengths unchecked,
+/// and so panic (or wrap around) on such files. Parsing itself trusts no length: it uses the
+/// same parser as librqbit, which only reads the values.
+///
+/// # Errors
+///
+/// Returns an error if the data is not a torrent or its lengths are unusable.
+pub fn check_lengths(bytes: &[u8]) -> Result<(), MetainfoError> {
+    let meta = torrent_from_bytes(bytes).map_err(|e| MetainfoError::Malformed(format!("{e:#}")))?;
+    check_info(&meta.info.data)
+}
+
+fn check_info<B: AsRef<[u8]>>(info: &TorrentMetaV1Info<B>) -> Result<(), MetainfoError> {
+    let invalid = |why: &str| Err(MetainfoError::Invalid(why.into()));
+    let piece_len = info.piece_length;
+    if piece_len == 0 {
+        return invalid("the piece length is 0");
+    }
+    if piece_len > MAX_PIECE_LEN {
+        return invalid("the piece length is larger than 64 MiB");
+    }
+    let total = match (info.length, &info.files) {
+        (Some(len), _) => Some(len),
+        (None, Some(files)) => files
+            .iter()
+            .try_fold(0u64, |total, f| total.checked_add(f.length)),
+        (None, None) => Some(0),
+    };
+    let Some(total) = total else {
+        return invalid("the file lengths add up to more than 16 EiB");
+    };
+    if total == 0 {
+        return invalid("the torrent is empty");
+    }
+    let pieces = total.div_ceil(u64::from(piece_len));
+    if pieces > u64::from(u32::MAX) {
+        return invalid("the torrent has too many pieces");
+    }
+    if (info.pieces.as_ref().len() / 20) < usize::try_from(pieces).unwrap_or(usize::MAX) {
+        return invalid("the torrent has fewer piece hashes than pieces");
+    }
+    Ok(())
+}
+
 /// The torrent's `url-list` (a string or a list of strings). The torrent itself was already
 /// validated, so anything unexpected here just means no web seeds.
 fn web_seeds(torrent: &[u8]) -> Vec<Url> {
@@ -328,6 +387,81 @@ mod tests {
         t.splice(at..at + 9, b"pieces60:".iter().copied());
         t.splice(at + 9..at + 9, [0u8; 20]);
         assert_eq!(Metainfo::from_bytes(&t).unwrap().piece_count(), 2);
+    }
+
+    /// A torrent whose info dictionary has `lengths` (`6:lengthi…e` or a `5:files` list),
+    /// this piece length, and `hashes` zeroed piece hashes.
+    fn raw(lengths: &str, piece_len: u64, hashes: usize) -> Vec<u8> {
+        let mut t = format!(
+            "d4:infod{lengths}4:name6:a.webm12:piece lengthi{piece_len}e6:pieces{}:",
+            hashes * 20
+        )
+        .into_bytes();
+        t.extend(std::iter::repeat_n(0u8, hashes * 20));
+        t.extend_from_slice(b"ee");
+        t
+    }
+
+    fn files(lens: &[u64]) -> String {
+        use std::fmt::Write as _;
+        let mut list = String::from("5:filesl");
+        for (i, len) in lens.iter().enumerate() {
+            write!(list, "d6:lengthi{len}e4:pathl5:part{i}ee").unwrap();
+        }
+        list + "e"
+    }
+
+    /// Each is refused by both entry points, with an `Invalid` error rather than a panic in
+    /// librqbit's checks.
+    fn assert_refused(bytes: &[u8], why: &str) {
+        for result in [
+            check_lengths(bytes),
+            Metainfo::from_bytes(bytes).map(|_| ()),
+        ] {
+            match result {
+                Err(MetainfoError::Invalid(message)) => assert!(message.contains(why), "{message}"),
+                other => panic!("expected {why:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn refuses_unusable_lengths_before_librqbit_sees_them() {
+        // librqbit-core divides by the piece length.
+        assert_refused(&raw("6:lengthi10e", 0, 1), "piece length is 0");
+        assert_refused(
+            &raw("6:lengthi10e", u64::from(MAX_PIECE_LEN) + 1, 1),
+            "larger than 64 MiB",
+        );
+        assert_refused(&raw("6:lengthi10e", u64::from(u32::MAX), 1), "64 MiB");
+        // librqbit-core adds the file lengths up unchecked.
+        let half = 1u64 << 63;
+        assert_refused(&raw(&files(&[half, half]), 16_384, 1), "16 EiB");
+        assert_refused(&raw(&files(&[u64::MAX, 1]), 16_384, 1), "16 EiB");
+        assert_refused(&raw("6:lengthi0e", 16_384, 0), "empty");
+        assert_refused(&raw(&files(&[0, 0]), 16_384, 0), "empty");
+        // More pieces than a u32 counts, or than there are hashes for.
+        assert_refused(&raw("6:lengthi1099511627776e", 1, 1), "too many pieces");
+        assert_refused(&raw("6:lengthi40000e", 16_384, 2), "fewer piece hashes");
+    }
+
+    #[test]
+    fn accepts_the_largest_piece_length_and_normal_torrents() {
+        let biggest = raw("6:lengthi10e", u64::from(MAX_PIECE_LEN), 1);
+        check_lengths(&biggest).unwrap();
+        assert_eq!(
+            Metainfo::from_bytes(&biggest).unwrap().piece_len,
+            MAX_PIECE_LEN
+        );
+        let multi = raw(&files(&[40_000, 0, 9]), 16_384, 3);
+        check_lengths(&multi).unwrap();
+        let m = Metainfo::from_bytes(&multi).unwrap();
+        assert_eq!((m.total_len, m.piece_count()), (40_009, 3));
+        check_lengths(&torrent(40_000, 16_384, "")).unwrap();
+        assert!(matches!(
+            check_lengths(b"not bencode"),
+            Err(MetainfoError::Malformed(_))
+        ));
     }
 
     #[test]

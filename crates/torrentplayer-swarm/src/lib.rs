@@ -36,7 +36,9 @@ mod webseed;
 mod wire;
 
 pub use dht::bootstrap_peers as dht_bootstrap_peers;
-pub use metainfo::{BLOCK_LEN, MAX_WEB_SEEDS, MetaFile, Metainfo, MetainfoError};
+pub use metainfo::{
+    BLOCK_LEN, MAX_PIECE_LEN, MAX_WEB_SEEDS, MetaFile, Metainfo, MetainfoError, check_lengths,
+};
 pub use reader::FileReader;
 pub use sched::SchedulerConfig;
 pub use torrent::{PlaybackEstimate, Swarm, SwarmConfig, SwarmError, SwarmStats, Torrent};

@@ -48,6 +48,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   a folder of yours with that name lost its contents. Thumbnail downloads now live in the app's
   own `torrentplayer-swarm/thumbnails` cache folder, and a `thumbnails` folder in the download
   folder is never touched.
+- A malformed `.torrent` file (from a file, a link, or a search result) no longer crashes the
+  engine that opens it. Files with a piece length of 0 or above 64 MiB, no data, or file
+  lengths too large to add up are now refused as not a valid `.torrent` file, with the reason,
+  before either engine reads them.
 
 ## [0.3.0] - 2026-10-21
 
