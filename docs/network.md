@@ -78,7 +78,7 @@ and UDP tracker reply sources, are checked against the public-address policy.
 ## Incoming peer connections
 
 By default TorrentPlayer only connects out: it opens no listening port, so no firewall prompt
-appears, at the cost of fewer peers and less upload. **Settings → VPN and network → Accept
+appears, at the cost of fewer peers and less upload. **Settings → Network & VPN → Accept
 incoming peer connections** (`network.incomingPeers`) opens one TCP port, but only on the path
 the selected mode allows. The listener belongs to `torrentplayer_net::Network`
 (`Network::set_incoming`, `Network::incoming_peers`), so it follows the same kill switch and
@@ -156,7 +156,7 @@ loading does in two cases: settings migrated from the removed VPN adapter mode
 (`vpnAdapterModeRemoved`), and a `settings.json` that exists but could not be read or parsed, or
 whose network section or connection mode is invalid (`settingsUnreadable`, see
 [Configuration](configuration.md#where-settings-are-stored)). Traffic is held until the user dismisses
-the notice in Settings → VPN and network or beside the status bar's indicator (or picks the
+the notice in Settings → Network & VPN or beside the status bar's indicator (or picks the
 SOCKS5 or WireGuard mode, whose own kill switch then applies). A user who chose to send nothing
 outside their VPN therefore never sends anything directly without confirming it first, even when
 an update or a damaged file loses that choice.
@@ -183,7 +183,7 @@ restarts tracker announces under the new rules. librqbit's peers reconnect throu
 events: gray `Direct · no VPN`; green `Protected · <proxy or WireGuard endpoint>` when connected;
 yellow `Connecting…` or `Reconnecting…`; red `Kill switch: traffic paused (<reason>)`,
 `Network error: <reason>`, or (Direct mode, held) `Traffic paused: <reason>`. Its tooltip has the mode, endpoint, uptime (`connectedSinceMs`), and
-the latest events; clicking it opens Settings → Network, which shows the same state with a **Try
+the latest events; clicking it opens Settings → Network & VPN, which shows the same state with a **Try
 again** button (`recheck_network`). When the kill switch pauses traffic and the video runs out
 of data, the player says "VPN/proxy disconnected — traffic paused" instead of "Buffering…".
 

@@ -52,7 +52,7 @@ Loading never fails, and it never turns a VPN or proxy into a direct connection:
 - A file that exists but cannot be read (too large, locked by another program such as an
   antivirus or a sync client, a disk error) or is not JSON gives the defaults with traffic
   **held** (`network.hold = "settingsUnreadable"`): no torrent traffic or searches until you
-  choose a connection in Settings → VPN and network or select **Connect directly** in the notice.
+  choose a connection in Settings → Network & VPN or select **Connect directly** in the notice.
   The file is copied to `settings.invalid.json` and left in place: nothing is written while
   loading, so the next start reads it again (and holds again if it is still unreadable). If the
   copy cannot be made, TorrentPlayer refuses to save settings (each save tries the copy again)
@@ -222,7 +222,7 @@ use the WireGuard mode with your provider's WireGuard configuration. TorrentPlay
 OpenVPN itself or import `.ovpn` files (see [ADR 0008](adr/0008-application-wireguard-tunnel.md)).
 
 **Held traffic:** when loading cannot keep the connection you chose, Direct mode starts with
-`network.hold` set and a notice in Settings → VPN and network and beside the status bar's network
+`network.hold` set and a notice in Settings → Network & VPN and beside the status bar's network
 indicator. Until the notice is dismissed (**Connect directly**, which clears the setting), all
 torrent traffic and searches stay paused, so nothing is sent outside your VPN without your
 confirmation. Choosing SOCKS5 or WireGuard instead lifts the pause too. It happens when
@@ -244,7 +244,7 @@ forwards it. A SOCKS5 proxy cannot accept incoming connections, so TorrentPlayer
 listen at all in that mode. Settings shows whether it is listening. See
 [Incoming peer connections](network.md#incoming-peer-connections).
 
-**VPN recommendation:** in Direct mode, Settings → Network, a **VPN recommended** button beside
+**VPN recommendation:** in Direct mode, Settings → Network & VPN, a **VPN recommended** button beside
 the status bar's network indicator, and a note the first time a torrent starts seeding in a run
 say that every peer and tracker sees your IP address, so a VPN is recommended when downloading
 or seeding, and link to the [blog post on VPNs](https://torrentplayer.io/blog/vpn-for-torrenting/).

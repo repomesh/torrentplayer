@@ -40,7 +40,8 @@ makes the policy exhaustively testable.
 - **Loopback HTTP range server** (`torrentplayer-stream`, in use): bound to `127.0.0.1` on a random
   port, requires a random per-session token, and supports HTTP `Range` requests. The built-in
   player (the system web engine's `<video>`) reads every video through it, and so do FFmpeg's
-  probes and the audio conversion, each under a token of its own. Connections that have not
+  probes, each under a token of its own; the audio conversion reads its input from a loopback
+  server of its own, and its output is served here. Connections that have not
   presented the token are kept apart from the player's (at most 8, closed after 10 seconds or
   once refused); of the 16 connections the player may hold, one that has read and written
   nothing for 30 seconds (a player paused with a full buffer) is closed only when another

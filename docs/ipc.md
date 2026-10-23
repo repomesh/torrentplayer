@@ -50,7 +50,7 @@ a generic message).
 
 `errorMessage` in `ui/src/lib/ipc.ts` shows `message` as is, and for `kill-switch` and
 `network-unavailable` adds what it means and what to do (nothing was sent; traffic resumes by
-itself; check Settings → Network).
+itself; check Settings → Network & VPN).
 
 ## Engines
 

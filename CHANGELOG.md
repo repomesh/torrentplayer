@@ -85,7 +85,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `settings.json` exists but is damaged, unreadable (for example locked by an antivirus or sync
   client, or too large), or names a connection mode this version does not know, TorrentPlayer now
   starts with all traffic paused and a notice ("Your network settings could not be read…") until
-  you choose a connection in Settings → VPN and network or select **Connect directly**. The file
+  you choose a connection in Settings → Network & VPN or select **Connect directly**. The file
   is kept as `settings.invalid.json` and is never overwritten while it cannot be backed up. One
   bad network value (such as an unknown IPv6 policy) now resets only itself, not the connection
   mode. A first run without a settings file still starts in Direct mode.
@@ -179,6 +179,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `503 Service Unavailable` instead of having its connection dropped.
 - A torrent added to TorrentPlayer's engine no longer serves pieces to peers that connect in the
   moment before the app applies the upload setting: uploading is now off until it is turned on.
+- Settings that an older TorrentStream still running kept open during the update are no longer
+  lost: when they could not be moved to TorrentPlayer's folder, the app started with defaults
+  and connected directly, even for a WireGuard or SOCKS5 user. They are now copied; if even that
+  fails, traffic is held until you close the older app and restart, or choose a connection.
+- An FFmpeg folder inside the download folder, saved by an earlier version, is no longer used:
+  files there can come from torrents. FFmpeg is looked for as if no folder were set.
+- A WireGuard tunnel that slept (a laptop suspended) for more than six minutes now tries a new
+  handshake when the computer wakes up, instead of closing every connection to start over.
 - Updated `ctutils` (used by the Linux credential store's cryptography) to 0.4.5 for
   [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385), non-constant-time
   comparisons.
@@ -191,8 +199,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   proxy). A long session therefore finds no new tracker peers. The automatic engine is not
   affected: torrentplayer-swarm keeps announcing.
 - The settings file is now version 5 (`network.hold` replaces `network.vpnAdapterModeRemoved`).
-  Going back to 0.3.0 reads it as far as possible and keeps a copy as `settings.newer.json`; a
-  pending "VPN adapter mode removed" notice is not shown there.
+  Going back to 0.3.0 reads it as far as possible and keeps a copy as `settings.newer.json`, but a
+  held connection is not held there: 0.3.0 ignores `network.hold` and connects directly.
 
 ## [0.3.0] - 2026-10-21
 

@@ -32,7 +32,7 @@ must not silently lose the user's protection:
   value load too, and it is saved at once.
 - While that flag is set and the mode is Direct, the app passes a hold to the network manager
   (`NetworkConfig::hold`): all traffic is blocked, as behind the kill switch, until the user
-  acknowledges the change. A notice in Settings → Network and beside the status bar's network
+  acknowledges the change. A notice in Settings → Network & VPN and beside the status bar's network
   indicator explains the change; dismissing it clears the flag and lets Direct connect. Choosing
   SOCKS5 or WireGuard lifts the hold too, since those modes have their own kill switch.
 
