@@ -88,12 +88,20 @@ pub struct NetworkOptions {
     /// as not responding and the kill switch engages. A tunnel that has heard nothing for half
     /// of this is probed. See [`WIREGUARD_REPLY_TIMEOUT`].
     pub wireguard_reply_timeout: Duration,
+    /// How long a WireGuard server may leave traffic unanswered before the tunnel is replaced
+    /// by a new one (a fresh handshake and source port). See [`WIREGUARD_RESTART_AFTER`].
+    pub wireguard_restart_after: Duration,
 }
 
 /// The default [`NetworkOptions::wireguard_reply_timeout`]: WireGuard's `KEEPALIVE_TIMEOUT`
 /// (10 s, within which a peer that received data answers, if only with a keepalive) plus two
 /// `REKEY_TIMEOUT`s (5 s each, for a handshake retried while the session is renewed).
 pub const WIREGUARD_REPLY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The default [`NetworkOptions::wireguard_restart_after`]: twice WireGuard's
+/// `REJECT_AFTER_TIME` (180 s), long after every session the server could still hold has
+/// expired. At most one handshake for a new tunnel every 6 minutes.
+pub const WIREGUARD_RESTART_AFTER: Duration = Duration::from_secs(360);
 
 impl Default for NetworkOptions {
     fn default() -> Self {
@@ -105,6 +113,7 @@ impl Default for NetworkOptions {
             ip_check_v4_url: IP_CHECK_V4_URL.to_owned(),
             ip_check_v6_url: Some(IP_CHECK_V6_URL.to_owned()),
             wireguard_reply_timeout: WIREGUARD_REPLY_TIMEOUT,
+            wireguard_restart_after: WIREGUARD_RESTART_AFTER,
         }
     }
 }
@@ -299,6 +308,11 @@ pub(crate) struct Inner {
     bridge_addr: SocketAddr,
     pub(crate) bridge_token: Secret,
     cancel: CancellationToken,
+    /// When a failed dial last woke the health check (see `wake_after_failed_dial`).
+    last_dial_wake: Mutex<Option<std::time::Instant>>,
+    /// Test seam: how long host name lookups through the system resolver take.
+    #[cfg(test)]
+    pub(crate) resolve_delay: Mutex<Duration>,
 }
 
 impl Drop for Inner {
@@ -329,6 +343,8 @@ pub(crate) struct State {
     events: VecDeque<NetEvent>,
     /// Incoming peer connections.
     pub(crate) incoming: IncomingState,
+    /// A connected SOCKS5 proxy failed one check, under this generation (see `on_check`).
+    proxy_failed_once: Option<u64>,
 }
 
 impl State {
@@ -454,6 +470,22 @@ impl Inner {
         self.incoming_wake.notify_one();
     }
 
+    /// Wakes the health check after a failed connection to the proxy, at most once per
+    /// [`NetworkOptions::health_interval`]: every failed dial used to, so a burst of them (a
+    /// provider's connection cap) kept the proxy busy with checks. Returns whether it woke it.
+    pub(crate) fn wake_after_failed_dial(&self) -> bool {
+        let mut last = self
+            .last_dial_wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if last.is_some_and(|at| at.elapsed() < self.options.health_interval) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+        self.wake.notify_one();
+        true
+    }
+
     /// Tells [`Network::status_changes`] watchers that the status changed.
     pub(crate) fn status_changed(&self) {
         self.status_seq
@@ -478,6 +510,7 @@ impl Inner {
         }
         st.last_check = Some(SystemTime::now());
         let via = describe(&st.config.mode);
+        let failed_once = st.proxy_failed_once.take() == Some(generation);
         match result {
             Ok(()) => {
                 match &st.conn {
@@ -496,6 +529,19 @@ impl Inner {
                 st.conn = ConnectionState::Connected;
                 self.publish(&st);
                 interval
+            }
+            Err(_)
+                if st.conn == ConnectionState::Connected
+                    && matches!(st.config.mode, NetworkMode::Socks5(_))
+                    && !failed_once =>
+            {
+                // A connected proxy must fail twice in a row before its connections are
+                // closed: one refused or slow check (a provider's connection cap, a busy
+                // proxy) would otherwise drop every connection, and reconnecting them can
+                // hit the cap again. Nothing goes around the proxy meanwhile; its own
+                // connections just fail. WireGuard has its own grace (the reply timeout).
+                st.proxy_failed_once = Some(generation);
+                self.options.retry_interval
             }
             Err(error) => {
                 let reason = error.to_string();
@@ -558,6 +604,7 @@ impl Network {
             connected_since: None,
             events: VecDeque::new(),
             incoming: IncomingState::default(),
+            proxy_failed_once: None,
         };
         let message = format!("Network mode: {}", describe(&st.config.mode));
         st.log(EventLevel::Info, message);
@@ -578,6 +625,9 @@ impl Network {
             bridge_addr,
             bridge_token: token,
             cancel: cancel.clone(),
+            last_dial_wake: Mutex::default(),
+            #[cfg(test)]
+            resolve_delay: Mutex::default(),
         });
         tokio::spawn(monitor(Arc::downgrade(&inner), wake, cancel.clone()));
         tokio::spawn(bridge::serve(
@@ -720,7 +770,7 @@ impl Network {
     /// otherwise. Never connects any other way than the selected mode.
     pub async fn connect(&self, target: SocketAddr) -> Result<(TcpStream, Lease), NetError> {
         let (route, lease, ipv4_only) = self.route()?;
-        let stream = self.dial(&route, target, ipv4_only).await?;
+        let stream = self.dial(&route, target, ipv4_only, &lease).await?;
         Self::check_lease(stream, lease)
     }
 
@@ -928,7 +978,7 @@ impl Network {
         let mut last = None;
         let addresses = match &route {
             Route::WireGuard(tunnel) => tunnel.resolve(host, port, ipv4_only).await?,
-            _ => tokio::net::lookup_host((host, port)).await?.collect(),
+            _ => self.system_lookup(host, port).await?,
         };
         for addr in addresses {
             if ipv4_only && addr.is_ipv6() {
@@ -938,7 +988,14 @@ impl Network {
                 last.get_or_insert(NetError::NotPublic);
                 continue;
             }
-            match self.dial(&route, addr, ipv4_only).await {
+            // The route was chosen before the lookup and the previous attempts, which can
+            // take seconds: a direct route must not dial once the mode is protected.
+            if !lease.is_valid() {
+                return Err(NetError::KillSwitch(
+                    "the network settings changed while connecting".into(),
+                ));
+            }
+            match self.dial(&route, addr, ipv4_only, &lease).await {
                 Ok(stream) => return Self::check_lease(stream, lease),
                 Err(error) => last = Some(error),
             }
@@ -949,6 +1006,20 @@ impl Network {
                 "no usable address for the host",
             ))
         }))
+    }
+
+    /// Resolves `host` with the system resolver.
+    async fn system_lookup(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        #[cfg(test)]
+        {
+            let delay = *self
+                .inner
+                .resolve_delay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            tokio::time::sleep(delay).await;
+        }
+        Ok(tokio::net::lookup_host((host, port)).await?.collect())
     }
 
     pub(crate) fn route(&self) -> Result<(Route, Lease, bool), NetError> {
@@ -976,6 +1047,7 @@ impl Network {
         route: &Route,
         target: SocketAddr,
         ipv4_only: bool,
+        lease: &Lease,
     ) -> Result<TcpStream, NetError> {
         if ipv4_only && target.is_ipv6() {
             return Err(NetError::Ipv6Disabled);
@@ -983,7 +1055,7 @@ impl Network {
         match route {
             Route::Direct => Ok(TcpStream::connect(target).await?),
             Route::Socks(cfg) => self.socks_dial(cfg, &Target::Addr(target)).await,
-            Route::WireGuard(tunnel) => tunnel.connect(target).await,
+            Route::WireGuard(tunnel) => tunnel.connect(target, Some(lease.clone())).await,
         }
     }
 
@@ -992,7 +1064,7 @@ impl Network {
             Ok(s) => s,
             Err(error) => {
                 // Probably the proxy went down: check now rather than at the next interval.
-                self.inner.wake.notify_one();
+                self.inner.wake_after_failed_dial();
                 return Err(NetError::ProxyUnreachable(error));
             }
         };
@@ -1196,15 +1268,16 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
             NetworkMode::Socks5(cfg) => Some(probe(&cfg, timeout).await),
             NetworkMode::WireGuard(cfg) => {
                 let check = async {
-                    let existing = net
-                        .state()
-                        .tunnel
-                        .clone()
-                        .filter(|tunnel| !tunnel.is_closed());
-                    let tunnel = if let Some(tunnel) = existing {
-                        tunnel
+                    let existing = net.state().tunnel.clone();
+                    let tunnel = if let Some(tunnel) =
+                        existing.as_ref().filter(|tunnel| !tunnel.is_closed())
+                    {
+                        tunnel.clone()
                     } else {
-                        let tunnel = Tunnel::start(&cfg).await?;
+                        // A tunnel the health check closed is replaced by one at the endpoint's
+                        // next address; if its server had stopped answering, the new one must
+                        // hear from the server before traffic resumes.
+                        let tunnel = Tunnel::start(&cfg, existing.as_ref()).await?;
                         let mut st = net.state();
                         if st.generation != generation || st.conn == ConnectionState::Disconnected {
                             tunnel.close();
@@ -1214,7 +1287,11 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
                         tunnel
                     };
                     tunnel
-                        .healthy(timeout, net.options.wireguard_reply_timeout)
+                        .healthy(
+                            timeout,
+                            net.options.wireguard_reply_timeout,
+                            net.options.wireguard_restart_after,
+                        )
                         .await
                 };
                 // Mostly a handshake that did not complete in time: one reason for both, so a

@@ -206,6 +206,92 @@ async fn public_only_clients_cannot_reach_the_local_network() {
     net.shutdown();
 }
 
+/// A TCP front for `upstream` that closes the next `refuse` connections at once, like a proxy
+/// at its connection cap.
+async fn refusing_front(upstream: SocketAddr) -> (SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let refuse = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&refuse);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            if count
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                continue;
+            }
+            tokio::spawn(async move {
+                if let Ok(mut proxy) = tokio::net::TcpStream::connect(upstream).await {
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut proxy).await;
+                }
+            });
+        }
+    });
+    (addr, refuse)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_failed_proxy_check_does_not_drop_connections() {
+    // Each check opens a connection to the proxy. One refused check while connected used to
+    // start a new epoch and close every connection; it takes two in a row now.
+    let proxy = TestProxy::start(None).await.unwrap();
+    let (front, refuse) = refusing_front(proxy.addr()).await;
+    let (echo, _) = echo_server().await;
+    let mut config = socks_mode(&proxy, None);
+    if let NetworkMode::Socks5(cfg) = &mut config.mode {
+        cfg.port = front.port();
+    }
+    let net = Network::start(config, fast_options()).await.unwrap();
+    assert_eq!(
+        net.settled(Duration::from_secs(5)).await.state,
+        ConnectionState::Connected
+    );
+    let (mut stream, lease) = net.connect(echo).await.unwrap();
+    let epoch = net.policy().epoch;
+
+    refuse.store(1, Ordering::SeqCst);
+    while refuse.load(Ordering::SeqCst) > 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Several checks later: still connected, same epoch, the connection still works.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(net.status().state, ConnectionState::Connected);
+    assert_eq!(net.policy().epoch, epoch);
+    assert!(lease.is_valid());
+    stream.write_all(b"ping").await.unwrap();
+    let mut reply = [0; 4];
+    stream.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply, b"ping");
+
+    // Two in a row engage the kill switch.
+    refuse.store(usize::MAX, Ordering::SeqCst);
+    let state = wait_for_state(&net, |s| !matches!(s, ConnectionState::Connected)).await;
+    assert!(
+        matches!(
+            state,
+            ConnectionState::Reconnecting { .. } | ConnectionState::KillSwitchActive { .. }
+        ),
+        "{state:?}"
+    );
+    assert!(!lease.is_valid());
+    net.shutdown();
+}
+
+#[tokio::test]
+async fn failed_proxy_dials_wake_the_health_check_at_most_once_per_interval() {
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    assert!(net.inner.wake_after_failed_dial());
+    for _ in 0..20 {
+        assert!(!net.inner.wake_after_failed_dial());
+    }
+    tokio::time::sleep(fast_options().health_interval).await;
+    assert!(net.inner.wake_after_failed_dial());
+    net.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_kill_switch_blocks_and_recovers() {
     let proxy = TestProxy::start(None).await.unwrap();
@@ -442,6 +528,38 @@ async fn dead_proxy() -> NetworkConfig {
         allow_ipv6: false,
         hold: None,
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_direct_dial_started_before_a_switch_to_protected_never_goes_out() {
+    // A host name connection resolves before it dials. If the mode becomes protected during
+    // the lookup, the direct route chosen before it must not be used.
+    let (echo, hits) = echo_server().await;
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    *net.inner.resolve_delay.lock().unwrap() = Duration::from_millis(500);
+    let connecting = tokio::spawn({
+        let net = net.clone();
+        async move { net.connect_host("localhost", echo.port()).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    net.apply(NetworkConfig {
+        hold: Some("confirm the network settings first".into()),
+        ..NetworkConfig::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        connecting.await.unwrap(),
+        Err(NetError::KillSwitch(_))
+    ));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "a direct connection went out"
+    );
+    net.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

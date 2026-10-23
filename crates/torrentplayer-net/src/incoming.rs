@@ -628,7 +628,7 @@ async fn accept_tunnel(
             accepted = listener.accept() => accepted,
         };
         match accepted {
-            Ok((upstream, addr)) => match tunnel.relay(upstream).await {
+            Ok((upstream, addr)) => match tunnel.relay(upstream, Some(lease.clone())).await {
                 Ok(stream) => deliver(&tx, stream, addr, &lease),
                 Err(error) => {
                     tracing::debug!(target: "torrentplayer_net", %error, "relaying a peer failed");

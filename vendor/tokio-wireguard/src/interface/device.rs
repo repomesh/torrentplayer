@@ -40,6 +40,11 @@ impl Device {
     pub fn can_send(&self) -> bool {
         !self.send.queue.is_empty()
     }
+
+    /// Added for TorrentPlayer: received packets the stack has not taken yet.
+    pub fn received_backlog(&self) -> usize {
+        self.recv.queue.lengths.len()
+    }
 }
 
 impl Token {
@@ -112,8 +117,16 @@ struct PacketQueue {
     buffers: VecDeque<u8>,
 }
 
+/// Added for TorrentPlayer: packets a queue holds at most (about 1.4 MiB at the default MTU).
+/// Beyond it, packets are dropped like a full network interface would; TCP retransmits them.
+const QUEUE_PACKETS: usize = 1024;
+
 impl PacketQueue {
     fn enqueue(&mut self, packet: &[u8]) {
+        // Modified for TorrentPlayer: bounded (see `QUEUE_PACKETS`).
+        if self.lengths.len() >= QUEUE_PACKETS {
+            return;
+        }
         self.lengths.push_back(packet.len());
         self.buffers.extend(packet);
     }

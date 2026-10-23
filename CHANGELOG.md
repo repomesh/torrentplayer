@@ -32,10 +32,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   "no cap"); before, 0 fell back to the 10 MiB/s default.
 - A WireGuard tunnel whose server stops answering is no longer shown as Connected. The tunnel
   now counts as connected only while its server completes handshakes and answers traffic within
-  20 seconds (an idle tunnel is probed with a tiny DNS query inside it); otherwise the kill
-  switch pauses traffic with the reason ("the WireGuard server is not answering tunnel traffic"
-  or "has not completed a recent handshake"), and traffic resumes by itself when the server
-  answers again. Benchmarks over WireGuard now report such a tunnel as down.
+  20 seconds; otherwise the kill switch pauses traffic with the reason ("the WireGuard server is
+  not answering tunnel traffic" or "has not completed a recent handshake"), and traffic resumes
+  by itself when the server answers again. An idle or blocked tunnel is probed with one tiny
+  packet inside it (a DNS query, or without a usable DNS server an empty datagram the server
+  does not forward), less often the longer it stays idle; a tunnel left unanswered for 6 minutes
+  is replaced by a new one. Benchmarks over WireGuard now report such a tunnel as down.
 - In the WireGuard and SOCKS5 modes, a magnet link that finds no peers now says what to check in
   that mode (the tunnel's handshake, or the proxy's UDP support) instead of always blaming the
   proxy, and the message for `.torrent` files in these modes no longer has stray spaces.
@@ -111,6 +113,39 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   ship with the app; the security policy lists 0.3.x as supported; the streaming page is no
   longer marked as planned; the build guide says which Ubuntu versions CI and releases use and
   that libmpv is not needed.
+- In WireGuard mode, opening a connection or UDP socket no longer fails now and then with "not a
+  suitable bind address" when the randomly chosen tunnel port is already in use; the next free port
+  is used.
+- In WireGuard mode, a forged WireGuard cookie reply (which anyone who knows the server's public key
+  and sees the handshake can make) no longer redirects the tunnel's traffic to its sender; the
+  tunnel follows the server only on authenticated handshake and data messages. Handshake initiations
+  are rate-limited before the key agreement, so a flood of them costs little CPU.
+- A WireGuard tunnel keeps sending its keepalives and key renewals while a lot of traffic (or junk)
+  arrives; before, a steady stream of incoming datagrams held them back, which could expire the
+  session and block traffic as "has not completed a recent handshake". Packets waiting inside the
+  tunnel are also capped instead of piling up in memory.
+- In WireGuard mode, connections inside the tunnel now close when the kill switch engages or the
+  mode changes, even while the app still holds them and the server is silent; before, each one kept
+  about 80 KiB and a task until the tunnel closed. Tunnel connections whose peer stops responding
+  are dropped after 2 minutes, and incoming-connection listeners reserve far less memory.
+- A connection to a host name started in Direct mode can no longer go out directly after you switch
+  to a protected mode (or a hold applies) while its name is being resolved; the route is re-checked
+  before each address is dialled.
+- In SOCKS5 mode, one failed proxy check no longer closes every connection: a connected proxy must
+  fail two checks in a row (about a second apart) before the kill switch engages, and failed
+  connections to the proxy trigger an extra check at most once per check interval. Providers with
+  connection caps no longer cause a drop-and-reconnect loop; a proxy that is really down still
+  blocks traffic within seconds.
+- A WireGuard endpoint given as a host name now works when its first address does not: IPv4
+  addresses are tried first, a tunnel that completes no handshake for 15 seconds moves on to the
+  next address, and the name is resolved again whenever the tunnel is restarted (after 6 minutes
+  without a session or an answer), so a server that moved is found again. Before, only the first
+  address was used, and an IPv6 address listed first never connected on an IPv4-only network.
+- WireGuard configurations whose DNS line includes a search domain (for example
+  `DNS = 10.64.0.1, corp.example`) can be imported and connect; the search domain is ignored, and
+  the import says so. The import also says when `ListenPort` is ignored (TorrentPlayer uses a
+  random local port) and when `PersistentKeepalive = off` is (the tunnel keeps a 25-second
+  keepalive).
 
 ## [0.3.0] - 2026-10-21
 

@@ -2,9 +2,10 @@
 
 //! An application-local WireGuard tunnel. Only encrypted UDP reaches the OS network.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -12,7 +13,7 @@ use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio_wireguard::{Interface, config, x25519};
 use zeroize::Zeroizing;
 
-use crate::{NetError, WireGuardConfig};
+use crate::{Lease, NetError, WireGuardConfig};
 
 /// WireGuard's `REJECT_AFTER_TIME`: a session older than this is unusable.
 const REJECT_AFTER_TIME: Duration = Duration::from_secs(180);
@@ -30,6 +31,52 @@ pub(crate) struct Tunnel(Arc<Session>);
 struct Session {
     interface: Interface,
     dns: Vec<IpAddr>,
+    /// Where health probes go (see [`Tunnel::probe`]); None without a tunnel address in the
+    /// family of any `AllowedIPs` range.
+    probe_target: Option<ProbeTarget>,
+    probes: Mutex<Probes>,
+    /// Started because the server stopped answering the previous tunnel: until the server
+    /// answers this one's traffic, it is not connected.
+    unproven: bool,
+    /// Why the health check closed it, as an [`Abandoned`] (see [`Tunnel::abandoned`]).
+    abandoned: AtomicU8,
+    /// Which of the endpoint's addresses it uses, and how many there were.
+    endpoint: (usize, usize),
+    /// When it last had a session (or started, before its first).
+    keyed_at: Mutex<Instant>,
+}
+
+/// Why the health check closed a tunnel, so that a new one replaces it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Abandoned {
+    /// Still in use, or closed for another reason.
+    No = 0,
+    /// The server stopped answering its traffic.
+    Unanswered = 1,
+    /// It had no session for too long.
+    NoHandshake = 2,
+}
+
+/// Where a health probe goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProbeTarget {
+    /// The tunnel address it is sent from.
+    local: IpAddr,
+    remote: SocketAddr,
+    /// A DNS server inside the tunnel, asked for the root name servers; otherwise an empty UDP
+    /// datagram with a hop limit of 1.
+    dns: bool,
+}
+
+/// The health probes of one tunnel.
+#[derive(Debug, Default)]
+struct Probes {
+    /// One probe at a time.
+    in_flight: bool,
+    last: Option<Instant>,
+    /// Probes sent since the tunnel was last in use or unanswered: the gap between idle probes
+    /// doubles with each.
+    idle: u32,
 }
 
 impl Drop for Session {
@@ -98,14 +145,6 @@ pub(crate) fn validate(config: &WireGuardConfig) -> Result<(), NetError> {
     }
     if config
         .interface
-        .dns
-        .iter()
-        .any(|ip| ip.parse::<IpAddr>().is_err())
-    {
-        return Err(invalid("WireGuard DNS servers must be IP addresses"));
-    }
-    if config
-        .interface
         .mtu
         .is_some_and(|mtu| !(576..=9000).contains(&mtu))
     {
@@ -115,61 +154,108 @@ pub(crate) fn validate(config: &WireGuardConfig) -> Result<(), NetError> {
 }
 
 impl Tunnel {
-    pub(crate) async fn start(config: &WireGuardConfig) -> Result<Self, NetError> {
+    /// Starts a tunnel, resolving the endpoint again. If it replaces `previous`, which the
+    /// health check abandoned (see [`Tunnel::abandoned`]), it uses the endpoint's next address,
+    /// and if the server had stopped answering, it counts as connected only once the server
+    /// answers it.
+    pub(crate) async fn start(
+        config: &WireGuardConfig,
+        previous: Option<&Tunnel>,
+    ) -> Result<Self, NetError> {
         validate(config)?;
         let peer = &config.peers[0];
-        let endpoint = tokio::net::lookup_host(&peer.endpoint)
-            .await?
-            .next()
-            .ok_or_else(|| invalid("the WireGuard endpoint did not resolve"))?;
-        let interface = Interface::new(config::Config {
-            interface: config::Interface {
-                address: config
-                    .interface
-                    .addresses
-                    .join(",")
-                    .parse()
-                    .map_err(|_| invalid("invalid WireGuard tunnel address"))?,
-                private_key: x25519::StaticSecret::from(*key(config
-                    .interface
-                    .private_key
-                    .expose())?),
-                listen_port: config.interface.listen_port,
-                mtu: config.interface.mtu.map(usize::from),
+        let abandoned = previous.map_or(Abandoned::No, Tunnel::abandoned);
+        let unproven = abandoned == Abandoned::Unanswered;
+        let addresses = endpoint_addresses(&peer.endpoint).await?;
+        let index = match (previous, abandoned) {
+            (Some(previous), Abandoned::Unanswered | Abandoned::NoHandshake) => {
+                (previous.0.endpoint.0 + 1) % addresses.len()
+            }
+            _ => 0,
+        };
+        let endpoint = addresses[index];
+        let interface = Interface::new_with(
+            config::Config {
+                interface: config::Interface {
+                    address: config
+                        .interface
+                        .addresses
+                        .join(",")
+                        .parse()
+                        .map_err(|_| invalid("invalid WireGuard tunnel address"))?,
+                    private_key: x25519::StaticSecret::from(*key(config
+                        .interface
+                        .private_key
+                        .expose())?),
+                    listen_port: config.interface.listen_port,
+                    mtu: config.interface.mtu.map(usize::from),
+                },
+                peers: vec![config::Peer {
+                    public_key: x25519::PublicKey::from(*key(&peer.public_key)?),
+                    preshared_key: peer
+                        .preshared_key
+                        .as_ref()
+                        .map(|psk| key(psk.expose()).map(|key| x25519::StaticSecret::from(*key)))
+                        .transpose()?,
+                    endpoint: Some(endpoint),
+                    allowed_ips: peer
+                        .allowed_ips
+                        .iter()
+                        .map(|ip| {
+                            ip.parse()
+                                .map_err(|_| invalid("invalid WireGuard AllowedIPs"))
+                        })
+                        .collect::<Result<_, _>>()?,
+                    // Always on, 25 s unless set: without it the NAT mapping that lets the server
+                    // reach this tunnel (forwarded ports, the server's own traffic) lapses
+                    // while the tunnel is idle, and idle probes can be minutes apart. "Off" is
+                    // reported as ignored when the configuration is imported.
+                    persistent_keepalive: Some(
+                        peer.persistent_keepalive.filter(|n| *n > 0).unwrap_or(25),
+                    ),
+                }],
             },
-            peers: vec![config::Peer {
-                public_key: x25519::PublicKey::from(*key(&peer.public_key)?),
-                preshared_key: peer
-                    .preshared_key
-                    .as_ref()
-                    .map(|psk| key(psk.expose()).map(|key| x25519::StaticSecret::from(*key)))
-                    .transpose()?,
-                endpoint: Some(endpoint),
-                allowed_ips: peer
-                    .allowed_ips
-                    .iter()
-                    .map(|ip| {
-                        ip.parse()
-                            .map_err(|_| invalid("invalid WireGuard AllowedIPs"))
-                    })
-                    .collect::<Result<_, _>>()?,
-                persistent_keepalive: Some(
-                    peer.persistent_keepalive.filter(|n| *n > 0).unwrap_or(25),
-                ),
-            }],
-        })?;
+            interface_options(),
+        )?;
+        // Search domains (the `DNS` entries that are names) are ignored: host names are
+        // always looked up in full.
+        let dns: Vec<IpAddr> = config
+            .interface
+            .dns
+            .iter()
+            .filter_map(|entry| entry.parse().ok())
+            .collect();
+        let allowed = peer
+            .allowed_ips
+            .iter()
+            .map(|range| network(range).ok_or_else(|| invalid("invalid WireGuard AllowedIPs")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let locals: Vec<IpAddr> = interface.address().addresses().collect();
         Ok(Self(Arc::new(Session {
+            probe_target: probe_target(&locals, &allowed, &dns),
             interface,
-            dns: config
-                .interface
-                .dns
-                .iter()
-                .map(|ip| {
-                    ip.parse()
-                        .map_err(|_| invalid("invalid WireGuard DNS server"))
-                })
-                .collect::<Result<_, _>>()?,
+            dns,
+            probes: Mutex::default(),
+            unproven,
+            abandoned: AtomicU8::new(Abandoned::No as u8),
+            endpoint: (index, addresses.len()),
+            keyed_at: Mutex::new(Instant::now()),
         })))
+    }
+
+    /// Why the health check closed this tunnel, if it did.
+    pub(crate) fn abandoned(&self) -> Abandoned {
+        match self.0.abandoned.load(Ordering::Relaxed) {
+            1 => Abandoned::Unanswered,
+            2 => Abandoned::NoHandshake,
+            _ => Abandoned::No,
+        }
+    }
+
+    /// Closes the tunnel so that the monitor replaces it (see [`Tunnel::start`]).
+    fn abandon(&self, why: Abandoned) {
+        self.0.abandoned.store(why as u8, Ordering::Relaxed);
+        self.close();
     }
 
     pub(crate) fn close(&self) {
@@ -201,29 +287,76 @@ impl Tunnel {
     /// - Traffic sent into the tunnel must get an authenticated packet back within
     ///   `reply_timeout`. A WireGuard peer that receives data answers within `KEEPALIVE_TIMEOUT`
     ///   (10 s), with data or an empty keepalive, so silence means the server is not answering,
-    ///   even if it still completes handshakes.
+    ///   even if it still completes handshakes. While it is not answering, the tunnel is probed
+    ///   so the check sees the answer as soon as there is one; after `restart_after` without an
+    ///   answer, the tunnel is closed so that a new one replaces it.
     /// - Without a current session (none yet, or none for `REJECT_AFTER_TIME`), a handshake must
     ///   complete within `timeout`.
-    /// - A tunnel that has heard nothing for half of `reply_timeout` is probed with a tiny DNS
-    ///   query, which the server must answer: WireGuard is silent while idle.
+    /// - A tunnel that has heard nothing for half of `reply_timeout` is probed (see
+    ///   [`Tunnel::probe`]), since WireGuard is silent while idle. The gap between probes of an
+    ///   idle tunnel doubles with each, up to four times `reply_timeout`.
     pub(crate) async fn healthy(
         &self,
         timeout: Duration,
         reply_timeout: Duration,
+        restart_after: Duration,
     ) -> Result<(), NetError> {
         let liveness = self.0.interface.liveness().await?;
         let session = liveness
             .handshake_age
             .is_some_and(|age| age < REJECT_AFTER_TIME);
-        if liveness
-            .unanswered
-            .is_some_and(|waiting| waiting >= reply_timeout)
-        {
-            // Keep asking, so the check sees the server answer again as soon as it does.
-            if !session {
-                self.0.interface.request_handshake()?;
+        let without_session = {
+            let mut last = self
+                .0
+                .keyed_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if session {
+                *last = Instant::now();
             }
-            self.probe(reply_timeout);
+            last.elapsed()
+        };
+        let unanswered = liveness.unanswered.unwrap_or_default();
+        let answering =
+            unanswered < reply_timeout && (!self.0.unproven || liveness.received_age.is_some());
+        // Without a session for a while, try the endpoint's next address (a host name can
+        // resolve to an address this computer cannot reach, such as IPv6 on an IPv4-only
+        // network), or, with only one, resolve it again after `restart_after` (the server
+        // may have moved). Each address gets three checks' worth of handshake attempts (15 s
+        // by default: three REKEY_TIMEOUTs).
+        let (_, addresses) = self.0.endpoint;
+        if !session
+            && (without_session >= restart_after
+                || (addresses > 1 && without_session >= timeout * 3))
+        {
+            self.abandon(if answering {
+                Abandoned::NoHandshake
+            } else {
+                Abandoned::Unanswered
+            });
+            return Err(NetError::InterfaceUnavailable(
+                if answering {
+                    NO_HANDSHAKE
+                } else {
+                    NOT_ANSWERING
+                }
+                .into(),
+            ));
+        }
+        if !answering {
+            if unanswered >= restart_after {
+                // A fresh interface starts over with a new handshake (and source port), at the
+                // endpoint's next address if it has several. Each tunnel must go unanswered
+                // this long first, so restarts are as far apart.
+                self.abandon(Abandoned::Unanswered);
+            } else {
+                // Keep asking, so the check sees the server answer again as soon as it does.
+                if !session {
+                    self.0.interface.request_handshake()?;
+                }
+                self.probes().idle = 0;
+                self.probe(reply_timeout);
+            }
             return Err(NetError::InterfaceUnavailable(NOT_ANSWERING.into()));
         }
         if !session {
@@ -235,9 +368,26 @@ impl Tunnel {
             .min()
             .unwrap_or(Duration::MAX);
         if quiet >= reply_timeout / 2 {
-            self.probe(reply_timeout);
+            let mut probes = self.probes();
+            if let (Some(last), Some(received)) = (probes.last, liveness.received_age) {
+                // An answer to the last probe arrives within `reply_timeout`; anything later is
+                // the application's traffic.
+                if last.elapsed() > received + reply_timeout {
+                    probes.idle = 0;
+                }
+            }
+            let gap = reply_timeout / 2 * 2u32.pow(probes.idle.min(IDLE_PROBE_DOUBLINGS));
+            if probes.last.is_none_or(|last| last.elapsed() >= gap) {
+                probes.idle += 1;
+                drop(probes);
+                self.probe(reply_timeout);
+            }
         }
         Ok(())
+    }
+
+    fn probes(&self) -> MutexGuard<'_, Probes> {
+        self.0.probes.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Waits up to `timeout` for a new handshake.
@@ -265,42 +415,56 @@ impl Tunnel {
         .map_err(|_| NetError::InterfaceUnavailable(NO_HANDSHAKE.into()))?
     }
 
-    /// Sends a query for the root name servers (tiny, answered from any resolver's cache) to
-    /// the tunnel's DNS server, in the background, and keeps its socket for up to `wait` so the
-    /// answer has somewhere to go. The server's WireGuard answers it too, with a keepalive if the
-    /// resolver does not. Without a DNS server only real traffic is judged.
+    /// Sends one tiny packet into the tunnel in the background, unless a probe is still in
+    /// flight, and keeps its socket for up to `wait` so an answer has somewhere to go. The
+    /// server's WireGuard answers any data packet within `KEEPALIVE_TIMEOUT`, with a keepalive if
+    /// nothing else, wherever the packet is addressed, so the probe only has to be routed to the
+    /// server by `AllowedIPs` (see [`probe_target`]): a query for the root name servers (answered
+    /// from any resolver's cache) to the tunnel's DNS server, or else an empty UDP datagram with
+    /// a hop limit of 1 to the discard port, which the server does not forward.
     fn probe(&self, wait: Duration) {
+        let Some(target) = self.0.probe_target else {
+            return;
+        };
+        {
+            let mut probes = self.probes();
+            if probes.in_flight {
+                return;
+            }
+            probes.in_flight = true;
+            probes.last = Some(Instant::now());
+        }
         let tunnel = self.clone();
         tokio::spawn(async move {
             let _ = tokio::time::timeout(wait, async {
-                let addresses = || tunnel.0.interface.address().addresses();
-                let Some((server, local)) = tunnel.0.dns.iter().find_map(|server| {
-                    addresses()
-                        .find(|ip| ip.is_ipv4() == server.is_ipv4())
-                        .map(|local| (*server, local))
-                }) else {
-                    return Ok(());
-                };
-                let socket = tokio_wireguard::UdpSocket::bind(
-                    SocketAddr::new(local, 0),
+                let mut socket = tokio_wireguard::UdpSocket::bind(
+                    SocketAddr::new(target.local, 0),
                     &tunnel.0.interface,
                 )
                 .await?;
-                socket
-                    .send_to(&root_query()?, SocketAddr::new(server, 53))
-                    .await?;
+                if target.dns {
+                    socket.send_to(&root_query()?, target.remote).await?;
+                } else {
+                    socket.set_ttl(1)?;
+                    socket.send_to(&[], target.remote).await?;
+                }
                 let mut response = [0u8; 512];
                 socket.recv_from(&mut response[..]).await?;
                 Ok::<_, NetError>(())
             })
             .await;
+            tunnel.probes().in_flight = false;
         });
     }
 
     /// Connects to `target` inside the tunnel (see [`Tunnel::relay`]).
-    pub(crate) async fn connect(&self, target: SocketAddr) -> Result<TcpStream, NetError> {
+    pub(crate) async fn connect(
+        &self,
+        target: SocketAddr,
+        lease: Option<Lease>,
+    ) -> Result<TcpStream, NetError> {
         let upstream = tokio_wireguard::TcpStream::connect(target, &self.0.interface).await?;
-        self.relay(upstream).await
+        self.relay(upstream, lease).await
     }
 
     /// Listens for incoming connections on the tunnel's own addresses (IPv4, and IPv6 unless
@@ -330,9 +494,12 @@ impl Tunnel {
     /// Preserves the connector's OS `TcpStream` API for a tunnel connection using a private
     /// loopback pair, so peer, lease, and HTTP handling stay unchanged. The accepting side
     /// checks the exact source port we reserved, so another local process cannot take it.
+    /// The relay ends, closing both sides, when the tunnel closes or `lease` is revoked: the
+    /// tunnel side may never answer again, and the relay holds its buffers until it ends.
     pub(crate) async fn relay(
         &self,
         mut upstream: tokio_wireguard::TcpStream,
+        lease: Option<Lease>,
     ) -> Result<TcpStream, NetError> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let client = TcpSocket::new_v4()?;
@@ -349,8 +516,15 @@ impl Tunnel {
         let (client, mut relay) = tokio::try_join!(client.connect(listener.local_addr()?), accept)?;
         let session = self.clone();
         tokio::spawn(async move {
+            let revoked = async {
+                match lease {
+                    Some(mut lease) => lease.revoked().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 () = session.0.interface.closed() => {}
+                () = revoked => {}
                 _ = tokio::io::copy_bidirectional(&mut relay, &mut upstream) => {}
             }
         });
@@ -464,6 +638,118 @@ impl Tunnel {
     }
 }
 
+/// The endpoint's addresses (resolved again on every call), IPv4 first: an IPv6 address
+/// listed first fails on the many networks without IPv6, while IPv4 works almost everywhere.
+async fn endpoint_addresses(endpoint: &str) -> Result<Vec<SocketAddr>, NetError> {
+    #[cfg(test)]
+    if let Some(addresses) = tests::RESOLVE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(endpoint)
+    {
+        return Ok(addresses.clone());
+    }
+    let mut addresses: Vec<SocketAddr> = tokio::net::lookup_host(endpoint).await?.collect();
+    addresses.sort_by_key(SocketAddr::is_ipv6);
+    if addresses.is_empty() {
+        return Err(invalid("the WireGuard endpoint did not resolve"));
+    }
+    Ok(addresses)
+}
+
+/// The tunnel's TCP settings. A listener keeps a socket with full buffers (80 KiB) ready for
+/// each pending connection, so its backlog is 16 rather than 128. A connection whose peer
+/// stops acknowledging for 2 minutes is aborted (keep-alives every 30 s cover idle ones),
+/// since smoltcp otherwise keeps it, and the relay holding it, open forever.
+fn interface_options() -> tokio_wireguard::interface::Options {
+    let mut options = tokio_wireguard::interface::Options::default();
+    options.tcp.backlog = 16;
+    options.tcp.timeout = Some(Duration::from_secs(120));
+    options.tcp.keep_alive = Some(Duration::from_secs(30));
+    options
+}
+
+/// How often the gap between idle probes doubles: from half of the reply timeout to four times
+/// the reply timeout.
+const IDLE_PROBE_DOUBLINGS: u32 = 3;
+
+/// An `AllowedIPs` range (`address/prefix`) as its network address and prefix length.
+fn network(range: &str) -> Option<(IpAddr, u8)> {
+    let (ip, prefix) = range.split_once('/')?;
+    let ip: IpAddr = ip.parse().ok()?;
+    let prefix: u8 = prefix.parse().ok()?;
+    let (bits, width) = bits(ip);
+    let host = u32::from(width.checked_sub(prefix)?);
+    let network = bits
+        .checked_shr(host)
+        .unwrap_or(0)
+        .checked_shl(host)
+        .unwrap_or(0);
+    Some((from_bits(network, ip.is_ipv4()), prefix))
+}
+
+/// An address as a number, and its width in bits.
+fn bits(ip: IpAddr) -> (u128, u8) {
+    match ip {
+        IpAddr::V4(ip) => (u32::from(ip).into(), 32),
+        IpAddr::V6(ip) => (ip.into(), 128),
+    }
+}
+
+fn from_bits(bits: u128, v4: bool) -> IpAddr {
+    if v4 {
+        IpAddr::V4(Ipv4Addr::from(u32::try_from(bits).unwrap_or(u32::MAX)))
+    } else {
+        IpAddr::V6(Ipv6Addr::from(bits))
+    }
+}
+
+fn contains((network, prefix): (IpAddr, u8), ip: IpAddr) -> bool {
+    let ((net, width), (bits, family)) = (bits(network), bits(ip));
+    let host = u32::from(width.saturating_sub(prefix));
+    width == family && net.checked_shr(host).unwrap_or(0) == bits.checked_shr(host).unwrap_or(0)
+}
+
+/// Where the health probe goes: the first DNS server that the tunnel routes to the server (in
+/// `AllowedIPs`, with a tunnel address in its family). Otherwise an address in `AllowedIPs`: a
+/// documentation address (192.0.2.1, `2001:db8::1`) when a range such as `0.0.0.0/0` contains
+/// one, since nothing routes those, or else the first host of the first range, which in a
+/// split tunnel is often the server itself. Never one of the tunnel's own addresses, which
+/// would not leave the tunnel.
+fn probe_target(
+    locals: &[IpAddr],
+    allowed: &[(IpAddr, u8)],
+    dns: &[IpAddr],
+) -> Option<ProbeTarget> {
+    let target = |remote: IpAddr, dns: bool| {
+        if locals.contains(&remote) || !allowed.iter().any(|range| contains(*range, remote)) {
+            return None;
+        }
+        let local = *locals.iter().find(|ip| ip.is_ipv4() == remote.is_ipv4())?;
+        Some(ProbeTarget {
+            local,
+            remote: SocketAddr::new(remote, if dns { 53 } else { 9 }),
+            dns,
+        })
+    };
+    let documentation = [
+        IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+        IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1)),
+    ];
+    dns.iter()
+        .find_map(|server| target(*server, true))
+        .or_else(|| documentation.into_iter().find_map(|ip| target(ip, false)))
+        .or_else(|| {
+            allowed.iter().find_map(|&(network, _)| {
+                let (bits, width) = bits(network);
+                let first = from_bits(bits.saturating_add(1), width == 32);
+                [first, network]
+                    .into_iter()
+                    .find_map(|ip| target(ip, false))
+            })
+        })
+}
+
 /// The header of a recursive query with one question and a random ID.
 fn dns_header() -> Result<Vec<u8>, NetError> {
     let mut id = [0; 2];
@@ -508,29 +794,41 @@ mod tests {
     use crate::wireguard::{WgInterface, WgPeer};
     use crate::{ConnectionState, Network, NetworkConfig, NetworkOptions, Secret};
 
+    /// Test seam: endpoint host names and what they resolve to (see `endpoint_addresses`).
+    pub(super) static RESOLVE: std::sync::LazyLock<
+        Mutex<std::collections::HashMap<String, Vec<SocketAddr>>>,
+    > = std::sync::LazyLock::new(Mutex::default);
+
     fn pair() -> (Interface, WireGuardConfig) {
         let (server_key, server_public) = x25519::keypair();
         let (client_key, client_public) = x25519::keypair();
         let (psk, _) = x25519::keypair();
-        let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        let port = reservation.local_addr().unwrap().port();
-        drop(reservation);
-        let server = Interface::new(config::Config {
-            interface: config::Interface {
-                address: "10.44.0.1/32".parse().unwrap(),
-                listen_port: Some(port),
-                private_key: server_key,
-                mtu: None,
-            },
-            peers: vec![config::Peer {
-                endpoint: None,
-                allowed_ips: vec!["10.44.0.2/32".parse().unwrap()],
-                public_key: client_public,
-                preshared_key: Some(psk.clone()),
-                persistent_keepalive: None,
-            }],
-        })
-        .unwrap();
+        // The port is free when reserved, but a socket in a test running alongside can take it
+        // before the server binds it (the server's socket is dual-stack): pick another then.
+        let (server, port) = (0..20)
+            .find_map(|_| {
+                let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                let port = reservation.local_addr().unwrap().port();
+                drop(reservation);
+                Interface::new(config::Config {
+                    interface: config::Interface {
+                        address: "10.44.0.1/32".parse().unwrap(),
+                        listen_port: Some(port),
+                        private_key: server_key.clone(),
+                        mtu: None,
+                    },
+                    peers: vec![config::Peer {
+                        endpoint: None,
+                        allowed_ips: vec!["10.44.0.2/32".parse().unwrap()],
+                        public_key: client_public,
+                        preshared_key: Some(psk.clone()),
+                        persistent_keepalive: None,
+                    }],
+                })
+                .ok()
+                .map(|server| (server, port))
+            })
+            .unwrap();
         let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
         let client = WireGuardConfig {
             interface: WgInterface {
@@ -785,14 +1083,18 @@ mod tests {
                     });
                 }
             });
-            let tunnel = Tunnel::start(&config).await.unwrap();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
             tunnel
-                .healthy(Duration::from_secs(2), crate::WIREGUARD_REPLY_TIMEOUT)
+                .healthy(
+                    Duration::from_secs(2),
+                    crate::WIREGUARD_REPLY_TIMEOUT,
+                    crate::WIREGUARD_RESTART_AFTER,
+                )
                 .await
                 .unwrap();
             for _ in 0..5 {
                 let stream = tunnel
-                    .connect("10.44.0.1:8080".parse().unwrap())
+                    .connect("10.44.0.1:8080".parse().unwrap(), None)
                     .await
                     .unwrap();
                 drop(stream);
@@ -805,7 +1107,7 @@ mod tests {
                         .resolve("search.torrentplayer.test", 8080, true)
                         .await
                         .unwrap()[0];
-                    let mut stream = t.connect(addr).await.unwrap();
+                    let mut stream = t.connect(addr, None).await.unwrap();
                     stream.write_all(b"hello").await.unwrap();
                     let mut buf = [0; 5];
                     stream.read_exact(&mut buf).await.unwrap();
@@ -843,9 +1145,13 @@ mod tests {
                 stream.write_all(&bytes).await.unwrap();
                 let _ = stream.shutdown().await;
             });
-            let tunnel = Tunnel::start(&config).await.unwrap();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
             tunnel
-                .healthy(Duration::from_secs(2), crate::WIREGUARD_REPLY_TIMEOUT)
+                .healthy(
+                    Duration::from_secs(2),
+                    crate::WIREGUARD_REPLY_TIMEOUT,
+                    crate::WIREGUARD_RESTART_AFTER,
+                )
                 .await
                 .unwrap();
             for _ in 0..80 {
@@ -875,7 +1181,7 @@ mod tests {
                 .resolve("search.torrentplayer.test", 8080, true)
                 .await
                 .unwrap()[0];
-            let mut stream = tunnel.connect(address).await.unwrap();
+            let mut stream = tunnel.connect(address, None).await.unwrap();
             stream.write_all(b"hello").await.unwrap();
             let mut reply = [0; 5];
             stream.read_exact(&mut reply).await.unwrap();
@@ -949,14 +1255,44 @@ mod tests {
     const DROP_DATA: u8 = 1;
     const DROP_ALL: u8 = 2;
 
+    /// What [`relay`] saw the client send.
+    #[derive(Default)]
+    struct Traffic {
+        /// Transport data packets other than keepalives (32 bytes): probes, when the
+        /// application sends nothing.
+        data: std::sync::atomic::AtomicUsize,
+        /// Keepalives (transport packets of 32 bytes).
+        keepalives: std::sync::atomic::AtomicUsize,
+        /// When each tunnel (a new sender index) sent its first handshake initiation.
+        tunnels: Mutex<Vec<(u32, tokio::time::Instant)>>,
+        /// The latest handshake initiation, and the address it came from.
+        init: Mutex<Option<(Vec<u8>, SocketAddr)>>,
+    }
+
+    impl Traffic {
+        fn data(&self) -> usize {
+            self.data.load(Ordering::SeqCst)
+        }
+
+        fn tunnels(&self) -> Vec<tokio::time::Instant> {
+            self.tunnels
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, at)| *at)
+                .collect()
+        }
+    }
+
     /// A UDP relay in front of the WireGuard test server at `server`, filtered by `mode`. Returns
-    /// the endpoint for the client.
-    async fn relay(server: SocketAddr, mode: Arc<std::sync::atomic::AtomicU8>) -> SocketAddr {
-        use std::sync::atomic::Ordering;
+    /// the endpoint for the client, and what the client sent.
+    async fn relay(server: SocketAddr, mode: Arc<AtomicU8>) -> (SocketAddr, Arc<Traffic>) {
         let outside = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let inside = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         inside.connect(server).await.unwrap();
         let endpoint = outside.local_addr().unwrap();
+        let traffic = Arc::new(Traffic::default());
+        let seen = Arc::clone(&traffic);
         tokio::spawn(async move {
             let passes = |packet: &[u8]| match mode.load(Ordering::SeqCst) {
                 PASS_ALL => true,
@@ -970,6 +1306,25 @@ mod tests {
                 tokio::select! {
                     Ok((n, from)) = outside.recv_from(&mut up) => {
                         client = Some(from);
+                        match up[0] {
+                            // A handshake initiation: the upper 24 bits of the sender index
+                            // name the tunnel.
+                            1 if n >= 8 => {
+                                let index = u32::from_le_bytes(up[4..8].try_into().unwrap()) >> 8;
+                                let mut tunnels = seen.tunnels.lock().unwrap();
+                                if tunnels.iter().all(|(known, _)| *known != index) {
+                                    tunnels.push((index, tokio::time::Instant::now()));
+                                }
+                                *seen.init.lock().unwrap() = Some((up[..n].to_vec(), from));
+                            }
+                            4 if n > 32 => {
+                                seen.data.fetch_add(1, Ordering::SeqCst);
+                            }
+                            4 => {
+                                seen.keepalives.fetch_add(1, Ordering::SeqCst);
+                            }
+                            _ => {}
+                        }
                         if passes(&up[..n]) {
                             let _ = inside.send(&up[..n]).await;
                         }
@@ -982,7 +1337,7 @@ mod tests {
                 }
             }
         });
-        endpoint
+        (endpoint, traffic)
     }
 
     /// Answers every DNS query on the test server with 10.44.0.1.
@@ -1034,6 +1389,437 @@ mod tests {
         }
     }
 
+    /// Starts a network for `config` through a relay in front of its endpoint.
+    async fn through_relay(
+        mut config: WireGuardConfig,
+        options: NetworkOptions,
+    ) -> (Network, Arc<AtomicU8>, Arc<Traffic>) {
+        let mode = Arc::new(AtomicU8::new(PASS_ALL));
+        let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
+        let (endpoint, traffic) = relay(target, Arc::clone(&mode)).await;
+        config.peers[0].endpoint = endpoint.to_string();
+        let net = Network::start(
+            NetworkConfig {
+                mode: crate::NetworkMode::WireGuard(config),
+                allow_ipv6: false,
+                hold: None,
+            },
+            options,
+        )
+        .await
+        .unwrap();
+        (net, mode, traffic)
+    }
+
+    /// The tunnel engages the kill switch when the server stops answering and resumes by
+    /// itself when it answers again, with `dns` as the configuration's DNS servers, in a split
+    /// tunnel (`AllowedIPs` 10.44.0.0/24).
+    async fn recovers_without_the_dns_probe(dns: &[&str]) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (server, mut config) = pair();
+            config.interface.dns = dns.iter().map(|ip| (*ip).to_owned()).collect();
+            config.peers[0].allowed_ips = vec!["10.44.0.0/24".into()];
+            let reply_timeout = Duration::from_secs(1);
+            let (net, mode, traffic) = through_relay(config, health_options(reply_timeout)).await;
+            assert_eq!(
+                net.settled(Duration::from_secs(3)).await.state,
+                ConnectionState::Connected
+            );
+            // Idle: probed, and the probes are answered.
+            tokio::time::sleep(reply_timeout * 3).await;
+            assert_eq!(net.status().state, ConnectionState::Connected);
+            assert!(traffic.data() > 0, "the idle tunnel was never probed");
+
+            // The server stops answering while the application sends something.
+            mode.store(DROP_DATA, Ordering::SeqCst);
+            let target: SocketAddr = "10.44.0.1:6969".parse().unwrap();
+            let (socket, _lease) = net.udp_socket(target).await.unwrap();
+            socket.send_to(b"tracker request", target).await.unwrap();
+            let state = wait_for(&net, |s| {
+                matches!(s, ConnectionState::KillSwitchActive { .. })
+            })
+            .await;
+            assert_eq!(
+                state,
+                ConnectionState::KillSwitchActive {
+                    reason: shown(NOT_ANSWERING)
+                }
+            );
+            tokio::time::sleep(reply_timeout * 2).await;
+            assert!(!net.status().traffic_allowed);
+
+            // The kill switch blocks the application: only probes are sent, and they are enough.
+            mode.store(PASS_ALL, Ordering::SeqCst);
+            tokio::time::timeout(
+                reply_timeout * 5,
+                wait_for(&net, |s| *s == ConnectionState::Connected),
+            )
+            .await
+            .expect("traffic did not resume after the server answered again");
+            assert!(net.status().traffic_allowed);
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_kill_switch_ends_tunnel_relays_the_application_still_holds() {
+        // The relay between the application's loopback stream and the tunnel connection used
+        // to outlive its lease: with the server silent, it never ended, and the application's
+        // side stayed open.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let (server, config) = pair();
+            let listener = tokio_wireguard::TcpListener::bind("10.44.0.1:8080", &server)
+                .await
+                .unwrap();
+            let held = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4];
+                stream.read_exact(&mut bytes).await.unwrap();
+                // Keeps the connection open and never answers again.
+                std::future::pending::<()>().await;
+            });
+            let reply_timeout = Duration::from_secs(1);
+            let (net, mode, _) = through_relay(config, health_options(reply_timeout)).await;
+            assert_eq!(
+                net.settled(Duration::from_secs(3)).await.state,
+                ConnectionState::Connected
+            );
+            let (mut stream, _lease) = net
+                .connect("10.44.0.1:8080".parse().unwrap())
+                .await
+                .unwrap();
+            stream.write_all(b"ping").await.unwrap();
+
+            mode.store(DROP_DATA, Ordering::SeqCst);
+            wait_for(&net, |s| {
+                matches!(s, ConnectionState::KillSwitchActive { .. })
+            })
+            .await;
+            let mut bytes = [0; 16];
+            let read = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut bytes))
+                .await
+                .expect("the relay outlived its lease");
+            assert!(read.is_err() || read.unwrap() == 0);
+            held.abort();
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recovers_without_a_dns_server() {
+        recovers_without_the_dns_probe(&[]).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recovers_with_a_dns_server_outside_allowed_ips() {
+        recovers_without_the_dns_probe(&["192.0.2.53"]).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn recovers_with_a_dns_server_in_another_ip_family() {
+        recovers_without_the_dns_probe(&["fd00::53"]).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_idle_healthy_tunnel_stays_connected_and_probes_less_and_less() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let (server, config) = pair();
+            let dns = dns_server(&server).await;
+            let reply_timeout = Duration::from_secs(1);
+            let (net, _mode, traffic) = through_relay(config, health_options(reply_timeout)).await;
+            assert_eq!(
+                net.settled(Duration::from_secs(3)).await.state,
+                ConnectionState::Connected
+            );
+            let before = traffic.data();
+            // Gaps of 0.5, 1, 2, then 4 s (at most): probes at about 0.5, 1.5, 3.5, and 7.5 s.
+            // Checked every 100 ms, the old schedule probed about every 0.6 s.
+            tokio::time::sleep(Duration::from_secs(8)).await;
+            let probes = traffic.data() - before;
+            assert!((2..=6).contains(&probes), "{probes} idle probes in 8 s");
+            assert_eq!(net.status().state, ConnectionState::Connected);
+            assert!(
+                net.status()
+                    .events
+                    .iter()
+                    .all(|e| !e.message.starts_with("Connection lost"))
+            );
+            dns.abort();
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tunnel_left_unanswered_is_restarted_at_most_once_per_restart_interval() {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            let (server, config) = pair();
+            let dns = dns_server(&server).await;
+            let reply_timeout = Duration::from_secs(1);
+            let restart_after = Duration::from_secs(3);
+            let (net, mode, traffic) = through_relay(
+                config,
+                NetworkOptions {
+                    wireguard_restart_after: restart_after,
+                    ..health_options(reply_timeout)
+                },
+            )
+            .await;
+            assert_eq!(
+                net.settled(Duration::from_secs(3)).await.state,
+                ConnectionState::Connected
+            );
+            assert_eq!(traffic.tunnels().len(), 1);
+
+            mode.store(DROP_DATA, Ordering::SeqCst);
+            wait_for(&net, |s| {
+                matches!(s, ConnectionState::KillSwitchActive { .. })
+            })
+            .await;
+            // Two restarts, restart_after apart. Each new tunnel completes its handshake but
+            // stays blocked: the server still answers no traffic.
+            while traffic.tunnels().len() < 3 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                assert_eq!(
+                    net.status().state,
+                    ConnectionState::KillSwitchActive {
+                        reason: shown(NOT_ANSWERING)
+                    }
+                );
+            }
+            let tunnels = traffic.tunnels();
+            assert!(tunnels[2] - tunnels[1] + Duration::from_millis(100) >= restart_after);
+            assert!(
+                !net.status()
+                    .events
+                    .iter()
+                    .any(|e| e.message.starts_with("Connection restored"))
+            );
+
+            mode.store(PASS_ALL, Ordering::SeqCst);
+            tokio::time::timeout(
+                reply_timeout * 5,
+                wait_for(&net, |s| *s == ConnectionState::Connected),
+            )
+            .await
+            .expect("traffic did not resume after the server answered again");
+            assert!(net.status().traffic_allowed);
+            dns.abort();
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_probe_that_nothing_routes_is_answered_by_the_servers_keepalive() {
+        // No DNS and AllowedIPs 0.0.0.0/0: the probe goes to 192.0.2.1, which the test server
+        // drops. Its WireGuard still answers within KEEPALIVE_TIMEOUT (10 s).
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let (server, mut config) = pair();
+            config.interface.dns.clear();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
+            assert_eq!(
+                tunnel.0.probe_target.unwrap().remote,
+                "192.0.2.1:9".parse().unwrap()
+            );
+            tunnel
+                .healthy(
+                    Duration::from_secs(2),
+                    crate::WIREGUARD_REPLY_TIMEOUT,
+                    crate::WIREGUARD_RESTART_AFTER,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                tunnel.0.interface.liveness().await.unwrap().received_age,
+                None
+            );
+            // boringtun's timers count in ticks (100 ms here): a packet received in the tick
+            // in which the server sent its handshake response does not count as unanswered.
+            // Real probes come at least half a reply timeout after the last handshake.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            tunnel.probe(crate::WIREGUARD_REPLY_TIMEOUT);
+            loop {
+                let liveness = tunnel.0.interface.liveness().await.unwrap();
+                if liveness.unanswered.is_none() && liveness.received_age.is_some() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            tunnel.close();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn probes_go_where_allowed_ips_route_them_to_the_server() {
+        let ip = |text: &str| text.parse::<IpAddr>().unwrap();
+        let target = |locals: &[&str], allowed: &[&str], dns: &[&str]| {
+            probe_target(
+                &locals.iter().map(|l| ip(l)).collect::<Vec<_>>(),
+                &allowed
+                    .iter()
+                    .map(|a| network(a).unwrap())
+                    .collect::<Vec<_>>(),
+                &dns.iter().map(|d| ip(d)).collect::<Vec<_>>(),
+            )
+            .map(|t| (t.local, t.remote.to_string(), t.dns))
+        };
+        let v4 = ip("10.64.0.2");
+        // The DNS server, when it is routed into the tunnel and the tunnel has its family.
+        assert_eq!(
+            target(&["10.64.0.2"], &["0.0.0.0/0"], &["10.64.0.1"]),
+            Some((v4, "10.64.0.1:53".into(), true))
+        );
+        assert_eq!(
+            target(
+                &["10.64.0.2", "fd00::2"],
+                &["0.0.0.0/0", "::/0"],
+                &["fd00::1"]
+            ),
+            Some((ip("fd00::2"), "[fd00::1]:53".into(), true))
+        );
+        // Otherwise a documentation address, which nothing routes...
+        assert_eq!(
+            target(&["10.64.0.2"], &["0.0.0.0/0"], &[]),
+            Some((v4, "192.0.2.1:9".into(), false))
+        );
+        assert_eq!(
+            target(&["10.64.0.2"], &["0.0.0.0/1", "128.0.0.0/1"], &["fd00::1"]),
+            Some((v4, "192.0.2.1:9".into(), false))
+        );
+        assert_eq!(
+            target(&["fd00::2"], &["::/0"], &["10.64.0.1"]),
+            Some((ip("fd00::2"), "[2001:db8::1]:9".into(), false))
+        );
+        // ...or the first host of a split tunnel's first range, not the tunnel's own address.
+        assert_eq!(
+            target(
+                &["10.64.0.2"],
+                &["10.64.0.0/16", "10.65.0.0/16"],
+                &["192.168.1.1"]
+            ),
+            Some((v4, "10.64.0.1:9".into(), false))
+        );
+        assert_eq!(
+            target(&["10.64.0.1"], &["10.64.0.0/24"], &[]),
+            Some((ip("10.64.0.1"), "10.64.0.0:9".into(), false))
+        );
+        assert_eq!(
+            target(&["10.64.0.2"], &["fd00::/64", "10.0.0.7/32"], &[]),
+            Some((v4, "10.0.0.7:9".into(), false))
+        );
+        // Nothing the tunnel could send.
+        assert_eq!(target(&["10.64.0.2"], &["fd00::/64"], &["fd00::1"]), None);
+        assert_eq!(target(&["10.64.0.2"], &["10.64.0.2/32"], &[]), None);
+        // Host bits in an AllowedIPs entry are ignored.
+        assert_eq!(network("10.64.3.9/16"), Some((ip("10.64.0.0"), 16)));
+        assert_eq!(network("10.64.3.9/33"), None);
+    }
+
+    /// Starts a network whose endpoint is `host`, resolving (through the test seam) to
+    /// `addresses`.
+    async fn with_endpoint(
+        mut config: WireGuardConfig,
+        host: &str,
+        addresses: Vec<SocketAddr>,
+        options: NetworkOptions,
+    ) -> Network {
+        RESOLVE.lock().unwrap().insert(host.to_owned(), addresses);
+        config.peers[0].endpoint = host.to_owned();
+        Network::start(
+            NetworkConfig {
+                mode: crate::NetworkMode::WireGuard(config),
+                allow_ipv6: false,
+                hold: None,
+            },
+            options,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_endpoint_address_that_never_handshakes_moves_on_to_the_next() {
+        // Only the first resolved address was ever used: a host name whose first address is
+        // unreachable (IPv6 on an IPv4-only network, a dead server) never connected.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let (server, config) = pair();
+            let live: SocketAddr = config.peers[0].endpoint.parse().unwrap();
+            let net = with_endpoint(
+                config,
+                "failover.torrentplayer.test:51820",
+                vec![silent.local_addr().unwrap(), live],
+                health_options(Duration::from_secs(1)),
+            )
+            .await;
+            wait_for(&net, |s| *s == ConnectionState::Connected).await;
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tunnel_without_a_session_resolves_its_endpoint_again() {
+        // The endpoint was resolved only when the tunnel started; a server that moved to a
+        // new address was never found again.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let (server, config) = pair();
+            let live: SocketAddr = config.peers[0].endpoint.parse().unwrap();
+            let host = "moved.torrentplayer.test:51820";
+            let net = with_endpoint(
+                config,
+                host,
+                vec![silent.local_addr().unwrap()],
+                NetworkOptions {
+                    wireguard_restart_after: Duration::from_secs(2),
+                    ..health_options(Duration::from_secs(1))
+                },
+            )
+            .await;
+            assert!(matches!(
+                net.settled(Duration::from_secs(3)).await.state,
+                ConnectionState::KillSwitchActive { .. }
+            ));
+            RESOLVE.lock().unwrap().insert(host.to_owned(), vec![live]);
+            wait_for(&net, |s| *s == ConnectionState::Connected).await;
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn endpoint_addresses_list_ipv4_first() {
+        let addresses = endpoint_addresses("localhost:51820").await.unwrap();
+        assert!(!addresses.is_empty());
+        assert!(
+            addresses.is_sorted_by_key(SocketAddr::is_ipv6),
+            "{addresses:?}"
+        );
+        assert_eq!(
+            endpoint_addresses("[::1]:51820").await.unwrap(),
+            vec!["[::1]:51820".parse::<SocketAddr>().unwrap()]
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_server_that_never_answers_never_counts_as_connected() {
         // Everything sent to this endpoint is dropped.
@@ -1080,9 +1866,9 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(30), async {
             let (server, mut config) = pair();
             let dns = dns_server(&server).await;
-            let mode = Arc::new(std::sync::atomic::AtomicU8::new(PASS_ALL));
+            let mode = Arc::new(AtomicU8::new(PASS_ALL));
             let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
-            config.peers[0].endpoint = relay(target, Arc::clone(&mode)).await.to_string();
+            config.peers[0].endpoint = relay(target, Arc::clone(&mode)).await.0.to_string();
             let reply_timeout = Duration::from_secs(1);
             let net = Network::start(
                 NetworkConfig {
@@ -1108,10 +1894,11 @@ mod tests {
             assert!(lease.is_valid());
 
             // The server keeps completing handshakes but answers no traffic, as in #60.
-            mode.store(DROP_DATA, std::sync::atomic::Ordering::SeqCst);
+            mode.store(DROP_DATA, Ordering::SeqCst);
             let lost = tokio::time::Instant::now();
             let state = wait_for(&net, |s| *s != ConnectionState::Connected).await;
-            assert!(lost.elapsed() >= reply_timeout);
+            // A probe sent just before the switch may be the one left unanswered.
+            assert!(lost.elapsed() + Duration::from_millis(250) >= reply_timeout);
             assert!(matches!(
                 state,
                 ConnectionState::Reconnecting { reason }
@@ -1137,10 +1924,10 @@ mod tests {
             assert!(!net.status().traffic_allowed);
 
             // Silent altogether, then answering again: traffic resumes by itself.
-            mode.store(DROP_ALL, std::sync::atomic::Ordering::SeqCst);
+            mode.store(DROP_ALL, Ordering::SeqCst);
             tokio::time::sleep(reply_timeout).await;
             assert!(!net.status().traffic_allowed);
-            mode.store(PASS_ALL, std::sync::atomic::Ordering::SeqCst);
+            mode.store(PASS_ALL, Ordering::SeqCst);
             wait_for(&net, |s| *s == ConnectionState::Connected).await;
             assert!(net.status().traffic_allowed);
             assert!(
@@ -1220,9 +2007,13 @@ mod tests {
                 stream.write_all(&answer).await.unwrap();
                 let _ = stream.shutdown().await;
             });
-            let tunnel = Tunnel::start(&config).await.unwrap();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
             tunnel
-                .healthy(Duration::from_secs(3), crate::WIREGUARD_REPLY_TIMEOUT)
+                .healthy(
+                    Duration::from_secs(3),
+                    crate::WIREGUARD_REPLY_TIMEOUT,
+                    crate::WIREGUARD_RESTART_AFTER,
+                )
                 .await
                 .unwrap();
             let addresses = tunnel
@@ -1242,16 +2033,209 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dns_search_domains_are_ignored() {
+        // A provider configuration with a search domain was accepted on import but refused
+        // when the tunnel started ("WireGuard DNS servers must be IP addresses").
+        let (server, mut config) = pair();
+        config.interface.dns = vec!["10.44.0.1".into(), "corp.example".into()];
+        validate(&config).unwrap();
+        let tunnel = Tunnel::start(&config, None).await.unwrap();
+        assert_eq!(tunnel.0.dns, ["10.44.0.1".parse::<IpAddr>().unwrap()]);
+        tunnel.close();
+        server.close();
+    }
+
+    #[tokio::test]
     async fn missing_dns_never_falls_back_to_the_system_resolver() {
         let (server, mut config) = pair();
         config.interface.dns.clear();
-        let tunnel = Tunnel::start(&config).await.unwrap();
+        let tunnel = Tunnel::start(&config, None).await.unwrap();
         assert!(matches!(
             tunnel.resolve("api.ipify.org", 443, true).await,
             Err(NetError::InvalidConfig(_))
         ));
         tunnel.close();
         server.close();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_forged_cookie_reply_does_not_move_the_tunnel_to_its_sender() {
+        // Anyone who knows the server's public key and sees an initiation can make a valid
+        // cookie reply (its key comes from the public key). The tunnel used to roam to the
+        // sender of any message it accepted, so traffic then went to the forger.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let (server, mut config) = pair();
+            let server_public: [u8; 32] = base64::engine::general_purpose::STANDARD
+                .decode(&config.peers[0].public_key)
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let mode = Arc::new(AtomicU8::new(PASS_ALL));
+            let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
+            let (endpoint, traffic) = relay(target, Arc::clone(&mode)).await;
+            config.peers[0].endpoint = endpoint.to_string();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
+            tunnel
+                .healthy(
+                    Duration::from_secs(2),
+                    crate::WIREGUARD_REPLY_TIMEOUT,
+                    crate::WIREGUARD_RESTART_AFTER,
+                )
+                .await
+                .unwrap();
+
+            // A rekey the server does not answer yet, so the client waits for a reply.
+            mode.store(DROP_ALL, Ordering::SeqCst);
+            *traffic.init.lock().unwrap() = None;
+            tunnel.0.interface.request_handshake().unwrap();
+            let (init, client) = loop {
+                if let Some(init) = traffic.init.lock().unwrap().clone() {
+                    break init;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            };
+            // A limiter of 0 is always under load, so it answers with a cookie reply.
+            let limiter = boringtun::noise::rate_limiter::RateLimiter::new(
+                &x25519::PublicKey::from(server_public),
+                0,
+            );
+            let mut reply = [0u8; 64];
+            let Err(boringtun::noise::TunnResult::WriteToNetwork(cookie)) =
+                limiter.verify_packet(Some(client.ip()), &init, &mut reply)
+            else {
+                panic!("no cookie reply");
+            };
+            let forger = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            forger.send_to(cookie, client).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // Traffic in the current session still goes to the server.
+            mode.store(PASS_ALL, Ordering::SeqCst);
+            let before = traffic.data();
+            let socket = tokio_wireguard::UdpSocket::bind("10.44.0.2:0", &tunnel.0.interface)
+                .await
+                .unwrap();
+            socket
+                .send_to(b"tracker request", "10.44.0.1:6969")
+                .await
+                .unwrap();
+            let mut bytes = [0u8; 256];
+            assert!(
+                tokio::time::timeout(Duration::from_secs(1), forger.recv_from(&mut bytes))
+                    .await
+                    .is_err(),
+                "tunnel traffic went to the forger"
+            );
+            assert!(traffic.data() > before);
+            tunnel.close();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_flood_of_incoming_datagrams_does_not_stall_the_tunnels_timers() {
+        // The interface loop chose a readable socket over its WireGuard timers, so while
+        // datagrams kept arriving no keepalive, handshake, or rekey was sent.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (server, mut config) = pair();
+            let mode = Arc::new(AtomicU8::new(PASS_ALL));
+            let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
+            let (endpoint, traffic) = relay(target, Arc::clone(&mode)).await;
+            config.peers[0].endpoint = endpoint.to_string();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
+            tunnel
+                .healthy(
+                    Duration::from_secs(2),
+                    crate::WIREGUARD_REPLY_TIMEOUT,
+                    crate::WIREGUARD_RESTART_AFTER,
+                )
+                .await
+                .unwrap();
+            let (_, client) = traffic.init.lock().unwrap().clone().unwrap();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flood = std::thread::spawn({
+                let stop = Arc::clone(&stop);
+                move || {
+                    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                    let junk = [4u8; 96];
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = socket.send_to(&junk, client);
+                    }
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let before = traffic.keepalives.load(Ordering::SeqCst);
+            let started = tokio::time::Instant::now();
+            // Persistent keepalive is 1 s in the test configuration.
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            let keepalives = traffic.keepalives.load(Ordering::SeqCst) - before;
+            let liveness =
+                tokio::time::timeout(Duration::from_secs(1), tunnel.0.interface.liveness()).await;
+            stop.store(true, Ordering::Relaxed);
+            flood.join().unwrap();
+            assert!(
+                keepalives >= 2,
+                "{keepalives} keepalives in {:?}",
+                started.elapsed()
+            );
+            assert!(
+                liveness.is_ok(),
+                "the interface did not answer during the flood"
+            );
+            tunnel.close();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_random_port_that_is_taken_moves_on_to_the_next_free_one() {
+        // With 1024 of the 16382 ephemeral ports taken, each random pick has a 1 in 16 chance
+        // of starting on a taken port. That used to fail the bind at once ("not a suitable
+        // bind address"); 300 binds hit it with near certainty.
+        let (key, _) = x25519::keypair();
+        let (_, peer) = x25519::keypair();
+        let mut options = tokio_wireguard::interface::Options::default();
+        options.udp.recv_buffer_size = 1024;
+        options.udp.send_buffer_size = 1024;
+        let interface = Interface::new_with(
+            config::Config {
+                interface: config::Interface {
+                    address: "10.44.0.2/32".parse().unwrap(),
+                    listen_port: None,
+                    private_key: key,
+                    mtu: None,
+                },
+                peers: vec![config::Peer {
+                    endpoint: None,
+                    allowed_ips: vec!["10.44.0.1/32".parse().unwrap()],
+                    public_key: peer,
+                    preshared_key: None,
+                    persistent_keepalive: None,
+                }],
+            },
+            options,
+        )
+        .unwrap();
+        let mut taken = Vec::new();
+        for port in (49152u16..).step_by(16).take(1024) {
+            taken.push(
+                tokio_wireguard::UdpSocket::bind(("10.44.0.2", port), &interface)
+                    .await
+                    .unwrap(),
+            );
+        }
+        for _ in 0..300 {
+            let socket = tokio_wireguard::UdpSocket::bind("10.44.0.2:0", &interface)
+                .await
+                .expect("a free port was available");
+            assert_ne!(socket.local_addr().unwrap().port() % 16, 0);
+        }
+        drop(taken);
+        interface.close();
     }
 
     #[test]
