@@ -588,7 +588,7 @@
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.floor((progress ?? 0) * 100)}
-          ><span style:width={`${String((progress ?? 0) * 100)}%`}></span></span
+          ><span style:transform={`scaleX(${String(progress ?? 0)})`}></span></span
         >
       {:else if row.item !== null}
         <span class="bar placeholder" aria-hidden="true"></span>
@@ -968,11 +968,13 @@
     height: 3px;
   }
 
+  /* Scaled, not sized, and not animated: a width transition lays out and repaints the panel at
+     the display's refresh rate for most of every 1 s update. */
   .bar > span {
     display: block;
     height: 100%;
     background: #6b6b78;
-    transition: width 0.8s linear;
+    transform-origin: left;
   }
 
   .bar.playable {

@@ -247,15 +247,33 @@
   /** What each queued item downloads in the background, and how the link is shared. */
   let downloads = $state.raw<DownloadsSnapshot | null>(null);
 
-  // Background downloads are read every second while the queue is on screen.
+  /** Whether the window is on screen (not minimized): the queue's polls stop while it is not. */
+  let pageVisible = $state(document.visibilityState === 'visible');
   $effect(() => {
-    if (!queueShown) {
+    const follow = (): void => {
+      pageVisible = document.visibilityState === 'visible';
+    };
+    document.addEventListener('visibilitychange', follow);
+    return () => {
+      document.removeEventListener('visibilitychange', follow);
+    };
+  });
+
+  // Background downloads are read every second while the queue is on screen. A snapshot equal
+  // to the last one is dropped, so idle rows (paused, finished) don't re-render every second.
+  $effect(() => {
+    if (!queueShown || !pageVisible) {
       return;
     }
+    let last = '';
     const refresh = (): void => {
       queueDownloads().then(
         (snapshot) => {
-          downloads = snapshot;
+          const json = JSON.stringify(snapshot);
+          if (json !== last) {
+            last = json;
+            downloads = snapshot;
+          }
         },
         () => undefined,
       );
@@ -269,7 +287,7 @@
 
   // Readiness is read every few seconds while the queue is on screen.
   $effect(() => {
-    if (!queueShown) {
+    if (!queueShown || !pageVisible) {
       return;
     }
     untrack(() => void refreshReadiness());
