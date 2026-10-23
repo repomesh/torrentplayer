@@ -35,6 +35,18 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Tests
         run: cargo test --workspace --all-features --locked
+      # The vendored crates are outside the workspace, so the step above skips their own tests.
+      # Each has a Cargo.lock with the workspace's versions: after changing Cargo.lock, copy it
+      # into vendor/<crate>/ and run `cargo metadata --offline` there to drop what it does not
+      # use. Examples are skipped (librqbit-dht's needs a tracing-subscriber feature it does not
+      # enable).
+      - name: Tests (vendored crates)
+        shell: bash
+        run: |
+          for crate in librqbit-dht librqbit-tracker-comms tokio-wireguard; do
+            cargo test --locked --manifest-path "vendor/$crate/Cargo.toml" \
+              --target-dir target/vendor --lib --tests
+          done
       - name: Check generated IPC bindings are committed
         shell: bash
         run: |
