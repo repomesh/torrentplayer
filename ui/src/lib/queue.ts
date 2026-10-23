@@ -355,43 +355,35 @@ export function moveBy(queue: Queue, id: string, delta: number): Queue {
 }
 
 /**
- * Puts the cursor on an item (it is playing now), or clears it with `null`. Items jumped over
- * are marked skipped rather than played, and directly playing a skipped item includes it again.
+ * Puts the cursor on an item (it is playing now), or clears it with `null`. Only the cursor
+ * moves: no item's flags change (only the user skips, pauses, or removes items).
  */
 export function setCurrent(queue: Queue, id: string | null): Queue {
   if (id !== null && !queue.items.some((i) => i.id === id)) {
     return queue;
   }
-  if (id === null) {
-    return queue.current === null ? queue : { ...queue, current: null };
-  }
-  const from = currentIndex(queue);
-  const to = queue.items.findIndex((i) => i.id === id);
-  let changed = queue.current !== id;
-  const items = queue.items.map((item, index) => {
-    if (item.id === id && item.skipped) {
-      changed = true;
-      return { ...item, skipped: false };
-    }
-    if (from < index && index < to && !item.played && !item.skipped) {
-      changed = true;
-      return { ...item, skipped: true };
-    }
-    return item;
-  });
-  return changed ? { ...queue, items, current: id } : queue;
+  return queue.current === id ? queue : { ...queue, current: id };
 }
 
-/** Records that a video reached its end, and includes it again if it had been skipped. */
+/** Records that a video reached its end. Its other flags stay as the user left them. */
 export function markPlayed(queue: Queue, id: string): Queue {
   const item = queue.items.find((i) => i.id === id);
-  if (item === undefined || (item.played && !item.skipped)) {
+  if (item === undefined || item.played) {
     return queue;
   }
   return {
     ...queue,
-    items: queue.items.map((i) => (i.id === id ? { ...i, played: true, skipped: false } : i)),
+    items: queue.items.map((i) => (i.id === id ? { ...i, played: true } : i)),
   };
+}
+
+/**
+ * What a video reaching its end does to the queue: its item (`id`, if it came from the queue)
+ * is marked played and the cursor stays on it. Nothing plays next on its own: the user picks
+ * the next video.
+ */
+export function playbackEnded(queue: Queue, id: string | null): Queue {
+  return id === null ? queue : markPlayed(queue, id);
 }
 
 /**
@@ -521,6 +513,7 @@ export function sanitizeQueue(value: unknown): Queue {
   const { queue } = enqueue(emptyQueue(), merged.items);
   const order: DownloadOrder =
     'order' in value && value.order === 'fastest' ? 'fastest' : 'inOrder';
+  // Only the cursor is restored (if it still names an item); no item's flags change.
   return setCurrent({ ...queue, order }, merged.current);
 }
 

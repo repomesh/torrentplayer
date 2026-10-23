@@ -26,6 +26,7 @@ import {
   move,
   moveBy,
   nextItem,
+  playbackEnded,
   remove,
   removeItem,
   restoreRemoved,
@@ -135,28 +136,53 @@ describe('the cursor', () => {
     expect(remove(q, 'missing')).toBe(q);
   });
 
-  it('records watched items separately and clears only those, retaining skipped items', () => {
+  it('records watched items separately and clears only those', () => {
     let q = setCurrent(queueOf('a', 'b', 'c'), 'c');
-    expect(q.items.map((i) => i.skipped)).toEqual([true, true, false]);
     q = markPlayed(q, 'a');
     expect(isPlayed(q, 'a')).toBe(true);
-    expect(q.items[0]?.skipped).toBe(false);
+    expect(markPlayed(q, 'a')).toBe(q);
     expect(ids(clearPlayed(q))).toEqual(['b', 'c']);
-    expect(clearPlayed(q).items[0]?.skipped).toBe(true);
     expect(clearPlayed(queueOf('a'))).toEqual(queueOf('a'));
+    expect(markPlayed(q, 'missing')).toBe(q);
   });
 
-  it('marks only entries passed over when the cursor jumps ahead', () => {
+  it('moves only the cursor: items jumped over are not skipped', () => {
     let q = setCurrent(queueOf('a', 'b', 'c', 'd'), 'a');
     q = setCurrent(q, 'd');
-    expect(q.items.map((i) => [i.id, i.skipped])).toEqual([
-      ['a', false],
-      ['b', true],
-      ['c', true],
-      ['d', false],
+    expect(q.current).toBe('d');
+    expect(q.items).toEqual(queueOf('a', 'b', 'c', 'd').items);
+    // Back to an earlier item: nothing changes but the cursor either.
+    expect(setCurrent(q, 'b').items).toBe(q.items);
+    expect(setCurrent(q, 'd')).toBe(q);
+  });
+
+  it('keeps the user’s skip when a skipped item is played or reaches its end', () => {
+    let q = setSkipped(queueOf('a', 'b'), ['b'], true);
+    q = setCurrent(q, 'b');
+    expect(q.items[1]?.skipped).toBe(true);
+    q = markPlayed(q, 'b');
+    expect(q.items[1]).toMatchObject({ played: true, skipped: true });
+  });
+
+  it('marks a video played when it ends, and plays nothing next on its own', () => {
+    const q = setCurrent(queueOf('a', 'b', 'c'), 'a');
+    const after = playbackEnded(q, 'a');
+    expect(after.current).toBe('a');
+    expect(after.items.map((i) => i.played)).toEqual([true, false, false]);
+    // `b` is still what "Play next" would pick, but only when the user asks.
+    expect(nextItem(after)?.id).toBe('b');
+    expect(playbackEnded(q, null)).toBe(q);
+  });
+
+  it('restores a saved cursor without skipping anything before it', () => {
+    const saved = { ...queueOf('a', 'b', 'c'), current: 'c' };
+    const back = sanitizeQueue(JSON.parse(JSON.stringify(saved)));
+    expect(back.current).toBe('c');
+    expect(back.items.map((i) => [i.skipped, i.paused, i.played])).toEqual([
+      [false, false, false],
+      [false, false, false],
+      [false, false, false],
     ]);
-    expect(setCurrent(q, 'b').items[1]?.skipped).toBe(false);
-    expect(markPlayed(q, 'missing')).toBe(q);
   });
 });
 
