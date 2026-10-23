@@ -86,7 +86,10 @@ export function downloadDirProblem(dir: string): string | null {
   if (dir.startsWith('\\\\?\\') || dir.startsWith('\\\\.\\')) {
     return 'Device paths are not supported; choose a normal folder.';
   }
-  const windows = /^[A-Za-z]:[\\/]/.test(dir) || /^\\\\[^\\]+\\[^\\]+/.test(dir);
+  if (/^[\\/]{2}/.test(dir)) {
+    return 'Network folders are not supported; choose a folder on this computer.';
+  }
+  const windows = /^[A-Za-z]:[\\/]/.test(dir);
   if (!windows && !dir.startsWith('/')) {
     return 'Enter a full path (for example D:\\Lectures or /home/me/Lectures).';
   }

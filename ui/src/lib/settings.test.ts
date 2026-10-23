@@ -69,7 +69,9 @@ describe('validate', () => {
   it('checks download folders', () => {
     expect(downloadDirProblem('D:\\Lectures')).toBeNull();
     expect(downloadDirProblem('/home/me/Lectures')).toBeNull();
-    expect(downloadDirProblem('\\\\nas\\share\\lectures')).toBeNull();
+    expect(downloadDirProblem('\\\\nas\\share\\lectures')).toMatch(/Network folders/);
+    expect(downloadDirProblem('//nas/share/lectures')).toMatch(/Network folders/);
+    expect(downloadDirProblem('\\\\?\\UNC\\nas\\share')).toMatch(/Device/);
     expect(downloadDirProblem('Lectures')).toMatch(/full path/);
     expect(downloadDirProblem('C:\\')).toMatch(/root/);
     expect(downloadDirProblem('/')).toMatch(/root/);

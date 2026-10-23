@@ -122,14 +122,16 @@ downloaded; it needs FFmpeg (see `advanced.ffmpegDir`).
 | `storage.cleanupAfterDays` | `null`  | `null` (never) or 1–3650                          | now        |
 
 The download folder holds everything TorrentPlayer downloads: the videos themselves and its cache, in
-`torrentplayer-swarm/` and `librqbit/` folders inside it. Type a path, or press **Choose folder…** to
-pick one with the system folder picker. The new folder is used from the next start (the page says
+`torrentplayer-swarm/` and `librqbit/` folders inside it. Press **Choose folder…** to pick one with
+the system folder picker, which saves it; the folder cannot be typed or set through
+`update_settings`. The new folder is used from the next start (the page says
 so); data already downloaded stays in the old folder, and **Use default** goes back to the
 default folder.
 
 A download folder must be a full path (not relative), must not be the root of a drive, and cannot
-contain `.` or `..` components, control characters, or device prefixes (`\\?\`, `\\.\`). TorrentPlayer
-creates it if needed and checks that it can write there before saving.
+contain `.` or `..` components, control characters, or device prefixes (`\\?\`, `\\.\`), and
+cannot be a network (UNC) path such as `\\server\share` (Windows would connect to the server and
+offer your sign-in credentials just to check it). TorrentPlayer creates it if needed and checks that it can write there before saving.
 
 The **Cache** row shows the current use and configured limit. TorrentPlayer marks a download as
 finished when playback reaches the end, then checks the storage policy at startup, after playback,
@@ -266,7 +268,9 @@ librqbit fetches only the metadata, then hands the torrent and the peers it foun
 FFmpeg is optional and not bundled yet. With `ffprobe` and `ffmpeg` in `ffmpegDir` (or its
 `bin` folder), or on `PATH` when it is `null`, TorrentPlayer finds the duration of videos whose
 header gives none, so read-ahead and the buffer estimate work for them, and shows seek-bar
-previews. The Settings page shows what was found and its version. An LGPL build is enough (for
+previews. The Settings page shows what was found and its version. The folder is chosen only with **Choose
+folder…** (the programs in it run), must be on this computer (no network paths), and cannot be inside
+the download folder. An LGPL build is enough (for
 example the `lgpl` builds at <https://github.com/BtbN/FFmpeg-Builds/releases>, or a package
 manager's `ffmpeg`). The programs only ever read what is already downloaded, through the local
 stream server; see [IPC](ipc.md#ffmpeg-optional).

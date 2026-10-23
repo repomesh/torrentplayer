@@ -218,16 +218,51 @@ impl SettingsState {
         fields
     }
 
-    /// Applies a partial update (see [`update_settings`]), saves it, and announces it. Other
-    /// commands that change settings (for example a WireGuard import) go through here too.
+    /// Applies a partial update, saves it, and announces it. Commands that change settings for
+    /// the backend's own reasons (a WireGuard import, a folder picker) go through here; the
+    /// webview's [`update_settings`] goes through [`Self::update_from_webview`].
     pub(crate) async fn update(
         &self,
         app: &AppHandle,
         patch: &Value,
     ) -> Result<SettingsView, IpcError> {
         let _guard = self.updating.lock().await;
+        self.update_locked(app, patch, Origin::Backend).await
+    }
+
+    /// [`Self::update`] for a patch from the webview, which may not choose folders (see
+    /// [`check_picked_folders`]).
+    async fn update_from_webview(
+        &self,
+        app: &AppHandle,
+        patch: &Value,
+    ) -> Result<SettingsView, IpcError> {
+        let _guard = self.updating.lock().await;
+        self.update_locked(app, patch, Origin::Webview).await
+    }
+
+    /// [`Self::update`], with `updating` already held.
+    async fn update_locked(
+        &self,
+        app: &AppHandle,
+        patch: &Value,
+        origin: Origin,
+    ) -> Result<SettingsView, IpcError> {
         let current = self.current();
         let next = apply_patch(&current, patch).map_err(|e| patch_error(&e))?;
+        if origin == Origin::Webview {
+            check_picked_folders(&current, &next)?;
+        }
+        if next.advanced.ffmpeg_dir != current.advanced.ffmpeg_dir
+            || next.storage.download_dir != current.storage.download_dir
+        {
+            let downloads = [
+                self.download_dir(&next),
+                self.active_download_dir(),
+                self.default_download_dir.clone(),
+            ];
+            check_ffmpeg_dir(next.advanced.ffmpeg_dir.as_deref(), &downloads)?;
+        }
         let storage_policy_changed = next.storage.cache_limit_gb != current.storage.cache_limit_gb
             || next.storage.cleanup_after_days != current.storage.cleanup_after_days;
         if next.storage.download_dir != current.storage.download_dir
@@ -397,7 +432,7 @@ pub(crate) async fn update_settings(
     state: State<'_, SettingsState>,
     patch: Value,
 ) -> Result<SettingsView, IpcError> {
-    state.update(&app, &patch).await
+    state.update_from_webview(&app, &patch).await
 }
 
 /// Stores a secret in the OS credential store. The value is never sent back.
@@ -627,23 +662,33 @@ fn cache_limit_bytes(gigabytes: Option<u32>) -> Option<u64> {
 }
 
 /// Opens the system folder picker over `window`, starting at the saved download folder, and
-/// returns the chosen folder, or `None` if the user cancelled. Nothing is saved: the Settings
-/// page saves the choice with [`update_settings`], which checks it.
+/// saves the chosen folder as `storage.downloadDir` (checked like any change). Returns the saved
+/// settings, or `None` if the user cancelled. This is the only way to choose the folder (see
+/// [`check_picked_folders`]).
 #[tauri::command]
 pub(crate) async fn choose_download_dir(
+    app: AppHandle,
     window: tauri::WebviewWindow,
     state: State<'_, SettingsState>,
-) -> Result<Option<String>, IpcError> {
+) -> Result<Option<SettingsView>, IpcError> {
+    let Some(folder) = pick_download_dir(&window, &state).await else {
+        return Ok(None);
+    };
+    let patch = serde_json::json!({ "storage": { "downloadDir": folder } });
+    state.update(&app, &patch).await.map(Some)
+}
+
+async fn pick_download_dir(window: &tauri::WebviewWindow, state: &SettingsState) -> Option<String> {
     let start = state.download_dir(&state.current());
     let mut dialog = rfd::AsyncFileDialog::new()
         .set_title("Choose where TorrentPlayer saves downloaded videos")
-        .set_parent(&window);
+        .set_parent(window);
     // The picker cannot start in a folder that does not exist yet.
     if start.is_dir() {
         dialog = dialog.set_directory(&start);
     }
     let chosen = dialog.pick_folder().await;
-    Ok(chosen.map(|folder| folder.path().to_string_lossy().into_owned()))
+    chosen.map(|folder| folder.path().to_string_lossy().into_owned())
 }
 
 /// Runs blocking work (file system, credential store) off the async runtime.
@@ -669,6 +714,69 @@ fn secret_error(error: &SecretError) -> IpcError {
 }
 
 /// Creates `dir` if needed and checks that files can be written in it.
+/// Who asked for a settings change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// The webview, through [`update_settings`].
+    Webview,
+    /// The backend: a folder picker, a WireGuard import.
+    Backend,
+}
+
+/// Refuses a new download or FFmpeg folder from the webview. Only the native folder pickers
+/// ([`choose_download_dir`], [`crate::media::choose_ffmpeg_dir`]) choose them, and save the
+/// choice themselves: FFmpeg from that folder runs on every stream start, and checking a folder
+/// touches it, so a compromised webview must not be able to name one. Going back to the default
+/// (`null`) is allowed.
+fn check_picked_folders(current: &Settings, next: &Settings) -> Result<(), IpcError> {
+    if next.storage.download_dir != current.storage.download_dir
+        && next.storage.download_dir.is_some()
+    {
+        return Err(IpcError::invalid(
+            "storage.downloadDir: Choose the folder with \"Choose folder…\".",
+        ));
+    }
+    if next.advanced.ffmpeg_dir != current.advanced.ffmpeg_dir && next.advanced.ffmpeg_dir.is_some()
+    {
+        return Err(IpcError::invalid(
+            "advanced.ffmpegDir: Choose the folder with \"Choose folder…\".",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses an FFmpeg folder inside a download folder (which holds the engine caches): files
+/// there come from torrents, and FFmpeg from that folder would run.
+fn check_ffmpeg_dir(ffmpeg_dir: Option<&str>, downloads: &[PathBuf]) -> Result<(), IpcError> {
+    let Some(dir) = ffmpeg_dir else {
+        return Ok(());
+    };
+    if downloads.iter().any(|d| is_within(Path::new(dir), d)) {
+        return Err(IpcError::invalid(
+            "advanced.ffmpegDir: Choose a folder outside the download folder.",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `path` is `parent` or inside it, comparing names case-insensitively on Windows.
+fn is_within(path: &Path, parent: &Path) -> bool {
+    let key = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| {
+                let s = c.as_os_str().to_string_lossy();
+                if cfg!(windows) {
+                    s.to_lowercase()
+                } else {
+                    s.into_owned()
+                }
+            })
+            .collect()
+    };
+    let (path, parent) = (key(path), key(parent));
+    !parent.is_empty() && path.starts_with(&parent)
+}
+
 fn check_writable(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
     if !fs::metadata(dir)?.is_dir() {
@@ -720,6 +828,64 @@ mod tests {
         if engine_override().is_none() {
             assert_eq!(config.choice, EngineChoice::Auto);
         }
+    }
+
+    #[test]
+    fn only_the_folder_pickers_choose_folders() {
+        let current = Settings::default();
+        let local = if cfg!(windows) {
+            r"D:\Videos"
+        } else {
+            "/home/me/Videos"
+        };
+        for patch in [
+            serde_json::json!({"storage": {"downloadDir": local}}),
+            serde_json::json!({"advanced": {"ffmpegDir": local}}),
+        ] {
+            let next = apply_patch(&current, &patch).unwrap();
+            let error = check_picked_folders(&current, &next).unwrap_err();
+            assert!(error.message.contains("Choose folder"), "{patch}");
+        }
+        // UNC paths never get as far as the file system.
+        let unc = serde_json::json!({"advanced": {"ffmpegDir": r"\\attacker\share"}});
+        assert!(apply_patch(&current, &unc).is_err());
+
+        // Going back to the default, and changes that keep the folders, are fine.
+        let mut chosen = current.clone();
+        chosen.storage.download_dir = Some(local.into());
+        chosen.advanced.ffmpeg_dir = Some(local.into());
+        let reset = apply_patch(
+            &chosen,
+            &serde_json::json!({"storage": {"downloadDir": null}, "advanced": {"ffmpegDir": null}}),
+        )
+        .unwrap();
+        assert_eq!(check_picked_folders(&chosen, &reset), Ok(()));
+        let other = apply_patch(
+            &chosen,
+            &serde_json::json!({"bandwidth": {"peerLimit": 80}}),
+        )
+        .unwrap();
+        assert_eq!(check_picked_folders(&chosen, &other), Ok(()));
+    }
+
+    #[test]
+    fn ffmpeg_is_never_run_from_the_download_folder() {
+        let root = if cfg!(windows) {
+            r"C:\Users\me"
+        } else {
+            "/home/me"
+        };
+        let downloads = [Path::new(root).join("Downloads").join("TorrentPlayer")];
+        let inside = downloads[0].join("torrentplayer-swarm").join("x");
+        assert!(check_ffmpeg_dir(inside.to_str(), &downloads).is_err());
+        assert!(check_ffmpeg_dir(downloads[0].to_str(), &downloads).is_err());
+        if cfg!(windows) {
+            let shouting = downloads[0].to_string_lossy().to_uppercase();
+            assert!(check_ffmpeg_dir(Some(&shouting), &downloads).is_err());
+        }
+        let beside = Path::new(root).join("Downloads").join("TorrentPlayer2");
+        assert_eq!(check_ffmpeg_dir(beside.to_str(), &downloads), Ok(()));
+        assert_eq!(check_ffmpeg_dir(None, &downloads), Ok(()));
     }
 
     #[test]

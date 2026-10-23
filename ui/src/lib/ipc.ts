@@ -244,11 +244,12 @@ export function clearCache(): Promise<ClearCacheOutcome> {
 }
 
 /**
- * Opens the system folder picker for the download folder. Resolves with the chosen folder, or
- * null if the user cancelled; nothing is saved until it is passed to {@link updateSettings}.
+ * Opens the system folder picker for the download folder and saves the choice. Resolves with the
+ * saved settings, or null if the user cancelled. This is the only way to choose the folder:
+ * {@link updateSettings} refuses a new one.
  */
-export function chooseDownloadDir(): Promise<string | null> {
-  return invoke<string | null>('choose_download_dir');
+export function chooseDownloadDir(): Promise<SettingsView | null> {
+  return invoke<SettingsView | null>('choose_download_dir');
 }
 
 // --- Network ------------------------------------------------------------------------------
@@ -524,7 +525,10 @@ export function mediaTools(): Promise<MediaToolsDto> {
   return invoke<MediaToolsDto>('media_tools');
 }
 
-/** Opens the system folder picker for the FFmpeg folder; null if cancelled. Saves nothing. */
-export function chooseFfmpegDir(): Promise<string | null> {
-  return invoke<string | null>('choose_ffmpeg_dir');
+/**
+ * Opens the system folder picker for the FFmpeg folder and saves the choice. Resolves with the
+ * saved settings, or null if cancelled. This is the only way to choose the folder.
+ */
+export function chooseFfmpegDir(): Promise<SettingsView | null> {
+  return invoke<SettingsView | null>('choose_ffmpeg_dir');
 }

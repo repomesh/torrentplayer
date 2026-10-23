@@ -800,16 +800,17 @@ prints, for the Settings page.
 
 #### `choose_ffmpeg_dir`
 
-Opens the system folder picker for the FFmpeg folder and returns the chosen path, or `null` if
-the user cancelled. Nothing is saved: the Settings page passes it to `update_settings` as
-`advanced.ffmpegDir`.
+Opens the system folder picker for the FFmpeg folder and saves the choice as
+`advanced.ffmpegDir` (validated like any change, and refused inside a download folder). Returns the
+saved `SettingsView`, or `null` if the user cancelled. This is the only way to set the folder:
+`update_settings` refuses a new value, because the programs in it run.
 
-|            |                           |
-| ---------- | ------------------------- |
-| Arguments  | none                      |
-| Returns    | `string` or `null`        |
-| Errors     | none                      |
-| Permission | `allow-choose-ffmpeg-dir` |
+|            |                                                                                      |
+| ---------- | ------------------------------------------------------------------------------------ |
+| Arguments  | none                                                                                 |
+| Returns    | `SettingsView` or `null`                                                             |
+| Errors     | `invalid-argument` (a network folder, or one inside the download folder), `internal` |
+| Permission | `allow-choose-ffmpeg-dir`                                                            |
 
 ### Settings
 
@@ -836,8 +837,9 @@ Applies a partial update with the same shape as
 [`Settings`](../ui/src/lib/bindings/Settings.ts), containing only the changed fields, for example
 `{ "bandwidth": { "peerLimit": 80 } }`; `null` clears an optional setting. The patch must be an
 object of at most 64 KiB, may not contain `version`, and may name only existing settings. The
-merged result is fully validated, and nothing is saved unless all of it is valid. A changed
-download folder is created and checked for write access first. On success the file is saved
+merged result is fully validated, and nothing is saved unless all of it is valid. A new
+`storage.downloadDir` or `advanced.ffmpegDir` is refused (`invalid-argument`): only
+`choose_download_dir` and `choose_ffmpeg_dir` set them; `null` (the default) is accepted. On success the file is saved
 atomically, the log level is applied at once, and `settings-changed` is emitted.
 
 |            |                                                                                                                   |
@@ -914,17 +916,17 @@ frontend asks for confirmation first.
 #### `choose_download_dir`
 
 Opens the system folder picker (modal to the window), starting at the saved download folder if it
-exists, and returns the chosen folder's full path, or `null` if the user cancelled. Nothing is
-saved: the Settings page passes the result to `update_settings` as `storage.downloadDir`, which
-validates it and checks that it is writable. The webview gets no general file-dialog or
+exists, and saves the chosen folder as `storage.downloadDir` (validated, and checked to be
+writable). Returns the saved `SettingsView`, or `null` if the user cancelled. This is the only way
+to set the folder: `update_settings` refuses a new value (`null`, the default folder, is allowed). The webview gets no general file-dialog or
 file-system permission.
 
-|            |                             |
-| ---------- | --------------------------- |
-| Arguments  | none                        |
-| Returns    | `string` or `null`          |
-| Errors     | none                        |
-| Permission | `allow-choose-download-dir` |
+|            |                                                                                  |
+| ---------- | -------------------------------------------------------------------------------- |
+| Arguments  | none                                                                             |
+| Returns    | `SettingsView` or `null`                                                         |
+| Errors     | `invalid-argument` (a network folder, or one that cannot be written), `internal` |
+| Permission | `allow-choose-download-dir`                                                      |
 
 ### Network
 

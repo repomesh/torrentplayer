@@ -57,6 +57,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Search no longer labels Dolby (AC-3, E-AC-3, TrueHD) and DTS releases "no sound in built-in
   player" or ranks them down when the bundled FFmpeg converts their audio to stereo; they now
   say "audio: converted to stereo". Builds without FFmpeg keep the warning.
+- The download folder and the FFmpeg folder can now be chosen only with **Choose folder…**; the
+  fields are no longer typed in, and the app refuses a new folder from anywhere else. Network
+  (UNC) and device paths are refused, so checking a folder can no longer make Windows send your
+  sign-in credentials to another computer, and an FFmpeg folder inside the download folder is
+  refused, so TorrentPlayer never runs a program that came from a torrent.
 
 ## [0.3.0] - 2026-10-21
 
