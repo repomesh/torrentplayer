@@ -13,7 +13,7 @@ use tokio::net::{TcpListener, TcpSocket, TcpStream};
 use tokio_wireguard::{Interface, config, x25519};
 use zeroize::Zeroizing;
 
-use crate::{NetError, WireGuardConfig};
+use crate::{Lease, NetError, WireGuardConfig};
 
 /// WireGuard's `REJECT_AFTER_TIME`: a session older than this is unusable.
 const REJECT_AFTER_TIME: Duration = Duration::from_secs(180);
@@ -156,42 +156,45 @@ impl Tunnel {
             .await?
             .next()
             .ok_or_else(|| invalid("the WireGuard endpoint did not resolve"))?;
-        let interface = Interface::new(config::Config {
-            interface: config::Interface {
-                address: config
-                    .interface
-                    .addresses
-                    .join(",")
-                    .parse()
-                    .map_err(|_| invalid("invalid WireGuard tunnel address"))?,
-                private_key: x25519::StaticSecret::from(*key(config
-                    .interface
-                    .private_key
-                    .expose())?),
-                listen_port: config.interface.listen_port,
-                mtu: config.interface.mtu.map(usize::from),
+        let interface = Interface::new_with(
+            config::Config {
+                interface: config::Interface {
+                    address: config
+                        .interface
+                        .addresses
+                        .join(",")
+                        .parse()
+                        .map_err(|_| invalid("invalid WireGuard tunnel address"))?,
+                    private_key: x25519::StaticSecret::from(*key(config
+                        .interface
+                        .private_key
+                        .expose())?),
+                    listen_port: config.interface.listen_port,
+                    mtu: config.interface.mtu.map(usize::from),
+                },
+                peers: vec![config::Peer {
+                    public_key: x25519::PublicKey::from(*key(&peer.public_key)?),
+                    preshared_key: peer
+                        .preshared_key
+                        .as_ref()
+                        .map(|psk| key(psk.expose()).map(|key| x25519::StaticSecret::from(*key)))
+                        .transpose()?,
+                    endpoint: Some(endpoint),
+                    allowed_ips: peer
+                        .allowed_ips
+                        .iter()
+                        .map(|ip| {
+                            ip.parse()
+                                .map_err(|_| invalid("invalid WireGuard AllowedIPs"))
+                        })
+                        .collect::<Result<_, _>>()?,
+                    persistent_keepalive: Some(
+                        peer.persistent_keepalive.filter(|n| *n > 0).unwrap_or(25),
+                    ),
+                }],
             },
-            peers: vec![config::Peer {
-                public_key: x25519::PublicKey::from(*key(&peer.public_key)?),
-                preshared_key: peer
-                    .preshared_key
-                    .as_ref()
-                    .map(|psk| key(psk.expose()).map(|key| x25519::StaticSecret::from(*key)))
-                    .transpose()?,
-                endpoint: Some(endpoint),
-                allowed_ips: peer
-                    .allowed_ips
-                    .iter()
-                    .map(|ip| {
-                        ip.parse()
-                            .map_err(|_| invalid("invalid WireGuard AllowedIPs"))
-                    })
-                    .collect::<Result<_, _>>()?,
-                persistent_keepalive: Some(
-                    peer.persistent_keepalive.filter(|n| *n > 0).unwrap_or(25),
-                ),
-            }],
-        })?;
+            interface_options(),
+        )?;
         let dns: Vec<IpAddr> = config
             .interface
             .dns
@@ -386,9 +389,13 @@ impl Tunnel {
     }
 
     /// Connects to `target` inside the tunnel (see [`Tunnel::relay`]).
-    pub(crate) async fn connect(&self, target: SocketAddr) -> Result<TcpStream, NetError> {
+    pub(crate) async fn connect(
+        &self,
+        target: SocketAddr,
+        lease: Option<Lease>,
+    ) -> Result<TcpStream, NetError> {
         let upstream = tokio_wireguard::TcpStream::connect(target, &self.0.interface).await?;
-        self.relay(upstream).await
+        self.relay(upstream, lease).await
     }
 
     /// Listens for incoming connections on the tunnel's own addresses (IPv4, and IPv6 unless
@@ -418,9 +425,12 @@ impl Tunnel {
     /// Preserves the connector's OS `TcpStream` API for a tunnel connection using a private
     /// loopback pair, so peer, lease, and HTTP handling stay unchanged. The accepting side
     /// checks the exact source port we reserved, so another local process cannot take it.
+    /// The relay ends, closing both sides, when the tunnel closes or `lease` is revoked: the
+    /// tunnel side may never answer again, and the relay holds its buffers until it ends.
     pub(crate) async fn relay(
         &self,
         mut upstream: tokio_wireguard::TcpStream,
+        lease: Option<Lease>,
     ) -> Result<TcpStream, NetError> {
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await?;
         let client = TcpSocket::new_v4()?;
@@ -437,8 +447,15 @@ impl Tunnel {
         let (client, mut relay) = tokio::try_join!(client.connect(listener.local_addr()?), accept)?;
         let session = self.clone();
         tokio::spawn(async move {
+            let revoked = async {
+                match lease {
+                    Some(mut lease) => lease.revoked().await,
+                    None => std::future::pending().await,
+                }
+            };
             tokio::select! {
                 () = session.0.interface.closed() => {}
+                () = revoked => {}
                 _ = tokio::io::copy_bidirectional(&mut relay, &mut upstream) => {}
             }
         });
@@ -550,6 +567,18 @@ impl Tunnel {
                 .collect());
         }
     }
+}
+
+/// The tunnel's TCP settings. A listener keeps a socket with full buffers (80 KiB) ready for
+/// each pending connection, so its backlog is 16 rather than 128. A connection whose peer
+/// stops acknowledging for 2 minutes is aborted (keep-alives every 30 s cover idle ones),
+/// since smoltcp otherwise keeps it, and the relay holding it, open forever.
+fn interface_options() -> tokio_wireguard::interface::Options {
+    let mut options = tokio_wireguard::interface::Options::default();
+    options.tcp.backlog = 16;
+    options.tcp.timeout = Some(Duration::from_secs(120));
+    options.tcp.keep_alive = Some(Duration::from_secs(30));
+    options
 }
 
 /// How often the gap between idle probes doubles: from half of the reply timeout to four times
@@ -972,7 +1001,7 @@ mod tests {
                 .unwrap();
             for _ in 0..5 {
                 let stream = tunnel
-                    .connect("10.44.0.1:8080".parse().unwrap())
+                    .connect("10.44.0.1:8080".parse().unwrap(), None)
                     .await
                     .unwrap();
                 drop(stream);
@@ -985,7 +1014,7 @@ mod tests {
                         .resolve("search.torrentplayer.test", 8080, true)
                         .await
                         .unwrap()[0];
-                    let mut stream = t.connect(addr).await.unwrap();
+                    let mut stream = t.connect(addr, None).await.unwrap();
                     stream.write_all(b"hello").await.unwrap();
                     let mut buf = [0; 5];
                     stream.read_exact(&mut buf).await.unwrap();
@@ -1059,7 +1088,7 @@ mod tests {
                 .resolve("search.torrentplayer.test", 8080, true)
                 .await
                 .unwrap()[0];
-            let mut stream = tunnel.connect(address).await.unwrap();
+            let mut stream = tunnel.connect(address, None).await.unwrap();
             stream.write_all(b"hello").await.unwrap();
             let mut reply = [0; 5];
             stream.read_exact(&mut reply).await.unwrap();
@@ -1338,6 +1367,53 @@ mod tests {
             .await
             .expect("traffic did not resume after the server answered again");
             assert!(net.status().traffic_allowed);
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_kill_switch_ends_tunnel_relays_the_application_still_holds() {
+        // The relay between the application's loopback stream and the tunnel connection used
+        // to outlive its lease: with the server silent, it never ended, and the application's
+        // side stayed open.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let (server, config) = pair();
+            let listener = tokio_wireguard::TcpListener::bind("10.44.0.1:8080", &server)
+                .await
+                .unwrap();
+            let held = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = [0; 4];
+                stream.read_exact(&mut bytes).await.unwrap();
+                // Keeps the connection open and never answers again.
+                std::future::pending::<()>().await;
+            });
+            let reply_timeout = Duration::from_secs(1);
+            let (net, mode, _) = through_relay(config, health_options(reply_timeout)).await;
+            assert_eq!(
+                net.settled(Duration::from_secs(3)).await.state,
+                ConnectionState::Connected
+            );
+            let (mut stream, _lease) = net
+                .connect("10.44.0.1:8080".parse().unwrap())
+                .await
+                .unwrap();
+            stream.write_all(b"ping").await.unwrap();
+
+            mode.store(DROP_DATA, Ordering::SeqCst);
+            wait_for(&net, |s| {
+                matches!(s, ConnectionState::KillSwitchActive { .. })
+            })
+            .await;
+            let mut bytes = [0; 16];
+            let read = tokio::time::timeout(Duration::from_secs(3), stream.read(&mut bytes))
+                .await
+                .expect("the relay outlived its lease");
+            assert!(read.is_err() || read.unwrap() == 0);
+            held.abort();
             net.shutdown();
             server.close();
         })

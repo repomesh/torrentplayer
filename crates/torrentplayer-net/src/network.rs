@@ -729,7 +729,7 @@ impl Network {
     /// otherwise. Never connects any other way than the selected mode.
     pub async fn connect(&self, target: SocketAddr) -> Result<(TcpStream, Lease), NetError> {
         let (route, lease, ipv4_only) = self.route()?;
-        let stream = self.dial(&route, target, ipv4_only).await?;
+        let stream = self.dial(&route, target, ipv4_only, &lease).await?;
         Self::check_lease(stream, lease)
     }
 
@@ -947,7 +947,7 @@ impl Network {
                 last.get_or_insert(NetError::NotPublic);
                 continue;
             }
-            match self.dial(&route, addr, ipv4_only).await {
+            match self.dial(&route, addr, ipv4_only, &lease).await {
                 Ok(stream) => return Self::check_lease(stream, lease),
                 Err(error) => last = Some(error),
             }
@@ -985,6 +985,7 @@ impl Network {
         route: &Route,
         target: SocketAddr,
         ipv4_only: bool,
+        lease: &Lease,
     ) -> Result<TcpStream, NetError> {
         if ipv4_only && target.is_ipv6() {
             return Err(NetError::Ipv6Disabled);
@@ -992,7 +993,7 @@ impl Network {
         match route {
             Route::Direct => Ok(TcpStream::connect(target).await?),
             Route::Socks(cfg) => self.socks_dial(cfg, &Target::Addr(target)).await,
-            Route::WireGuard(tunnel) => tunnel.connect(target).await,
+            Route::WireGuard(tunnel) => tunnel.connect(target, Some(lease.clone())).await,
         }
     }
 

@@ -56,6 +56,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   arrives; before, a steady stream of incoming datagrams held them back, which could expire the
   session and block traffic as "has not completed a recent handshake". Packets waiting inside the
   tunnel are also capped instead of piling up in memory.
+- In WireGuard mode, connections inside the tunnel now close when the kill switch engages or the
+  mode changes, even while the app still holds them and the server is silent; before, each one kept
+  about 80 KiB and a task until the tunnel closed. Tunnel connections whose peer stops responding
+  are dropped after 2 minutes, and incoming-connection listeners reserve far less memory.
 
 ## [0.3.0] - 2026-10-21
 

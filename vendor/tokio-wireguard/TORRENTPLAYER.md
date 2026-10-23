@@ -54,3 +54,9 @@ each device queue holds at most 1024 packets (more are dropped, as a full interf
 torrentplayer-net's `a_flood_of_incoming_datagrams_does_not_stall_the_tunnels_timers` test
 floods the client's port for 4 seconds and requires its 1-second keepalives to continue; none
 were sent before.
+
+TCP timeout and keep-alive options (`src/interface.rs` `TcpOptions::timeout` and
+`TcpOptions::keep_alive`, applied in `src/tcp.rs`, marked "Added/Modified for TorrentPlayer"):
+smoltcp sockets had neither, so a connection whose peer vanished stayed open for good.
+torrentplayer-net sets a 2-minute timeout, 30-second keep-alives, and a listener backlog of 16
+(each pending slot holds full buffers).

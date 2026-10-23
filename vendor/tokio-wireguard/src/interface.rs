@@ -76,6 +76,13 @@ pub struct TcpOptions {
     pub send_buffer_size: usize,
     /// Maximum number of pending connections on the listener
     pub backlog: usize,
+    /// Added for TorrentPlayer: smoltcp's timeout. A connection that gets no
+    /// acknowledgement for this long while it has data in flight (or keep-alives on) is
+    /// aborted. None (the default) never times out.
+    pub timeout: Option<Duration>,
+    /// Added for TorrentPlayer: smoltcp's keep-alive interval for idle connections, or None
+    /// (the default).
+    pub keep_alive: Option<Duration>,
 }
 
 /// Advanced UDP options for configuring an [`Interface`]
@@ -565,6 +572,8 @@ impl Default for TcpOptions {
             recv_buffer_size: 64 * 1024,
             send_buffer_size: 16 * 1024,
             backlog: 128,
+            timeout: None,
+            keep_alive: None,
         }
     }
 }
