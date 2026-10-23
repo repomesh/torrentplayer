@@ -142,7 +142,7 @@ const queue = () => invoke('load_queue');
 let lastStream = null;
 const media = async () => {
   const value = await evaluate(`(() => { const v = document.querySelector('.player video');
-    return v ? { paused: v.paused, time: v.currentTime,
+    return v ? { paused: v.paused, time: v.currentTime, duration: v.duration, seeking: v.seeking,
       streamId: Number(new URL(v.currentSrc || v.src).pathname.split('/').pop()) } : null; })()`);
   if (value) lastStream = value.streamId;
   return value;
@@ -281,6 +281,113 @@ try {
       return v && !v.paused && v.time > at + 0.2;
     }, 'resume');
   });
+  await step('10-second buttons seek backward and forward while staying paused', async () => {
+    assert(await click(`${activeRow} button.pause`));
+    await until(async () => (await media())?.paused, 'pause before skipping');
+    await evaluate('document.querySelector(".player video").currentTime = 20');
+    await until(async () => {
+      const v = await media();
+      return v && !v.seeking && Math.abs(v.time - 20) < 0.1;
+    }, 'seek to 20 seconds');
+    assert(await click('.controls button[aria-label="Rewind 10 seconds"]'));
+    await until(async () => {
+      const v = await media();
+      return v?.paused && !v.seeking && Math.abs(v.time - 10) < 0.1;
+    }, 'rewind to 10 seconds');
+    assert(await click('.controls button[aria-label="Forward 10 seconds"]'));
+    await until(async () => {
+      const v = await media();
+      return v?.paused && !v.seeking && Math.abs(v.time - 20) < 0.1;
+    }, 'forward to 20 seconds');
+    await evaluate(`document.querySelector('button[aria-label="Rewind 10 seconds"]').focus()`);
+    await protocol('Input.dispatchKeyEvent', {
+      type: 'rawKeyDown',
+      key: ' ',
+      code: 'Space',
+      windowsVirtualKeyCode: 32,
+    });
+    await protocol('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: ' ',
+      code: 'Space',
+      windowsVirtualKeyCode: 32,
+    });
+    await until(async () => {
+      const v = await media();
+      return v?.paused && !v.seeking && Math.abs(v.time - 10) < 0.1;
+    }, 'Space activates rewind without playing');
+    await evaluate(`document.querySelector('button[aria-label="Forward 10 seconds"]').focus()`);
+    await protocol('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+      text: '\r',
+    });
+    await protocol('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'Enter',
+      code: 'Enter',
+      windowsVirtualKeyCode: 13,
+    });
+    await until(async () => {
+      const v = await media();
+      return v?.paused && !v.seeking && Math.abs(v.time - 20) < 0.1;
+    }, 'Enter activates forward without playing');
+  });
+  await step('10-second buttons clamp at the start and end', async () => {
+    await evaluate('document.querySelector(".player video").currentTime = 3');
+    await until(async () => {
+      const v = await media();
+      return v && !v.seeking && Math.abs(v.time - 3) < 0.1;
+    }, 'seek near start');
+    assert(await click('.controls button[aria-label="Rewind 10 seconds"]'));
+    await until(async () => {
+      const v = await media();
+      return v?.paused && !v.seeking && v.time === 0;
+    }, 'rewind clamps at zero');
+    assert(
+      await evaluate(`document.querySelector('button[aria-label="Rewind 10 seconds"]').disabled`),
+    );
+    await evaluate('const v=document.querySelector(".player video"); v.currentTime=v.duration-3');
+    await until(async () => {
+      const v = await media();
+      return v && !v.seeking && v.time > v.duration - 4;
+    }, 'seek near end');
+    assert(await click('.controls button[aria-label="Forward 10 seconds"]'));
+    await until(async () => {
+      const v = await media();
+      return v?.paused && !v.seeking && Math.abs(v.time - v.duration) < 0.1;
+    }, 'forward clamps at duration');
+    assert(
+      await evaluate(`document.querySelector('button[aria-label="Forward 10 seconds"]').disabled`),
+    );
+    assert(await click(`${activeRow} button.pause`));
+    await until(async () => {
+      const v = await media();
+      return v && !v.paused && v.time > 0.2 && v.time < 2;
+    }, 'replay after reaching end');
+  });
+  await step('10-second buttons keep active playback playing after a seek', async () => {
+    const before = (await media()).time;
+    assert(await click('.controls button[aria-label="Forward 10 seconds"]'));
+    await until(async () => {
+      const v = await media();
+      return v && !v.paused && !v.seeking && v.time >= before + 9.9 && v.time < before + 12;
+    }, 'forward while playing');
+    const after = (await media()).time;
+    assert(await click('.controls button[aria-label="Rewind 10 seconds"]'));
+    await until(async () => {
+      const v = await media();
+      return (
+        v &&
+        !v.paused &&
+        !v.seeking &&
+        v.time >= Math.max(0, after - 10) - 0.1 &&
+        v.time < after - 8
+      );
+    }, 'rewind while playing');
+  });
   await step('Stop closes the stream and keeps its queue entry', async () => {
     const q = await queue();
     assert(await click(`${activeRow} button.stop`));
@@ -387,6 +494,18 @@ try {
 } catch (error) {
   process.exitCode = 1;
   console.error(error.message);
+  if (ws?.readyState === WebSocket.OPEN) {
+    try {
+      console.error(
+        JSON.stringify({
+          media: await media(),
+          focus: await evaluate('document.activeElement?.getAttribute("aria-label")'),
+        }),
+      );
+    } catch {
+      // The WebView may already have closed.
+    }
+  }
   console.error(`Artifacts: ${out}`);
 } finally {
   writeFileSync(

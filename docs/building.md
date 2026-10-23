@@ -49,8 +49,8 @@ npm test
 ## Desktop queue regression
 
 The Windows desktop queue regression uses generated audio, a loopback seeder, and a new
-isolated profile. It checks direct Play, queue visibility, Pause/Resume, Stop, removal, Undo,
-and Clear all against the real player. It needs Node 22+ and WebView2; no public media swarm
+isolated profile. It checks direct Play, queue visibility, Pause/Resume, ten-second seeking,
+Stop, removal, Undo, and Clear all against the real player. It needs Node 22+ and WebView2; no public media swarm
 is required. From the repository root:
 
 ```sh

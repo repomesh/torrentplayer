@@ -682,11 +682,10 @@
 
   function seekBy(secs: number): void {
     dismissChip();
-    if (!video) {
+    if (!video || !Number.isFinite(video.duration) || video.duration <= 0) {
       return;
     }
-    const end = Number.isFinite(video.duration) ? video.duration : Infinity;
-    video.currentTime = Math.min(Math.max(video.currentTime + secs, 0), end);
+    video.currentTime = Math.min(Math.max(video.currentTime + secs, 0), video.duration);
     poke();
   }
 
@@ -806,6 +805,14 @@
         event.target.closest(
           'dialog, aside, [role="tree"], [role="menu"], .end-card, input, select, textarea',
         ) !== null)
+    ) {
+      return;
+    }
+    // Space/Enter activate the focused control itself rather than the global play toggle.
+    if (
+      (event.key === ' ' || event.key === 'Enter') &&
+      event.target instanceof Element &&
+      event.target.closest('button, a') !== null
     ) {
       return;
     }
@@ -1188,6 +1195,7 @@
     status={statusInfo}
     bind:menuOpen
     onTogglePlay={togglePlay}
+    onSeekBy={seekBy}
     onSeek={(fraction: number) => {
       dismissChip();
       seekTo(fraction);

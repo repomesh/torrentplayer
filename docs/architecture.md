@@ -154,6 +154,8 @@ time. Every view stays reachable from the rail.
   The playlist panel beside the player collapses with Q, and Shift+N plays the next item. Fullscreen is requested
   on the stage that holds the player, not the player itself, so it stays on when the next video's
   player replaces the last one.
+  The player's Rewind 10 seconds and Forward 10 seconds buttons use the same seeking path as
+  ←/→, preserve pause state, and clamp to the start and end. They also appear in fullscreen.
 - **Library and resume** (`torrentplayer-library`, `ui/src/lib/library.ts`) identify a playable file by
   `(info hash, file index)` and store its safe replay link, display metadata, last position,
   duration, and completion state in `library.sqlite3`. Ordinary playback is checkpointed every

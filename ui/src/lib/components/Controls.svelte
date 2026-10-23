@@ -23,6 +23,7 @@
     menuOpen?: boolean;
     onTogglePlay: () => void;
     onSeek: (fraction: number) => void;
+    onSeekBy: (seconds: number) => void;
     onRate: (rate: number) => void;
     onToggleMute: () => void;
     onVolume: (volume: number) => void;
@@ -58,6 +59,7 @@
     menuOpen = $bindable(false),
     onTogglePlay,
     onSeek,
+    onSeekBy,
     onRate,
     onToggleMute,
     onVolume,
@@ -119,6 +121,37 @@
       {:else}
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z" /></svg>
       {/if}
+    </button>
+
+    <button
+      type="button"
+      class="icon skip"
+      aria-label="Rewind 10 seconds"
+      title="Rewind 10 seconds (←)"
+      disabled={!Number.isFinite(duration) || duration <= 0 || currentTime <= 0}
+      onclick={() => {
+        onSeekBy(-10);
+      }}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M4 10a8 8 0 1 1 1.7 8.2M4 10V4m0 6h6" />
+        <text x="12" y="15.5" text-anchor="middle">10</text>
+      </svg>
+    </button>
+    <button
+      type="button"
+      class="icon skip"
+      aria-label="Forward 10 seconds"
+      title="Forward 10 seconds (→)"
+      disabled={!Number.isFinite(duration) || duration <= 0 || currentTime >= duration}
+      onclick={() => {
+        onSeekBy(10);
+      }}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M20 10a8 8 0 1 0-1.7 8.2M20 10V4m0 6h-6" />
+        <text x="12" y="15.5" text-anchor="middle">10</text>
+      </svg>
     </button>
 
     <span class="time">{formatTime(currentTime)} / {formatTime(duration)}</span>
@@ -352,6 +385,7 @@
 
   .row {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
     margin-top: 0.2rem;
@@ -372,6 +406,7 @@
     height: 2rem;
     padding: 0;
     border-radius: 0.4rem;
+    flex-shrink: 0;
   }
 
   .icon svg {
@@ -384,7 +419,23 @@
     stroke-linejoin: round;
   }
 
-  .icon:hover,
+  .icon:disabled {
+    cursor: default;
+    opacity: 0.35;
+  }
+
+  .icon.skip svg {
+    fill: none;
+  }
+
+  .skip text {
+    fill: currentColor;
+    stroke: none;
+    font-size: 8px;
+    font-weight: 600;
+  }
+
+  .icon:hover:not(:disabled),
   .text:hover {
     background: rgb(255 255 255 / 10%);
   }

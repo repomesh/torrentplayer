@@ -11,6 +11,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The player has visible Rewind 10 seconds and Forward 10 seconds buttons, also available
+  in fullscreen. They preserve pause state and stay within the media's duration.
 - `cargo bench-suite <list file>` benchmarks your own media files, torrents, and magnet links
   and writes `report.md` and `results.json` (see "Benchmark your own files" in
   `docs/performance.md`). `torrentplayer-bench local --media FILE` (`cargo bench-file`) seeds a
