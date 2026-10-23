@@ -50,7 +50,7 @@ pub use cues::{
 };
 pub use ffmpeg::{
     FORMAT_WHITELIST, FfmpegError, FfmpegTools, MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_WIDTH,
-    MediaInfo, version,
+    MediaInfo, PROXY_ENV, ffmpeg_command, version,
 };
 pub use fragmented::{InitError, MAX_INIT_SEGMENT, init_segment_len, mse_type};
 pub use language::{Language, language};

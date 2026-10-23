@@ -43,6 +43,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (about two hours of traffic, sooner when handshakes repeat) every later one was refused as a
   flood and stalled for at least 5 seconds, or failed with a server that ignores WireGuard
   cookies, until the app was restarted.
+- FFmpeg runs for durations and seek-bar thumbnails no longer follow the `http_proxy` environment
+  variable, which sent the private stream address (with its access token) to that proxy. They
+  now share the hardening of the audio conversion.
 
 ## [0.3.0] - 2026-10-21
 
