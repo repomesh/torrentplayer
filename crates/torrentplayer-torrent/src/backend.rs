@@ -1354,19 +1354,28 @@ impl StreamEngine {
         })
     }
 
-    /// Stops every torrent. An unplayed preload's cache is deleted.
+    /// Stops every torrent. An unplayed preload's cache is deleted. Cache flushes run on
+    /// blocking workers, so callers may time out waiting for shutdown on slow storage.
     pub async fn shutdown(&self) {
         self.cancel_preload().await;
-        if let Some(swarm) = &self.swarm {
-            swarm.shutdown();
-        }
-        if let Some(swarm) = self.thumbnails.get() {
-            swarm.shutdown();
-        }
-        let rqbit = self.rqbit.lock().await.take();
-        if let Some(engine) = rqbit {
-            engine.shutdown().await;
-        }
+        let main = async {
+            if let Some(swarm) = &self.swarm {
+                swarm.shutdown_async().await;
+            }
+        };
+        let thumbnails = async {
+            if let Some(swarm) = self.thumbnails.get() {
+                swarm.shutdown_async().await;
+            }
+        };
+        let rqbit = async {
+            let engine = self.rqbit.lock().await.take();
+            if let Some(engine) = engine {
+                engine.shutdown().await;
+            }
+        };
+        // Stop every engine promptly, even when another one's cache is slow to flush.
+        tokio::join!(main, thumbnails, rqbit);
     }
 
     /// Preloads a torrent: see [`StreamEngine::preload_with_peers`].

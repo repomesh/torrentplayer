@@ -70,6 +70,8 @@
     onEnded?: () => void;
     /** The position changed; `duration` is NaN until known. */
     onTime?: (currentTime: number, duration: number) => void;
+    /** Keeps queue playback controls in sync with the media element. */
+    onPauseChange?: (paused: boolean) => void;
     /** Shown over the video, also in fullscreen. */
     children?: Snippet;
     /**
@@ -94,6 +96,7 @@
     onBack,
     onEnded,
     onTime,
+    onPauseChange,
     children,
     audio = null,
     fullscreenTarget,
@@ -332,6 +335,23 @@
     }
     const known = Number.isFinite(video.duration) ? video.duration : null;
     reportPlayback(stream.streamId, video.currentTime, known).catch(() => undefined);
+  }
+
+  /** Captures the exact final position before the parent closes this stream. */
+  export function checkpoint(): Promise<void> {
+    if (!video) {
+      return Promise.resolve();
+    }
+    return reportPlayback(
+      stream.streamId,
+      video.currentTime,
+      Number.isFinite(video.duration) ? video.duration : null,
+    );
+  }
+
+  /** The queue and the player use the same pause/resume path, including seek cancellation. */
+  export function togglePlayback(): void {
+    togglePlay();
   }
 
   function frame(): void {
@@ -955,10 +975,12 @@
     ondblclick={toggleFullscreen}
     onplay={() => {
       paused = false;
+      onPauseChange?.(false);
       ended = false;
     }}
     onpause={() => {
       paused = true;
+      onPauseChange?.(true);
     }}
     ontimeupdate={() => {
       if (video) {

@@ -100,6 +100,14 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Playing files always have a visible queue entry. The active row offers Pause/Resume, Stop,
+  and Stop & remove; removing it saves progress and stops playback, and Undo restores the
+  entry without autoplay. File lists also allow queued videos to be removed.
+- Quitting no longer blocks the shutdown deadline while flushing piece caches or playback
+  history on slow storage. Those writes run on blocking workers, and the app waits up to two
+  seconds before exiting; an unfinished cache flush is checked again on the next start.
+- The architecture guide now describes automatic resume with a Start over chip and the Queue
+  navigation label used in 0.3.1.
 - `cargo bench-suite … --download-mibps 0` now runs public entries with no download limit (labelled
   "no cap"); before, 0 fell back to the 10 MiB/s default.
 - `cargo bench-suite … --wireguard`/`--socks5` now downloads the `.torrent` links of public

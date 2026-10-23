@@ -70,7 +70,6 @@
   } from './lib/nav';
   import {
     QueueSaver,
-    clearPlayed,
     clipTitle,
     emptyQueue,
     enqueue,
@@ -81,9 +80,8 @@
     nextItem,
     playbackEnded,
     restoreOrder,
-    putFirst,
+    queueForPlayback,
     queueEntryState,
-    remove,
     removeItem,
     restoreRemoved,
     resolveTorrent,
@@ -97,6 +95,7 @@
     type MainFile,
     type Queue,
     type QueueItem,
+    type Removed,
   } from './lib/queue';
   import { preloadActive, preloadLabel } from './lib/search';
   import type { SettingsSection } from './lib/settings';
@@ -134,6 +133,9 @@
   const sources: Record<number, string> = {};
   let lastTorrentId = $state<number | null>(null);
   let nowPlaying = $state.raw<NowPlaying | null>(null);
+  let player: { togglePlayback: () => void; checkpoint: () => Promise<void> } | undefined =
+    $state();
+  let playbackPaused = $state(true);
   /** The player's latest position, updated many times a second, so not reactive. */
   const playback = { position: 0, duration: Number.NaN };
 
@@ -156,12 +158,15 @@
     request: number;
     source: string;
     infoHash: string | null;
+    queueId?: string;
   } | null>(null);
   let addError = $state<string | null>(null);
   let playError = $state<string | null>(null);
   let starting = $state.raw<{ request: number; torrentId: number; fileIndex: number } | null>(null);
   // Stream starts change download priorities, so only that short stage is serialized.
   let streamStart: Promise<void> = Promise.resolve();
+  let streamStop: Promise<void> = Promise.resolve();
+  let queueLoaded: Promise<void> = Promise.resolve();
   let playlistOpen = $state(readPlaylistOpen());
   let toasts = $state.raw<readonly Toast[]>([]);
   const toaster = new Toasts((list) => {
@@ -315,18 +320,11 @@
   }
 
   function removeGroup(key: string): void {
-    const before = queue;
     const items = queue.items.filter((i) => groupKey(i) === key);
-    queue = items.reduce((q, item) => remove(q, item.id), queue);
-    const playing = nowPlaying;
-    if (playing && items.some((i) => i.id === playing.queueId)) {
-      nowPlaying = { ...playing, queueId: null };
-    }
-    showToast(`Removed ${String(items.length)} ${items.length === 1 ? 'video' : 'videos'}`, {
-      undo: () => {
-        queue = before;
-      },
-    });
+    removeQueueItems(
+      items.map((i) => i.id),
+      `Removed ${String(items.length)} ${items.length === 1 ? 'video' : 'videos'}`,
+    );
   }
 
   /** "Choose files…": shows the torrent's videos, adding it first if it is not open yet. */
@@ -382,10 +380,7 @@
     if (queued && !entry) {
       queue = enqueue(queue, itemsFor(torrent, [file]), lectureOrder(torrent)).queue;
     } else if (!queued && entry) {
-      queue = remove(queue, entry.id);
-      if (nowPlaying?.queueId === entry.id) {
-        nowPlaying = { ...nowPlaying, queueId: null };
-      }
+      removeFromQueue(entry.id);
     }
   }
 
@@ -609,6 +604,11 @@
     if (nowPlaying && mergedInto !== undefined) {
       nowPlaying = { ...nowPlaying, queueId: mergedInto };
     }
+    const pendingId = pendingPlayback?.queueId;
+    const pendingMerged = pendingId === undefined ? undefined : resolved.merged.get(pendingId);
+    if (pendingPlayback && pendingMerged !== undefined) {
+      pendingPlayback = { ...pendingPlayback, queueId: pendingMerged };
+    }
   }
 
   /**
@@ -715,6 +715,9 @@
   /** Closes the open stream. `forget` also drops the player from the history. */
   async function closeStream(forget: boolean): Promise<void> {
     const streamId = nowPlaying?.stream.streamId;
+    const checkpoint = streamId === undefined ? Promise.resolve() : player?.checkpoint();
+    // Attach the handler before unmounting the player; the final report precedes stop_stream.
+    const saved = Promise.resolve(checkpoint).catch(() => undefined);
     if (nowPlaying) {
       nowPlaying = null;
     }
@@ -724,54 +727,59 @@
       void arrived();
     }
     if (streamId !== undefined) {
-      await stopStream(streamId).catch(() => undefined);
+      const previous = streamStop;
+      streamStop = (async () => {
+        await previous;
+        await saved;
+        await stopStream(streamId).catch(() => undefined);
+      })();
     }
+    await streamStop;
+  }
+
+  function stopPlayback(): void {
+    selection += 1;
+    pendingPlayback = null;
+    void closeStream(false);
   }
 
   /**
    * The queue entry of a file that starts playing. Played from search, a torrent's files or the
-   * file chooser (`first`), it is added to the queue, or moved, to the front, so what plays is
-   * always queued and everything else stays queued. A file of a queued torrent played from
-   * the queue (`group`) joins its torrent's items in lecture order. Otherwise it is the file's
-   * entry if it is queued.
+   * file chooser (`first`), it is added at the front. Existing entries keep their place.
+   * A new file selected inside the queue (`group`) joins its torrent in lecture order.
    */
   function enterQueue(
     torrent: TorrentSummary,
     file: FileSummary,
-    where: 'first' | 'group' | undefined,
+    where: 'first' | 'group' | 'existing' | undefined,
   ): string | null {
     const [item] = itemsFor(torrent, [file]);
     if (item === undefined) {
       return null;
     }
-    if (where === 'first') {
-      const placed = putFirst(queue, item, mainFile);
-      queue = placed.queue;
-      return placed.id;
-    }
-    if (where === 'group') {
-      queue = enqueue(queue, [item], lectureOrder(torrent), mainFile).queue;
-    }
-    return findEntry(queue, item, mainFile)?.id ?? null;
+    const placed = queueForPlayback(queue, item, where, mainFile, lectureOrder(torrent));
+    queue = placed.queue;
+    return placed.id;
   }
 
   async function play(
     torrent: TorrentSummary,
     file: FileSummary,
     options: {
-      queueId?: string | null;
+      fromQueue?: boolean;
       queue?: 'first' | 'group';
       autoSeeks?: number[];
       request?: number;
     } = {},
   ): Promise<boolean> {
     const request = options.request ?? ++selection;
+    await queueLoaded;
     if (request !== selection) {
       return false;
     }
     lastTorrentId = torrent.id;
     if (nowPlaying?.torrent.id === torrent.id && nowPlaying.file.index === file.index) {
-      const queueId = options.queueId ?? enterQueue(torrent, file, options.queue);
+      const queueId = enterQueue(torrent, file, options.fromQueue ? 'existing' : options.queue);
       if (queueId !== null) {
         queue = setCurrent(queue, queueId);
         nowPlaying = { ...nowPlaying, queueId };
@@ -792,6 +800,13 @@
       if (request !== selection) {
         return false;
       }
+      const queueId = enterQueue(torrent, file, options.fromQueue ? 'existing' : options.queue);
+      if (queueId === null && options.fromQueue) {
+        return false;
+      }
+      if (queueId === null || !queue.items.some((item) => item.id === queueId)) {
+        throw new Error('The queue is full. Remove an item before playing another file.');
+      }
       // Close the old stream before starting another on the same torrent: its stop clears
       // priorities. A superseded start is also stopped before the next one begins.
       await closeStream(false);
@@ -799,7 +814,7 @@
         return false;
       }
       const stream = await startStream(torrent.id, file.index);
-      if (request !== selection) {
+      if (request !== selection || !queue.items.some((item) => item.id === queueId)) {
         await stopStream(stream.streamId).catch(() => undefined);
         return false;
       }
@@ -809,7 +824,7 @@
       playback.position = resumeAt;
       playback.duration = Number.NaN;
       // The file becomes the queue's current item, wherever it was played from.
-      const queueId = options.queueId ?? enterQueue(torrent, file, options.queue);
+      playbackPaused = true;
       nowPlaying = {
         torrent,
         file,
@@ -820,9 +835,7 @@
         resumeChip,
         queueId,
       };
-      if (queueId !== null) {
-        queue = setCurrent(queue, queueId);
-      }
+      queue = setCurrent(queue, queueId);
       navigate({ name: 'player' });
       // Already on the player (the next video of the queue): it has been shown now.
       shownStream = stream.streamId;
@@ -832,6 +845,10 @@
         return false;
       }
       playError = errorMessage(reason);
+      if (nowPlaying) {
+        showToast(playError, { error: true });
+        return false;
+      }
       // Nothing is playing now, so the player is no longer a place to go back to.
       const onPlayer = view.name === 'player';
       history = prune(history, (v) => v.name !== 'player', {
@@ -931,7 +948,7 @@
     queue = after;
     showToast(added === 1 ? `Queued ${what}` : `Queued ${String(added)} videos`, {
       undo: () => {
-        queue = items.reduce((q, item) => remove(q, item.id), queue);
+        removeQueueItems(items.map((item) => item.id));
       },
     });
   }
@@ -1002,37 +1019,45 @@
   }
 
   function removeFromQueue(id: string): void {
-    const { queue: after, removed } = removeItem(queue, id);
-    queue = after;
-    const wasPlaying = nowPlaying?.queueId === id;
-    // The stream identifies this playback: another video played since must not take the item.
-    const playingStream = wasPlaying ? nowPlaying?.stream : undefined;
-    if (nowPlaying && wasPlaying) {
-      nowPlaying = { ...nowPlaying, queueId: null };
+    const item = queue.items.find((i) => i.id === id);
+    if (item) {
+      removeQueueItems([id], `Removed ${item.title}`);
     }
-    if (removed) {
-      showToast(`Removed ${removed.item.title}`, {
-        // Puts the item back, keeping what changed while the toast was up.
-        undo: () => {
-          queue = restoreRemoved(queue, removed, mainFile);
-          if (
-            wasPlaying &&
-            nowPlaying !== null &&
-            nowPlaying.stream === playingStream &&
-            nowPlaying.queueId === null &&
-            queue.items.includes(removed.item)
-          ) {
-            nowPlaying = { ...nowPlaying, queueId: id };
-          }
-        },
-      });
+  }
+
+  /** Every removal path stops an affected stream; Undo only restores queue membership. */
+  function removeQueueItems(ids: readonly string[], message?: string): void {
+    if (pendingPlayback?.queueId && ids.includes(pendingPlayback.queueId)) {
+      selection += 1;
+      pendingPlayback = null;
     }
+    if (nowPlaying?.queueId && ids.includes(nowPlaying.queueId)) {
+      stopPlayback();
+    }
+    const removed: Removed[] = [];
+    for (const id of ids) {
+      const result = removeItem(queue, id);
+      queue = result.queue;
+      if (result.removed) {
+        removed.push(result.removed);
+      }
+    }
+    if (removed.length === 0 || message === undefined) {
+      return;
+    }
+    showToast(message, {
+      undo: () => {
+        for (const item of [...removed].reverse()) {
+          queue = restoreRemoved(queue, item, mainFile);
+        }
+      },
+    });
   }
 
   /** Plays a queued item: adds its torrent again if needed (a preloaded one is reused). */
   async function playQueueItem(item: QueueItem): Promise<void> {
     const request = ++selection;
-    pendingPlayback = { request, source: item.source, infoHash: item.infoHash };
+    pendingPlayback = { request, source: item.source, infoHash: item.infoHash, queueId: item.id };
     try {
       const torrent = await fetchTorrent(item.source, item.infoHash);
       if (request !== selection) {
@@ -1049,7 +1074,7 @@
         navigate({ name: 'torrent', torrentId: torrent.id });
         return;
       }
-      const played = await play(torrent, file, { queueId: item.id, request });
+      const played = await play(torrent, file, { fromQueue: true, request });
       if (!played && request === selection) {
         navigate({ name: 'torrent', torrentId: torrent.id });
       }
@@ -1333,7 +1358,7 @@
         seedingHintOpen = true;
       }
     });
-    loadQueue()
+    queueLoaded = loadQueue()
       .then((saved) => {
         const loaded = sanitizeQueue(saved);
         persisted = loaded;
@@ -1464,6 +1489,9 @@
             onQueue={(file: FileSummary) => {
               queueFiles(torrent, [file]);
             }}
+            onRemove={(file: FileSummary) => {
+              chooseFile(torrent, file, false);
+            }}
             onQueueAll={(files: FileSummary[]) => {
               queueFiles(torrent, files);
             }}
@@ -1476,6 +1504,9 @@
               {queue}
               collapsed={!playlistOpen && nowPlaying !== null}
               {playingId}
+              {playbackPaused}
+              onTogglePlayback={() => player?.togglePlayback()}
+              onStopPlayback={stopPlayback}
               playingTitle={nowPlaying && nowPlaying.queueId === null
                 ? nowPlaying.stream.fileName
                 : null}
@@ -1515,25 +1546,18 @@
               }}
               onLoadFiles={(key: string) => void loadTorrent(key)}
               onClear={() => {
-                const before = queue;
-                queue = emptyQueue();
-                showToast('Cleared the queue', {
-                  undo: () => {
-                    queue = before;
-                  },
-                });
+                removeQueueItems(
+                  queue.items.map((i) => i.id),
+                  'Cleared the queue',
+                );
               }}
               onClearPlayed={() => {
-                const before = queue;
-                queue = clearPlayed(queue);
-                const cleared = before.items.length - queue.items.length;
-                showToast(
-                  `Cleared ${String(cleared)} played ${cleared === 1 ? 'video' : 'videos'}`,
-                  {
-                    undo: () => {
-                      queue = before;
-                    },
-                  },
+                const ids = queue.items
+                  .filter((item) => item.played && item.id !== playingId)
+                  .map((item) => item.id);
+                removeQueueItems(
+                  ids,
+                  `Cleared ${String(ids.length)} played ${ids.length === 1 ? 'video' : 'videos'}`,
                 );
               }}
             />
@@ -1542,6 +1566,7 @@
                 {@const playing = nowPlaying}
                 {#key playing.stream.streamId}
                   <Player
+                    bind:this={player}
                     stream={playing.stream}
                     startedAt={playing.startedAt}
                     autoSeeks={playing.autoSeeks}
@@ -1554,6 +1579,11 @@
                     onBack={goBack}
                     {onEnded}
                     {onTime}
+                    onPauseChange={(paused: boolean) => {
+                      if (nowPlaying?.stream.streamId === playing.stream.streamId) {
+                        playbackPaused = paused;
+                      }
+                    }}
                     nextTitle={next?.title ?? null}
                     onPlayNext={playNext}
                   />

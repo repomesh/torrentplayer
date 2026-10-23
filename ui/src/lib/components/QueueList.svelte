@@ -18,7 +18,7 @@
    * resumes it, and unticking removes the video (with Undo). Only the video playing can hold downloads back ("Waiting for
    * playback"), which never changes the user's pauses.
    */
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import type { FileSummary } from '../bindings/FileSummary';
   import type { LibraryItem } from '../bindings/LibraryItem';
   import type { ReadinessState } from '../bindings/ReadinessState';
@@ -50,6 +50,9 @@
     queue: Queue;
     /** The queue item playing now, if the video playing came from the queue. */
     playingId: string | null;
+    playbackPaused?: boolean;
+    onTogglePlayback?: (() => void) | undefined;
+    onStopPlayback?: (() => void) | undefined;
     /** The torrent and file playing now, by group key and file index. */
     playingFile?: { keys: readonly string[]; index: number } | null;
     /** What the next item's preload is doing (`Ready to play instantly`), if anything. */
@@ -88,6 +91,9 @@
   let {
     queue,
     playingId,
+    playbackPaused = false,
+    onTogglePlayback,
+    onStopPlayback,
     playingFile = null,
     nextStatus = null,
     readiness = new Map(),
@@ -131,6 +137,18 @@
   let dropIndex = $state<number | null>(null);
   let announcement = $state('');
   let root: HTMLUListElement | undefined = $state();
+
+  // Reveal a newly selected file even if its torrent was collapsed. An explicit collapse
+  // afterwards is respected until the user chooses a different playing item.
+  $effect(() => {
+    const id = playingId;
+    untrack(() => {
+      const group = groups.find((g) => g.items.some((item) => item.id === id));
+      if (group) {
+        collapsed = collapsed.filter((key) => key !== group.key);
+      }
+    });
+  });
 
   function videos(group: QueueGroup): readonly FileSummary[] | null {
     return filesOf?.(group.key) ?? null;
@@ -232,6 +250,9 @@
   }
 
   function rowLabel(group: QueueGroup, row: TreeRow): string | null {
+    if (isPlaying(group, row) && playbackPaused) {
+      return 'Paused';
+    }
     return queueRowLabel({
       playing: isPlaying(group, row),
       busy: isBusy(group.key),
@@ -275,6 +296,11 @@
 
   /** Pauses or resumes a queued video, and says so. */
   function togglePauseItem(item: QueueItem, title: string): void {
+    if (item.id === playingId && onTogglePlayback) {
+      onTogglePlayback();
+      announcement = `${title} ${playbackPaused ? 'resumed' : 'paused'}`;
+      return;
+    }
     if (!onTogglePause) {
       return;
     }
@@ -516,6 +542,7 @@
 
 {#snippet rowContent(node: Extract<Node, { kind: 'row' }>)}
   {@const row = node.row}
+  {@const active = isPlaying(node.group, row)}
   {@const label = rowLabel(node.group, row)}
   {@const size = rowSize(row)}
   {@const download = row.item ? shownDownload(row.item) : undefined}
@@ -533,12 +560,16 @@
       tabindex={innerTab(node.id)}
       checked={row.item !== null}
       disabled={row.file === null && row.item === null}
-      aria-label={row.item === null
-        ? `Queue ${rowTitle(row)}`
-        : `Remove ${rowTitle(row)} from the queue`}
-      title={row.item === null
-        ? 'Add to the queue'
-        : 'In the queue (untick to remove it; Undo puts it back)'}
+      aria-label={active && row.item !== null
+        ? `Stop and remove ${rowTitle(row)} from the queue`
+        : row.item === null
+          ? `Queue ${rowTitle(row)}`
+          : `Remove ${rowTitle(row)} from the queue`}
+      title={active && row.item !== null
+        ? 'Stop playback and remove from the queue (Undo restores the item)'
+        : row.item === null
+          ? 'Add to the queue'
+          : 'In the queue (untick to remove it; Undo puts it back)'}
       onclick={(event: MouseEvent) => {
         event.stopPropagation();
       }}
@@ -594,7 +625,23 @@
         <span class="bar placeholder" aria-hidden="true"></span>
       {/if}
     </button>
-    {#if row.item !== null && onTogglePause}
+    {#if active && onTogglePlayback}
+      <button
+        type="button"
+        class="icon pause"
+        tabindex={innerTab(node.id)}
+        aria-label={`${playbackPaused ? 'Resume' : 'Pause'} playback ${rowTitle(row)}`}
+        title={playbackPaused ? 'Resume playback (P)' : 'Pause playback (P)'}
+        onclick={(event: MouseEvent) => {
+          event.stopPropagation();
+          onTogglePlayback();
+        }}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"
+          ><path d={playbackPaused ? 'M8 5.5v13l10-6.5z' : 'M8 5v14M16 5v14'} /></svg
+        >
+      </button>
+    {:else if row.item !== null && onTogglePause}
       {@const item = row.item}
       <!-- The only queued video of its torrent pauses the torrent; in a torrent with others
            queued, the torrent keeps sharing for them. -->
@@ -620,28 +667,46 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d={PAUSE_TRANSFERS} /></svg>
       </button>
     {/if}
-    <button
-      type="button"
-      class="icon play"
-      tabindex={innerTab(node.id)}
-      disabled={isBusy(node.group.key)}
-      aria-label={`Play ${rowTitle(row)} now`}
-      title="Play now"
-      onclick={(event: MouseEvent) => {
-        event.stopPropagation();
-        play(node);
-      }}
-    >
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" /></svg>
-    </button>
+    {#if active && onStopPlayback}
+      <button
+        type="button"
+        class="icon stop"
+        tabindex={innerTab(node.id)}
+        aria-label={`Stop playback ${rowTitle(row)}`}
+        title="Stop playback; keep in the queue"
+        onclick={(event: MouseEvent) => {
+          event.stopPropagation();
+          onStopPlayback();
+        }}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12v12H6z" /></svg>
+      </button>
+    {:else}
+      <button
+        type="button"
+        class="icon play"
+        tabindex={innerTab(node.id)}
+        disabled={isBusy(node.group.key)}
+        aria-label={`Play ${rowTitle(row)} now`}
+        title="Play now"
+        onclick={(event: MouseEvent) => {
+          event.stopPropagation();
+          play(node);
+        }}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" /></svg>
+      </button>
+    {/if}
     {#if row.item !== null}
       {@const id = row.item.id}
       <button
         type="button"
         class="icon remove"
         tabindex={innerTab(node.id)}
-        aria-label={`Remove ${rowTitle(row)} from the queue`}
-        title="Remove from the queue"
+        aria-label={active
+          ? `Stop and remove ${rowTitle(row)} from the queue`
+          : `Remove ${rowTitle(row)} from the queue`}
+        title={active ? 'Stop playback and remove from the queue' : 'Remove from the queue'}
         onclick={(event: MouseEvent) => {
           event.stopPropagation();
           onRemove(id);
@@ -741,8 +806,8 @@
                 aria-label={`Pause downloading and uploading ${groupName(group)}`}
                 aria-pressed={paused}
                 title={paused
-                  ? 'Paused by you: press to resume downloading and uploading its videos (P)'
-                  : 'Pause downloading and uploading its videos until you resume (P)'}
+                  ? 'Resume background downloading and uploading; current playback continues (P)'
+                  : 'Pause background downloading and uploading; current playback continues (P)'}
                 onclick={() => {
                   togglePauseGroup(group);
                 }}
@@ -755,8 +820,8 @@
                 type="button"
                 class="icon group-remove"
                 tabindex={innerTab(id)}
-                aria-label={`Remove all queued videos of ${groupName(group)} from the queue`}
-                title={`Remove all ${String(group.items.length)} queued videos (Undo puts them back)`}
+                aria-label={`${group.items.some((item) => item.id === playingId) ? 'Stop playback and remove' : 'Remove'} all queued videos of ${groupName(group)} from the queue`}
+                title={`Remove all ${String(group.items.length)} queued videos${group.items.some((item) => item.id === playingId) ? ' and stop playback' : ''} (Undo puts them back)`}
                 onclick={() => {
                   removeWholeGroup(group);
                 }}

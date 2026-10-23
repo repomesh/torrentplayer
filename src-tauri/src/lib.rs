@@ -267,7 +267,7 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The longest TorrentPlayer waits for the engine to stop when it exits.
+/// The longest TorrentPlayer waits for final progress and engine cleanup when it exits.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Stops the stream engine, if it started, so an unplayed preload's cache is deleted now rather
@@ -279,34 +279,51 @@ fn shut_down(app: &tauri::AppHandle) {
     else {
         return;
     };
-    if let Some(library) = app.try_state::<library::LibraryState>() {
-        let progress: Vec<_> = core
-            .streams
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .filter_map(|stream| {
-                stream.progress.position_secs.map(|position| {
-                    (
-                        stream.media.clone(),
-                        position,
-                        stream.progress.duration_secs,
-                        library.revision(),
-                    )
+    let library = app
+        .try_state::<library::LibraryState>()
+        .map(|state| state.inner().clone());
+    // Keep the whole cleanup task off the event-loop thread as well: even an incidental
+    // synchronous operation in engine cleanup must not prevent the exit deadline from firing.
+    let shutdown = tauri::async_runtime::spawn(async move {
+        let progress = async {
+            if let Some(library) = library {
+                let core = std::sync::Arc::clone(&core);
+                let saved = tokio::task::spawn_blocking(move || {
+                    let progress: Vec<_> = core
+                        .streams
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .filter_map(|stream| {
+                            stream.progress.position_secs.map(|position| {
+                                (
+                                    stream.media.clone(),
+                                    position,
+                                    stream.progress.duration_secs,
+                                    library.revision(),
+                                )
+                            })
+                        })
+                        .collect();
+                    for (media, position, duration, revision) in progress {
+                        library.record_sync(&media, position, duration, revision);
+                    }
                 })
-            })
-            .collect();
-        for (media, position, duration, revision) in progress {
-            library.record_sync(&media, position, duration, revision);
-        }
-    }
-    let stopped = tauri::async_runtime::block_on(async move {
-        tokio::time::timeout(SHUTDOWN_TIMEOUT, core.engine.shutdown()).await
+                .await;
+                if let Err(error) = saved {
+                    tracing::warn!(%error, "playback progress shutdown worker failed");
+                }
+            }
+        };
+        tokio::join!(progress, core.engine.shutdown());
     });
-    if stopped.is_ok() {
-        tracing::info!("stream engine stopped");
-    } else {
-        tracing::warn!("the stream engine did not stop in time; exiting anyway");
+    let stopped = tauri::async_runtime::block_on(async move {
+        tokio::time::timeout(SHUTDOWN_TIMEOUT, shutdown).await
+    });
+    match stopped {
+        Ok(Ok(())) => tracing::info!("stream engine stopped"),
+        Ok(Err(error)) => tracing::warn!(%error, "shutdown cleanup task failed"),
+        Err(_) => tracing::warn!("shutdown cleanup did not stop in time; exiting anyway"),
     }
 }
 

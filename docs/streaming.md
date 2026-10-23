@@ -31,6 +31,11 @@ at once, with no check up front: each is checked against the torrent's SHA-1 has
 read for playback or for a peer, and only then are its bytes used. A piece that fails then is
 downloaded again, and the next session checks the whole cache.
 
+On exit, cache flushes and the final playback-history save run on blocking workers. The app
+waits up to two seconds for them; slow storage does not block that deadline. If exiting
+interrupts a flush before its clean marker is complete, the next session checks the cache as
+after a crash.
+
 After a crash (or a cache changed since), every stored piece is checked in the background when
 the torrent is added; each becomes available (to the player, and to peers if sharing is on) as
 soon as it passes, and is not requested from peers meanwhile. The engine checks on two threads

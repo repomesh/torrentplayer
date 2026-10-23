@@ -105,7 +105,8 @@ impl LibraryState {
         Ok(())
     }
 
-    /// Saves progress during shutdown, when spawning work on the runtime is no longer useful.
+    /// Saves final progress during shutdown. Blocking: call from a blocking worker so a slow
+    /// database cannot prevent the app's shutdown deadline from running.
     pub(crate) fn record_sync(
         &self,
         media: &Media,

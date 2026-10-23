@@ -518,7 +518,8 @@ impl Swarm {
 
     /// Stops every torrent, and marks their piece caches as ended cleanly, so the next session
     /// trusts the pieces in them instead of checking every one before use. Blocks while the
-    /// caches that stored pieces since they were opened are flushed to disk.
+    /// caches that stored pieces since they were opened are flushed to disk. Async callers
+    /// should use [`Self::shutdown_async`] so a slow flush does not block their runtime.
     pub fn shutdown(&self) {
         self.cancel.cancel();
         let caches: Vec<Arc<CacheFile>> = self
@@ -534,6 +535,20 @@ impl Swarm {
                 Ok(false) => debug!("piece cache left to be checked next time"),
                 Err(error) => tracing::warn!(%error, "could not mark a piece cache as complete"),
             }
+        }
+    }
+
+    /// Stops every torrent and flushes its piece caches on a blocking worker.
+    ///
+    /// Unlike [`Self::shutdown`], this yields while storage is busy, so a caller can bound its
+    /// wait with a timeout. Dropping the future stops waiting, not a flush already started:
+    /// the worker owns the engine until it finishes. An interrupted flush leaves the cache
+    /// subject to the usual crash recovery checks on the next start.
+    pub async fn shutdown_async(&self) {
+        self.cancel.cancel();
+        let swarm = self.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || swarm.shutdown()).await {
+            tracing::warn!(%error, "piece cache shutdown worker failed");
         }
     }
 }
@@ -2298,6 +2313,64 @@ mod tests {
     }
 
     const PIECES: [&[u8]; 3] = [b"zeroth..", b"first...", b"sec"];
+
+    #[tokio::test]
+    async fn shutdown_can_time_out_while_a_cache_is_locked_and_the_flush_can_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta.clone(), Vec::new()).unwrap();
+        for (piece, data) in (0..).zip(PIECES) {
+            torrent.shared.store.write_piece(piece, data).unwrap();
+        }
+        let cache = torrent.shared.store.cache_file().upgrade().unwrap();
+        let shared = Arc::clone(&torrent.shared);
+        let (locked, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            shared.store.while_index_locked(|| {
+                locked.send(()).unwrap();
+                // Also releases the lock if shutdown regresses to blocking the test runtime.
+                let _ = released.recv_timeout(Duration::from_secs(2));
+            });
+        });
+        ready.await.unwrap();
+
+        // A single-thread runtime cannot service this deadline if shutdown flushes inline.
+        // Drop the actual shutdown future on timeout, just as the app does on exit.
+        let result = tokio::time::timeout(Duration::from_millis(100), swarm.shutdown_async()).await;
+        if result.is_err() {
+            wait_for("the flush owns its cache", Duration::from_secs(5), || {
+                Arc::strong_count(&cache) > 2
+            })
+            .await;
+        }
+        let _ = release.send(());
+        holder.join().unwrap();
+        assert!(
+            result.is_err(),
+            "the blocked flush must not block the deadline"
+        );
+        assert!(
+            swarm.cancel.is_cancelled(),
+            "torrent work stops before flushing"
+        );
+        wait_for("the flush finishes", Duration::from_secs(5), || {
+            Arc::strong_count(&cache) == 2
+        })
+        .await;
+
+        let reopened = PieceStore::open(&dir.path().join(meta.info_hash_hex()), &meta).unwrap();
+        assert_eq!(
+            reopened.stored(),
+            vec![
+                (0, crate::store::Check::Trusted),
+                (1, crate::store::Check::Trusted),
+                (2, crate::store::Check::Trusted)
+            ],
+            "the detached flush still leaves a usable clean marker"
+        );
+    }
 
     fn config(dir: &std::path::Path) -> SwarmConfig {
         let mut cfg = SwarmConfig::new(dir.to_path_buf());

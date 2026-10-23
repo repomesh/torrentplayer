@@ -252,6 +252,33 @@ export function putFirst(
 }
 
 /**
+ * Makes a file available for playback. Existing entries keep their position; new direct
+ * plays go first, while files selected inside a torrent join that group in file order.
+ * `existing` follows a queued play through duplicate merging without re-adding removed items.
+ * A full queue rejects a new file rather than allowing playback with an invisible entry.
+ */
+export function queueForPlayback(
+  queue: Queue,
+  item: QueueItem,
+  where: 'first' | 'group' | 'existing' = 'first',
+  mainFile: MainFile = UNKNOWN_MAIN,
+  order?: (a: QueueItem, b: QueueItem) => number,
+): { queue: Queue; id: string | null } {
+  const existing = findEntry(queue, item, mainFile);
+  if (existing) {
+    return { queue, id: existing.id };
+  }
+  if (where === 'existing') {
+    return { queue, id: null };
+  }
+  if (where === 'first') {
+    return putFirst(queue, item, mainFile);
+  }
+  const added = enqueue(queue, [item], order, mainFile).queue;
+  return { queue: added, id: findEntry(added, item, mainFile)?.id ?? null };
+}
+
+/**
  * Removes an item. Removing the cursor moves it to the previous item, so the item that
  * followed is still next.
  */
@@ -447,9 +474,9 @@ export function setPaused(queue: Queue, ids: readonly string[], paused: boolean)
 }
 
 /** Removes only items that actually reached the end; items passed over stay. */
-export function clearPlayed(queue: Queue): Queue {
+export function clearPlayed(queue: Queue, playingId: string | null = null): Queue {
   return queue.items
-    .filter((item) => item.played)
+    .filter((item) => item.played && item.id !== playingId)
     .reduce((next, item) => remove(next, item.id), queue);
 }
 

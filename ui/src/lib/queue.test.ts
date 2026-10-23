@@ -20,6 +20,7 @@ import {
   mergeDuplicates,
   moveGroup,
   putFirst,
+  queueForPlayback,
   queueEntryState,
   queueRowLabel,
   isPlayed,
@@ -109,6 +110,10 @@ describe('adding', () => {
 });
 
 describe('the cursor', () => {
+  it('keeps the active replay in Clear played', () => {
+    const q = markPlayed(markPlayed(queueOf('a', 'b'), 'a'), 'b');
+    expect(ids(clearPlayed(q, 'b'))).toEqual(['b']);
+  });
   it('starts at the first item and moves along as items play', () => {
     let q = queueOf('a', 'b', 'c');
     expect(currentIndex(q)).toBe(-1);
@@ -182,6 +187,58 @@ describe('the cursor', () => {
       [false, false],
       [false, false],
     ]);
+  });
+});
+
+describe('every playback has a queue entry', () => {
+  it('does not resurrect a queued file removed while its metadata was loading', () => {
+    const q = queueOf('a');
+    expect(queueForPlayback(q, item('removed', 1), 'existing')).toEqual({ queue: q, id: null });
+    expect(queueForPlayback(q, item('merged-id', 0), 'existing')).toEqual({ queue: q, id: 'a' });
+  });
+  it('queues direct playback even when no queue placement was specified', () => {
+    const result = queueForPlayback(emptyQueue(), item('playing', 0));
+    expect(result.id).toBe('playing');
+    expect(ids(result.queue)).toEqual(['playing']);
+  });
+
+  it('keeps an already queued file in place and resolves main-file duplicates', () => {
+    const q = queueOf('a', 'b', 'c');
+    const result = queueForPlayback(q, item('new-id', 1));
+    expect(result).toEqual({ queue: q, id: 'b' });
+    const main = { ...emptyQueue(), items: [item('main', null)] };
+    expect(queueForPlayback(main, item('resolved', 0), 'first', () => 0)).toEqual({
+      queue: main,
+      id: 'main',
+    });
+  });
+
+  it('adds a new direct play before other torrents without losing queued files', () => {
+    const q = queueOf('a', 'b');
+    const result = queueForPlayback(q, item('new', 0, 'aa'.repeat(20)));
+    expect(ids(result.queue)).toEqual(['new', 'a', 'b']);
+  });
+
+  it('joins files selected from a torrent in file order', () => {
+    const q = { ...emptyQueue(), items: [item('first', 0), item('last', 2)] };
+    const result = queueForPlayback(
+      q,
+      item('middle', 1),
+      'group',
+      () => null,
+      (a, b) => (a.fileIndex ?? 0) - (b.fileIndex ?? 0),
+    );
+    expect(ids(result.queue)).toEqual(['first', 'middle', 'last']);
+    expect(result.id).toBe('middle');
+  });
+
+  it('rejects a new playback entry when full, but still finds an existing one', () => {
+    const q = {
+      ...emptyQueue(),
+      items: Array.from({ length: MAX_QUEUE_ITEMS }, (_, i) => item(`i${String(i)}`, i)),
+    };
+    expect(queueForPlayback(q, item('overflow', MAX_QUEUE_ITEMS))).toEqual({ queue: q, id: null });
+    expect(queueForPlayback(q, item('existing', 1))).toEqual({ queue: q, id: 'i1' });
   });
 });
 

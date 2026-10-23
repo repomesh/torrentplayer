@@ -46,6 +46,22 @@ npm run check
 npm test
 ```
 
+## Desktop queue regression
+
+The Windows desktop queue regression uses generated audio, a loopback seeder, and a new
+isolated profile. It checks direct Play, queue visibility, Pause/Resume, Stop, removal, Undo,
+and Clear all against the real player. It needs Node 22+ and WebView2; no public media swarm
+is required. From the repository root:
+
+```sh
+npm --prefix ui run tauri -- build --debug --no-bundle
+cargo build -p torrentplayer-bench --release
+node scripts/test-queue-playback.mjs target/debug/TorrentPlayer.exe target/release/torrentplayer-bench.exe
+```
+
+Profiles, logs, and results are retained under `target/queue-playback-*`. The test stops only
+the app and seeders it launched and leaves the normal user profile untouched.
+
 ## Repository layout
 
 ```text

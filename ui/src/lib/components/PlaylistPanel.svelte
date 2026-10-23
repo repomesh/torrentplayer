@@ -11,7 +11,6 @@
   import type { NetworkStatus } from '../ipc';
   import { followNetwork, queueBlockedNotice } from '../network';
   import {
-    currentIndex,
     groupKey,
     SORT_KEYS,
     upcomingCount,
@@ -26,6 +25,9 @@
     collapsed: boolean;
     /** The queue item playing now, if the video playing came from the queue. */
     playingId: string | null;
+    playbackPaused?: boolean;
+    onTogglePlayback?: () => void;
+    onStopPlayback?: () => void;
     /** The file playing, when it did not come from the queue. */
     playingTitle: string | null;
     nextStatus: string | null;
@@ -62,6 +64,9 @@
     queue,
     collapsed,
     playingId,
+    playbackPaused = false,
+    onTogglePlayback,
+    onStopPlayback,
     playingTitle,
     nextStatus,
     isBusy,
@@ -232,7 +237,7 @@
         {/if}
         <button
           type="button"
-          disabled={currentIndex(queue) <= 0}
+          disabled={!queue.items.some((item) => item.played && item.id !== playingId)}
           onclick={() => {
             onClearPlayed();
             closeMenu();
@@ -315,6 +320,9 @@
         <QueueList
           {queue}
           {playingId}
+          {playbackPaused}
+          {onTogglePlayback}
+          {onStopPlayback}
           {nextStatus}
           {isBusy}
           {readiness}

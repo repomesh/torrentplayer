@@ -199,6 +199,13 @@ impl PieceStore {
         Arc::downgrade(&self.file)
     }
 
+    /// Holds the real index lock while a shutdown regression test simulates busy storage.
+    #[cfg(test)]
+    pub(crate) fn while_index_locked(&self, work: impl FnOnce()) {
+        let _index = self.file.index_mut();
+        work();
+    }
+
     /// A store on `file` (see [`PieceStore::cache_file`]), if a store still uses it. For a
     /// torrent added again while an earlier instance is still in use (a reader finishing a
     /// request): opening the cache again could truncate it under that reader. The stores share

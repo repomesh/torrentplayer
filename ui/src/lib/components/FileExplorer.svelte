@@ -39,6 +39,7 @@
     onSelectTorrent: (entry: ExplorerTorrent) => void;
     onPlay: (file: FileSummary) => void;
     onQueue: (file: FileSummary) => void;
+    onRemove: (file: FileSummary) => void;
     /** Queues every video not queued yet, in lecture order. */
     onQueueAll: (files: FileSummary[]) => void;
   }
@@ -55,6 +56,7 @@
     onSelectTorrent,
     onPlay,
     onQueue,
+    onRemove,
     onQueueAll,
   }: Props = $props();
 
@@ -220,14 +222,22 @@
           type="button"
           class="small"
           class:queued
-          disabled={queued}
-          aria-label={queued ? `${fileName(file.path)} is queued` : `Queue ${fileName(file.path)}`}
+          aria-label={queued
+            ? `${playingIndex === file.index ? 'Stop and remove' : 'Remove'} ${fileName(file.path)} from the queue`
+            : `Queue ${fileName(file.path)}`}
           title={queued
-            ? 'In the queue'
+            ? playingIndex === file.index
+              ? 'Stop playback and remove from the queue'
+              : 'Remove from the queue'
             : 'Add to the queue. It downloads in the background; you choose when to play it.'}
           onclick={() => {
-            onQueue(file);
-          }}>{queued ? 'Queued' : '+ Queue'}</button
+            if (queued) {
+              onRemove(file);
+            } else {
+              onQueue(file);
+            }
+          }}
+          >{queued ? (playingIndex === file.index ? 'Stop & remove' : 'Remove') : '+ Queue'}</button
         >
       </span>
     {/if}
