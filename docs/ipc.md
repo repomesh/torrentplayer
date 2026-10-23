@@ -640,8 +640,9 @@ link (`source`: a magnet link, or an http(s) link to a `.torrent` file; torrents
 file are saved as their `TorrentSummary.magnet`, with the info hash, name, and up to 20 of the
 file's trackers; a magnet link may list at most 64 trackers), `fileIndex` (`null` plays the
 torrent's main video), `title`, `torrentName`, `sizeBytes`, and `infoHash`. The `paused`,
-`skipped`, and `played` flags separately record download pauses, videos passed over, and videos
-that reached their end. Stream URLs are never stored: links to this computer (`localhost`,
+`skipped`, and `played` flags separately record the user's pauses (of download and upload
+together), videos the user unticked, and videos that reached their end; only the user sets
+`paused` and `skipped`. Stream URLs are never stored: links to this computer (`localhost`,
 loopback addresses) are refused.
 
 #### `load_queue`
@@ -719,8 +720,9 @@ the video being watched (see "Background downloads" in [architecture](architectu
 item reports a `state` (`queued`, `starting`, `connecting`, `downloading`, `paused`,
 `complete`, `watching`, `failed`), its torrent's rate and peers, its file's downloaded bytes
 and length, the time left at the current rate, whether it can start at once (`startable`),
-whether its rate is held back for playback (`limited`), and why a queued item waits
-(`waitReason`: `playback` or `limit`). `link` gives the estimated capacity, the total rate,
+whether its rate is held back for playback (`limited`), whether its torrent shares with other
+peers now (`uploading`), and why a queued item waits (`waitReason`: `playback`, shown as
+"Waiting for playback", or `limit`). `paused` is only ever the user's pause. `link` gives the estimated capacity, the total rate,
 playback's need, the pressure (`relaxed`, `guarded`, `starving`), the user's maximum of
 downloads at once (`maxActive`, `null` for none), and how many items download. The downloader updates it about once a second; the call only reads
 that, so it never starts the engine. Pause an item, or change the order, with `save_queue`
@@ -1061,7 +1063,7 @@ The status bar's latest public addresses, kept current by the app (see the publi
 | `library-changed`   | [`LibraryItem`](../ui/src/lib/bindings/LibraryItem.ts)     | After an item is opened or a playback checkpoint is saved.         |
 | `network-status`    | [`NetworkStatus`](../ui/src/lib/bindings/NetworkStatus.ts) | At start-up and whenever the network state changes.                |
 | `network-public-ip` | [`PublicIp`](../ui/src/lib/bindings/PublicIp.ts) or `null` | When the status bar's public addresses change (see `public_ip`).   |
-| `seeding-started`   | none                                                       | When a torrent starts seeding after a playback ends (once each).   |
+| `seeding-started`   | none                                                       | When a playback ends and its torrent keeps sharing (once each).    |
 
 The main window may listen to events (`core:event:allow-listen` and `core:event:allow-unlisten`
 in `src-tauri/capabilities/main.json`; it cannot emit them). The frontend follows

@@ -129,7 +129,7 @@ time. Every view stays reachable from the rail.
 │      │   │ ├ ☑ Lecture 1 ▶  │   (or "Pick some-   │   │     with its upcoming count
 │      │   │ ├ ☑ Lecture 2    │    thing from the   │   │
 │      │   │ └ ☐ Lecture 3    │    queue or search")│   │
-│  ⚙   │   │   Single video   │        [Up next 5s] │   │  ⚙  Settings (Ctrl+,)
+│  ⚙   │   │   Single video   │                     │   │  ⚙  Settings (Ctrl+,)
 │      │   └──────────────────┴─────────────────────┘   │
 └──────┴────────────────────────────────────────────────┘
 ```
@@ -142,9 +142,10 @@ time. Every view stays reachable from the rail.
   Coming back resumes at the same position. Playing something else, or a failed start, closes
   the stream.
 - **Queue** (`ui/src/lib/queue.ts`, persisted by `torrentplayer-library`) is a playlist with a cursor.
-  At the end of a video an "Up next" card counts down 5 s (cancel with Esc), unless
-  `playback.autoplayNext` is off. The playlist panel beside the player collapses with Q, and
-  Shift+N plays the next item. Fullscreen is requested on the stage that holds the player,
+  It is manual: a video that ends is marked played and stays on its end; nothing plays next on
+  its own. Moving the cursor never changes an item's flags, and only the user skips, pauses, or
+  removes items (the same file of one torrent queued twice is merged into one entry). The
+  playlist panel beside the player collapses with Q, and Shift+N plays the next item. Fullscreen is requested on the stage that holds the player,
   not the player itself, so it stays on when the next video's player replaces the last one.
 - **Library and resume** (`torrentplayer-library`, `ui/src/lib/library.ts`) identify a playable file by
   `(info hash, file index)` and store its safe replay link, display metadata, last position,
@@ -189,14 +190,16 @@ time. Every view stays reachable from the rail.
   librqbit's cannot be limited one by one), and while it is starving they pause, connections
   kept, until it recovers. Once the buffer is comfortable the limits lift. The item after the
   current one ranks first, then the rest after the current item, then items before it
-  (skipped or played); within that "In order" follows the queue and "Fastest first" prefers
-  the fastest torrents, keeping a torrent's own files in order (`Queue.order`). Torrents are
-  added four at a time so a long queue does not fetch all of its metadata at once. Items keep
-  paused, skipped, and completed state independently (`QueueItem.paused`, `.skipped`, `.played`),
-  so jumping ahead does not make bypassed videos look watched. Items can be paused;
-  paused, finished, and waiting items' files are deselected. A torrent nothing needs is paused
-  unless it is still seeding after playback: the queue stops it at the first configured ratio or
-  time target. The settings' download limit covers everything together (both engines, playback
+  (played, or passed over); within that "In order" follows the queue and "Fastest first"
+  prefers the fastest torrents, keeping a torrent's own files in order (`Queue.order`). This
+  ranking only matters with a maximum of downloads at once. Torrents are added four at a time so
+  a long queue does not fetch all of its metadata at once. Items keep paused, skipped, and
+  completed state independently (`QueueItem.paused`, `.skipped`, `.played`), and only the user
+  sets `paused` and `skipped`. Paused, skipped, finished, and waiting items' files are
+  deselected. A queued torrent keeps running and uploading, finished or not, watched or not,
+  until the user pauses all of its items (one pause stops its download and upload together) or
+  removes them from the queue. The only automatic hold is the playback protection above, shown
+  as "Waiting for playback"; it never changes `QueueItem.paused`. The settings' download limit covers everything together (both engines, playback
   included) and caps the planner's estimate; one upload limit covers both engines. Queue rows
   show speed, peers, progress, and time left, coloured green (playable), yellow (downloading
   from peers), or grey (waiting).

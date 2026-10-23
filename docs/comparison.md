@@ -59,8 +59,8 @@ repositories, and documentation (sources below). Products change; corrections ar
   player is on the roadmap.
 - **Hiding your address from the swarm without a VPN:** cloud services join the swarm for you.
   With TorrentPlayer, use its WireGuard or proxy modes.
-- **Running a seedbox:** TorrentPlayer uploads while it runs and can keep seeding after playback
-  until a ratio or time target is reached, but only while the app is open, and it accepts
+- **Running a seedbox:** TorrentPlayer keeps seeding queued torrents until you pause or remove
+  them, but only while the app is open, and it accepts
   incoming connections only when you turn that on. Full download clients are built to seed
   around the clock.
 

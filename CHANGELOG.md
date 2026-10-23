@@ -28,6 +28,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `summary` in `results.json`. `torrentplayer-bench render <results.json>` rewrites a saved
   run's report in the current layout.
 
+### Changed
+
+- The queue is now manual. Nothing in it is skipped, paused, or removed for you: playing a video
+  further down no longer marks the videos in between as skipped (also when the app starts), and
+  playing or finishing a skipped video keeps it skipped until you tick it again. Only merging
+  the same file of one torrent queued twice still happens on its own.
+- When a video ends it is marked played and stays on its end. The "Up next" countdown and the
+  "Play the next item in the queue automatically" setting (`playback.autoplayNext`) are gone;
+  pick the next video yourself, or press Shift+N.
+- Queued torrents keep running and uploading, finished or not, watched or not, until you pause
+  or remove them. They are no longer paused when nothing is left to download, and seeding no
+  longer stops on its own after playback, so the "Keep sharing after watching", "Stop seeding
+  after", and "Stop seeding at ratio" settings (`bandwidth.seedAfterWatching`,
+  `bandwidth.seedRatioTarget`, `bandwidth.seedTimeLimitMinutes`) are removed. Older settings
+  files load as before and drop them on the next save.
+- One pause per video, torrent, or the whole queue stops both downloading and uploading until
+  you resume it, and now applies to finished and skipped videos too. The only automatic hold is
+  the one that protects the video playing: background downloads that wait for it now say
+  "Waiting for playback", and it never changes your own pauses. A finished video that is
+  sharing reads "Downloaded · seeding".
+
 ### Fixed
 
 - `cargo bench-suite … --download-mibps 0` now runs public entries with no download limit (labelled

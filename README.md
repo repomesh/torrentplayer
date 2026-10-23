@@ -125,12 +125,14 @@ sources, details, and where other tools are the better fit.
   time left, with a bar
   that is green when it is ready to play, yellow while it downloads, and grey while it
   waits for peers. A "Fastest" badge points out the video that would play smoothest now.
-- **Gives back to the swarm.** The built-in engine uploads every verified piece it has while a
-  torrent is active. After playback, keep sharing until a ratio or time target is reached, with
-  one upload limit across both engines.
+- **Gives back to the swarm.** The built-in engine uploads every verified piece it has. Queued
+  torrents keep sharing, finished or not, until you pause or remove them, with one upload limit
+  across both engines.
 - **In order or fastest first.** Series, albums, and courses download in sequence, or the fastest
-  torrents go first while each course keeps its lecture order. Pause any video, or a whole
-  torrent, with one click.
+  torrents go first while each course keeps its lecture order. Pause any video, a whole
+  torrent, or everything with one click; a pause stops download and upload until you resume.
+- **You stay in charge.** Nothing in the queue is paused, skipped, or removed for you, and the
+  next video plays only when you pick it.
 
 ### A player for video and audio
 
@@ -173,7 +175,7 @@ sources, details, and where other tools are the better fit.
   upload speed of every torrent, and your public IPv4 and IPv6 addresses as the
   internet sees them, through the current mode (optional; see [Privacy](#privacy)).
 - **Bandwidth limits** for download and upload, applied to the whole app instantly.
-- **Seeding controls** for sharing after playback, ratio and time targets, and a peer cap per
+- **Seeding you control:** pause or remove a torrent to stop sharing it, and a peer cap per
   torrent.
 
 ## Performance
@@ -299,7 +301,7 @@ Working today: the streaming engine (for `.torrent` files and magnet links), pla
 queue with background downloads, the WireGuard and SOCKS5 modes with a kill switch, and
 bandwidth limits. Next:
 
-- [x] Seeding controls: keep sharing after watching, ratio and time targets, peer limits
+- [x] Seeding controls: pause sharing per video, torrent, or queue; peer limits
 - [x] Cache size limit and automatic clean-up of old downloads
 - [x] Resume where you left off
 - [x] Dolby and DTS audio (converted as it plays)
@@ -320,8 +322,8 @@ peers can only be as fast as they are; the queue shows each video's peers and sp
 pick one that plays smoothly, or switch the queue to "Fastest first".
 
 **Does TorrentPlayer upload?** Yes. Both torrent engines share verified pieces while a torrent is
-active, under the global upload limit. Settings can keep sharing after playback until either a
-ratio or time target is reached.
+active, under the global upload limit. A queued torrent keeps sharing until you pause or remove
+it in the queue.
 
 **What happens if my VPN drops?** In the WireGuard and SOCKS5 modes, the kill switch stops all
 traffic and closes connections until the tunnel is back; nothing falls back to a direct

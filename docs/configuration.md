@@ -71,7 +71,11 @@ Every problem is logged and shown at the top of the Settings page. Older files a
 `torrentplayer_settings::migrate`, which gains one step per schema change. Version 2 removed
 `network.killSwitch` (the kill switch is always on in protected modes, see [Network](#network));
 a version 1 file loads normally and the field is dropped the next time settings are saved.
-Version 3 added the optional seeding time target; older files keep ratio-only seeding.
+Version 3 added the optional seeding time target. 0.3.1 removed `bandwidth.seedAfterWatching`,
+`bandwidth.seedRatioTarget`, `bandwidth.seedTimeLimitMinutes`, and `playback.autoplayNext`
+(the queue is manual now, see [Bandwidth and seeding](#bandwidth-and-seeding)) without a version
+change: unknown fields are ignored when loading, so older files load normally and the fields are
+dropped the next time settings are saved.
 `network.incomingPeers` was added later without a version change: files without it load with
 incoming connections off, and an out-of-range port is reset to 0 (random). Version 4 (0.3.0)
 removed the VPN adapter mode: `network.mode = "bindInterface"` becomes `direct` with
@@ -91,7 +95,6 @@ tags these "Coming in a later milestone").
 | Setting (`settings.json`)     | Default | Valid values  | Applies                        |
 | ----------------------------- | ------- | ------------- | ------------------------------ |
 | `playback.defaultSpeed`       | `1.0`   | 0.5–3         | when the next video starts     |
-| `playback.autoplayNext`       | `true`  | on / off      | at once                        |
 | `playback.resumePosition`     | `true`  | on / off      | when the next video starts     |
 | `playback.hardwareDecoding`   | `auto`  | `auto`, `off` | later (with the libmpv player) |
 | `playback.optimizeQueue`      | `false` | on / off      | at once                        |
@@ -102,7 +105,9 @@ tags these "Coming in a later milestone").
 The speed menu in the player changes the current video only; the default applies to each video
 as it starts. `subtitlesByDefault` ("Show subtitles automatically") turns on the video's own
 subtitles in the first of the system's languages that they have; whatever is chosen in the CC
-menu (or with C) is remembered for the rest of the session instead. `autoplayNext` plays the queue's next video after a 5-second "Up next" countdown.
+menu (or with C) is remembered for the rest of the session instead. When a video ends it is
+marked played and stays on its end; the next video plays only when you choose it (Shift+N plays
+the queue's next one).
 `optimizeQueue` ("Play ready videos first", also in the queue panel) moves queued videos that are
 ready to play (downloaded, or their start and end are) ahead of those still downloading, without
 moving the video playing; with `keepCourseOrder`, files of one torrent keep their order. Files
@@ -148,21 +153,18 @@ cannot be associated safely with a finished torrent.
 
 ### Bandwidth and seeding
 
-| Setting                          | Default | Valid values                        | Applies    |
-| -------------------------------- | ------- | ----------------------------------- | ---------- |
-| `bandwidth.downloadLimitKib`     | `0`     | 0 (unlimited) to 1 048 576 KiB/s    | now        |
-| `bandwidth.uploadLimitKib`       | `0`     | 0 (unlimited) to 1 048 576 KiB/s    | now        |
-| `bandwidth.seedAfterWatching`    | `true`  | on / off                            | now        |
-| `bandwidth.seedRatioTarget`      | `2.0`   | 0–100 (0 has no ratio limit)        | now        |
-| `bandwidth.seedTimeLimitMinutes` | `0`     | 0–525 600 (0 has no time limit)     | now        |
-| `bandwidth.peerLimit`            | `40`    | 5–500                               | next start |
-| `bandwidth.maxDownloads`         | `0`     | 0–100 (0 downloads the whole queue) | now        |
+| Setting                      | Default | Valid values                        | Applies    |
+| ---------------------------- | ------- | ----------------------------------- | ---------- |
+| `bandwidth.downloadLimitKib` | `0`     | 0 (unlimited) to 1 048 576 KiB/s    | now        |
+| `bandwidth.uploadLimitKib`   | `0`     | 0 (unlimited) to 1 048 576 KiB/s    | now        |
+| `bandwidth.peerLimit`        | `40`    | 5–500                               | next start |
+| `bandwidth.maxDownloads`     | `0`     | 0–100 (0 downloads the whole queue) | now        |
 
 The page shows limits in KB/s or MB/s; they are stored in KiB/s.
-Both engines upload while a torrent is active. After playback finishes, **Keep sharing after
-watching** leaves it seeding until the first configured target is reached. The ratio is uploaded
-piece bytes divided by verified downloaded bytes; setting either target to 0 disables only that
-target. The upload limit covers both engines together. The peer cap needs a restart because the
+Seeding is manual: a queued torrent downloads and uploads, finished or not, until you pause
+all of its videos in the queue (one pause stops both its download and its upload) or remove them
+from the queue. Nothing stops it at a ratio or time. The upload limit covers both engines
+together. The peer cap needs a restart because the
 librqbit session fixes it when it starts.
 
 ### Search
@@ -245,7 +247,7 @@ listen at all in that mode. Settings shows whether it is listening. See
 [Incoming peer connections](network.md#incoming-peer-connections).
 
 **VPN recommendation:** in Direct mode, Settings → Network & VPN, a **VPN recommended** button beside
-the status bar's network indicator, and a note the first time a torrent starts seeding in a run
+the status bar's network indicator, and a note the first time in a run that a torrent keeps sharing after its playback ends
 say that every peer and tracker sees your IP address, so a VPN is recommended when downloading
 or seeding, and link to the [blog post on VPNs](https://torrentplayer.io/blog/vpn-for-torrenting/).
 **Don't show again** in any of them sets `network.vpnHintDismissed` and hides all three.
