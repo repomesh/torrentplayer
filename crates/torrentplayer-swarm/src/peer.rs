@@ -206,7 +206,7 @@ pub(crate) async fn accept(
     let Ok(peer_id) = wire::check_handshake(&theirs, &shared.meta.info_hash) else {
         return;
     };
-    if peer_id == shared.peer_id || !shared.reserve_inbound() {
+    if peer_id == shared.peer_id || !shared.reserve_inbound(addr) {
         return;
     }
     let ours = wire::handshake(&shared.meta.info_hash, &shared.peer_id);
@@ -246,9 +246,17 @@ async fn serve(
     inbound: bool,
 ) {
     let started = Instant::now();
+    // Banned while this connection was being made.
+    if shared.is_banned(addr.ip()) {
+        if !inbound {
+            shared.peer_finished(addr, PeerEnd::Banned);
+        }
+        return;
+    }
     debug!(%addr, peer = key, inbound, client = %String::from_utf8_lossy(&peer_id[..8]), "peer connected");
 
     let (tx, rx) = mpsc::channel(SEND_QUEUE);
+    shared.peer_connected(key, addr);
     shared.sched().add_peer(key);
     // Publish the sender only after its initial messages are queued. Holding the peer map while
     // taking the bitfield snapshot makes a concurrent piece completion either appear in the
@@ -277,6 +285,7 @@ async fn serve(
     };
     if !published {
         shared.sched().remove_peer(key);
+        shared.peer_disconnected(key);
         if !inbound {
             shared.peer_finished(addr, PeerEnd::Closed { worked: false });
         }
@@ -312,6 +321,7 @@ async fn serve(
         .unwrap_or_else(PoisonError::into_inner)
         .remove(&key);
     shared.sched().remove_peer(key);
+    shared.peer_disconnected(key);
     let end = match shared.take_verdict(key) {
         Some(Verdict::Banned) => PeerEnd::Banned,
         Some(Verdict::Unresponsive) => PeerEnd::Closed { worked: false },
