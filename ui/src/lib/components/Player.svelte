@@ -295,9 +295,19 @@
   }
 
   function onVideoFrame(_now: number, metadata: VideoFrameCallbackMetadata): void {
+    frameHandle = null;
     frame();
     painted(metadata.mediaTime);
-    if (video) {
+    // Frames matter only until the first one, and during a seek (its hold and its timing):
+    // ordinary playback runs without a callback on every frame. `seeking` re-arms it.
+    if (!firstFrameSeen || gate.holding || timer.seekPending) {
+      watchFrames();
+    }
+  }
+
+  /** Calls `onVideoFrame` on the next painted frame, unless already waiting for one. */
+  function watchFrames(): void {
+    if (video && hasFrameCallback && frameHandle === null && !destroyed) {
       frameHandle = video.requestVideoFrameCallback(onVideoFrame);
     }
   }
@@ -766,9 +776,7 @@
     // Already fullscreen when the queue's next video replaces the last one.
     onFullscreenChange();
     timer.play(startedAt);
-    if (video && 'requestVideoFrameCallback' in video) {
-      frameHandle = video.requestVideoFrameCallback(onVideoFrame);
-    }
+    watchFrames();
     reportTimer = setInterval(report, 1000);
     statsTimer = setInterval(() => void pollStats(), 1000);
     void pollStats();
@@ -910,6 +918,7 @@
         }
       }
       seekHolding = gate.holding;
+      watchFrames();
       report();
     }}
     onseeked={() => {
