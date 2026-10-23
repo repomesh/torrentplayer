@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Current schema version. Bump it and add a step to [`crate::migrate`] when the shape changes.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Slowest and fastest playback speeds.
 pub const SPEED_RANGE: (f64, f64) = (0.5, 3.0);
@@ -255,10 +255,24 @@ pub struct NetworkSettings {
     /// The user dismissed the note that recommends a VPN in Direct mode (shown in Settings →
     /// Network, the status bar, and when seeding starts).
     pub vpn_hint_dismissed: bool,
+    /// Why traffic is held, if it is: set when loading could not keep the connection the user
+    /// chose (see [`NetworkHold`]). While this is set and the mode is Direct, TorrentPlayer holds
+    /// all traffic and shows a notice; confirming the notice clears it.
+    pub hold: Option<NetworkHold>,
+}
+
+/// Why traffic is held until the user confirms the connection mode (`network.hold`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum NetworkHold {
     /// The settings used the VPN adapter mode, which was removed in 0.3.0, and were moved to
-    /// Direct (see [`crate::migrate`]). While this is set and the mode is Direct, TorrentPlayer
-    /// holds all traffic and shows a notice; dismissing the notice clears it.
-    pub vpn_adapter_mode_removed: bool,
+    /// Direct (see [`crate::migrate`]).
+    VpnAdapterModeRemoved,
+    /// `settings.json` existed but could not be read, or its connection mode (or the whole
+    /// network section) was invalid, so the mode the user chose is unknown. See
+    /// [`crate::SettingsStore::load`].
+    SettingsUnreadable,
 }
 
 impl Default for NetworkSettings {
@@ -272,7 +286,7 @@ impl Default for NetworkSettings {
             show_public_ip: true,
             incoming_peers: IncomingPeersSettings::default(),
             vpn_hint_dismissed: false,
-            vpn_adapter_mode_removed: false,
+            hold: None,
         }
     }
 }
@@ -796,13 +810,21 @@ fn check_download_dir(dir: &str) -> Result<(), String> {
     check_folder(dir)
 }
 
-// Checks a user-chosen folder: a full, plain path below a drive or file system root.
+// Checks a user-chosen folder: a full, plain path below a drive or file system root, on this
+// computer. Network (UNC) and device paths are refused on every platform: merely checking such
+// a folder makes Windows connect to the host and offer the user's NTLM credentials, and a
+// program found there (FFmpeg) would run from another machine.
 fn check_folder(dir: &str) -> Result<(), String> {
     if dir.is_empty() || dir.len() > MAX_TEXT || dir.chars().any(char::is_control) {
         return Err("Enter a folder path.".to_owned());
     }
-    if dir.starts_with(r"\\?\") || dir.starts_with(r"\\.\") {
+    if dir.starts_with(r"\\?\") || dir.starts_with(r"\\.\") || dir.starts_with("//./") {
         return Err("Device paths are not supported; choose a normal folder.".to_owned());
+    }
+    if is_network_path(dir) {
+        return Err(
+            "Network folders are not supported; choose a folder on this computer.".to_owned(),
+        );
     }
     let path = Path::new(dir);
     if !path.is_absolute() {
@@ -817,6 +839,14 @@ fn check_folder(dir: &str) -> Result<(), String> {
             Component::ParentDir | Component::CurDir => {
                 return Err("The path cannot contain \".\" or \"..\".".to_owned());
             }
+            // Only a drive letter: UNC and verbatim prefixes are refused above, this catches
+            // any other form.
+            Component::Prefix(prefix) if !matches!(prefix.kind(), std::path::Prefix::Disk(_)) => {
+                return Err(
+                    "Network folders are not supported; choose a folder on this computer."
+                        .to_owned(),
+                );
+            }
             Component::RootDir | Component::Prefix(_) => {}
         }
     }
@@ -824,6 +854,17 @@ fn check_folder(dir: &str) -> Result<(), String> {
         return Err("Choose a folder, not the root of a drive.".to_owned());
     }
     Ok(())
+}
+
+/// Whether `path` names a folder on another computer or a device: a UNC path (`\\host\share`,
+/// `//host/share`, `\\?\UNC\…`) in either slash style.
+#[must_use]
+pub fn is_network_path(path: &str) -> bool {
+    let mut chars = path.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('\\' | '/'), Some('\\' | '/'))
+    )
 }
 
 #[cfg(test)]
@@ -954,6 +995,43 @@ mod tests {
         assert!(check_download_dir(parent).is_err());
         assert!(check_download_dir(r"\\.\PhysicalDrive0").is_err());
         assert!(check_download_dir("").is_err());
+    }
+
+    #[test]
+    fn network_and_device_folders_are_refused() {
+        for bad in [
+            r"\\attacker\share",
+            r"\\attacker\share\ffmpeg",
+            "//attacker/share/ffmpeg",
+            r"\/attacker\share",
+            r"\\?\UNC\attacker\share\ffmpeg",
+            r"\\?\C:\ffmpeg",
+            r"\\.\C:\ffmpeg",
+        ] {
+            assert!(is_network_path(bad), "{bad}");
+            assert!(check_folder(bad).is_err(), "{bad}");
+            let mut s = Settings::default();
+            s.advanced.ffmpeg_dir = Some(bad.into());
+            s.storage.download_dir = Some(bad.into());
+            let fields: Vec<_> = s
+                .validate()
+                .unwrap_err()
+                .into_iter()
+                .map(|e| e.field)
+                .collect();
+            assert_eq!(
+                fields,
+                ["storage.downloadDir", "advanced.ffmpegDir"],
+                "{bad}"
+            );
+            // A file from disk with such a path loads with the setting reset.
+            s.sanitize();
+            assert_eq!(
+                (s.storage.download_dir, s.advanced.ffmpeg_dir),
+                (None, None)
+            );
+        }
+        assert!(!is_network_path(r"C:\ffmpeg") && !is_network_path("/opt/ffmpeg"));
     }
 
     #[test]

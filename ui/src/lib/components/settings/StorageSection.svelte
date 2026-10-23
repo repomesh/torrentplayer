@@ -19,9 +19,11 @@
     view: SettingsView;
     errors: Record<string, string>;
     update: (path: string, value: unknown) => void;
+    /** Shows settings saved by the folder picker. */
+    onView: (view: SettingsView) => void;
   }
 
-  let { settings, view, errors, update }: Props = $props();
+  let { settings, view, errors, update, onView }: Props = $props();
 
   const CLEANUP_DAYS = [7, 14, 30, 90, 365];
   const s = $derived(settings.storage);
@@ -42,14 +44,17 @@
   let picking = $state(false);
   let pickError = $state<string | null>(null);
 
-  /** Opens the system folder picker; the chosen folder is checked and saved like a typed one. */
+  /**
+   * Opens the system folder picker, which checks and saves the chosen folder: the only way to
+   * choose one, so the field is read-only.
+   */
   async function pickFolder(): Promise<void> {
     picking = true;
     pickError = null;
     try {
-      const folder = await chooseDownloadDir();
-      if (folder !== null) {
-        update('storage.downloadDir', folder);
+      const saved = await chooseDownloadDir();
+      if (saved !== null) {
+        onView(saved);
       }
     } catch (reason: unknown) {
       pickError = errorMessage(reason);
@@ -107,13 +112,10 @@
         spellcheck="false"
         autocomplete="off"
         placeholder={view.defaultDownloadDir}
+        readonly
         value={s.downloadDir ?? ''}
         aria-describedby="storage-dir-help"
         aria-invalid={errors['storage.downloadDir'] !== undefined}
-        onchange={(e: Event) => {
-          const value = (e.currentTarget as HTMLInputElement).value.trim();
-          update('storage.downloadDir', value === '' ? null : value);
-        }}
       />
       <div class="folder-actions">
         <button type="button" disabled={picking} onclick={() => void pickFolder()}>

@@ -35,6 +35,7 @@
     "allow-queue-downloads",
     "allow-library-items",
     "allow-preview-file",
+    "allow-stop-preview",
     "allow-seek-thumbnail",
     "allow-media-tools",
     "allow-choose-ffmpeg-dir",

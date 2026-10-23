@@ -28,7 +28,7 @@ use crate::audio::Probed;
 use crate::core::{AppState, Core};
 use crate::error::IpcError;
 use crate::latest::Latest;
-use crate::settings::SettingsState;
+use crate::settings::{SettingsState, SettingsView};
 
 /// How long one `ffprobe` run may take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -332,17 +332,30 @@ pub(crate) async fn media_tools(
     Ok(MediaToolsDto { ffprobe, ffmpeg })
 }
 
-/// Opens the system folder picker for the FFmpeg folder; `null` if cancelled.
+/// Opens the system folder picker for the FFmpeg folder and saves the choice as
+/// `advanced.ffmpegDir` (checked like any change: a local folder outside the download folder).
+/// Returns the saved settings, or `null` if cancelled. This is the only way to choose the
+/// folder: the programs in it run, so the webview cannot name one.
 #[tauri::command]
 pub(crate) async fn choose_ffmpeg_dir(
+    app: tauri::AppHandle,
     window: tauri::WebviewWindow,
-) -> Result<Option<String>, IpcError> {
+    state: State<'_, MediaToolsState>,
+    settings: State<'_, SettingsState>,
+) -> Result<Option<SettingsView>, IpcError> {
     let chosen = rfd::AsyncFileDialog::new()
         .set_title("Choose the folder with ffprobe and ffmpeg")
         .set_parent(&window)
         .pick_folder()
         .await;
-    Ok(chosen.map(|folder| folder.path().to_string_lossy().into_owned()))
+    let Some(folder) = chosen else {
+        return Ok(None);
+    };
+    let folder = folder.path().to_string_lossy().into_owned();
+    let patch = serde_json::json!({ "advanced": { "ffmpegDir": folder } });
+    let view = settings.update(&app, &patch).await?;
+    state.forget();
+    Ok(Some(view))
 }
 
 #[cfg(test)]

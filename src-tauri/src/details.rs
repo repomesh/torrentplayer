@@ -156,12 +156,10 @@ pub(crate) fn openable(link: &str) -> Option<String> {
                 .unwrap_or_default();
             last == "localhost" || (last == "local" && name.contains('.'))
         }
-        url::Host::Ipv4(ip) => {
-            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
-        }
-        url::Host::Ipv6(ip) => {
-            ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xfe00) == 0xfc00
-        }
+        // The same test as for peer addresses: also IPv4-mapped IPv6, fe80::/10, 100.64.0.0/10
+        // (carrier-grade NAT and VPN tunnels), and the other reserved ranges.
+        url::Host::Ipv4(ip) => !torrentplayer_net::is_public_ip(ip.into()),
+        url::Host::Ipv6(ip) => !torrentplayer_net::is_public_ip(ip.into()),
     };
     (!local).then(|| url.into())
 }
@@ -204,6 +202,8 @@ mod tests {
             Some("https://tracker.example/torrent/1")
         );
         assert!(openable("http://example.org/a?b=c&d=e").is_some());
+        assert!(openable("http://93.184.215.14/").is_some());
+        assert!(openable("http://[2606:4700::1]/").is_some());
         for bad in [
             "javascript:alert(1)",
             "file:///C:/Windows/system32",
@@ -217,6 +217,14 @@ mod tests {
             "http://169.254.0.1/",
             "http://[::1]/",
             "http://[fd00::1]/",
+            "http://[::ffff:127.0.0.1]:9000/s/1",
+            "http://[::ffff:192.168.1.1]/",
+            "http://[fe80::1]/",
+            "http://100.64.0.1/",
+            "http://100.127.255.254/",
+            "http://0.0.0.0/",
+            "http://[::]/",
+            "http://224.0.0.1/",
             "http://printer.local/",
             "not a link",
         ] {

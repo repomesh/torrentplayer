@@ -16,6 +16,7 @@ import {
   groupTree,
   keepGroupsTogether,
   markPlayed,
+  mergeDuplicates,
   moveGroup,
   optimizeQueue,
   putFirst,
@@ -26,6 +27,9 @@ import {
   moveBy,
   nextItem,
   remove,
+  removeItem,
+  restoreRemoved,
+  resolveTorrent,
   sameEntry,
   sanitizeQueue,
   setCurrent,
@@ -464,5 +468,133 @@ describe('groupTree', () => {
       'C/Lecture 2.mp4',
       'C/Lecture 10.mp4',
     ]);
+  });
+});
+
+describe('one file of one torrent is queued once (issue #55)', () => {
+  // A single-video torrent whose main video is file 0.
+  const single = (): number => 0;
+  const link = (id: string, fileIndex: number | null): QueueItem => ({
+    ...item(id, fileIndex, null),
+    source: 'https://indexer.example/download/42.torrent',
+  });
+
+  it('treats a main-video entry and the same file as one entry once the files are known', () => {
+    const playing = { ...emptyQueue(), items: [item('a', 0)], current: 'a' };
+    // Without the torrent's files, the main video could be any file.
+    expect(enqueue(playing, [item('b', null)]).added).toBe(1);
+    expect(enqueue(playing, [item('b', null)], undefined, single).added).toBe(0);
+    // The reverse order: queued from a search result, then played from another one.
+    const queued = { ...emptyQueue(), items: [item('a', null)] };
+    expect(enqueue(queued, [item('b', 0)], undefined, single).added).toBe(0);
+    expect(putFirst(queued, item('b', 0), single).id).toBe('a');
+  });
+
+  it('still queues other episodes of a season pack', () => {
+    const season = { ...emptyQueue(), items: [item('a', null)] };
+    // The main video is episode 1 (file 0); episode 3 is another file.
+    const { queue, added } = enqueue(season, [item('b', 2)], undefined, single);
+    expect(added).toBe(1);
+    expect(queue.items.map((i) => i.id)).toEqual(['a', 'b']);
+    expect(sameEntry(item('a', null), item('b', 2), single)).toBe(false);
+  });
+
+  it('matches a link without a hash to a magnet with it', () => {
+    const noHash = { ...item('b', 1, null) };
+    expect(sameEntry(item('a', 1), noHash)).toBe(true);
+    expect(groupKey(noHash)).toBe(HASH);
+    // Download links (no hash anywhere) still compare by link.
+    expect(sameEntry(link('a', 1), link('b', 1))).toBe(true);
+    expect(sameEntry(link('a', 1), item('b', 1))).toBe(false);
+  });
+
+  it('shows a result as queued when its main video is queued by index', () => {
+    const queue = { ...emptyQueue(), items: [item('a', 0)] };
+    const result = { source: `magnet:?xt=urn:btih:${HASH}`, infoHash: HASH, fileIndex: null };
+    expect(queueEntryState(queue, result, null)).toBeNull();
+    expect(queueEntryState(queue, result, null, single)).toBe('upNext');
+  });
+
+  it('merges duplicates when the torrent is opened, keeping progress and the cursor', () => {
+    const before: Queue = {
+      ...emptyQueue(),
+      items: [
+        { ...link('a', null), played: true },
+        item('x', 5),
+        { ...item('b', 0), skipped: true },
+      ],
+      current: 'b',
+    };
+    const { queue, merged } = resolveTorrent(
+      before,
+      { source: 'https://indexer.example/download/42.torrent', infoHash: HASH.toUpperCase() },
+      single,
+    );
+    expect(queue.items.map((i) => i.id)).toEqual(['a', 'x']);
+    expect(queue.items[0]).toMatchObject({ infoHash: HASH, fileIndex: 0, played: true });
+    expect(queue.items[0]?.skipped).toBe(false);
+    expect(queue.current).toBe('a');
+    expect(merged).toEqual(new Map([['b', 'a']]));
+    // Nothing to do: the same queue comes back.
+    expect(resolveTorrent(queue, { source: 'x', infoHash: HASH }, single).queue).toBe(queue);
+  });
+
+  it('dedupes queues saved by older versions', () => {
+    const saved = {
+      items: [item('a', 1), { ...item('b', 1, null) }, item('c', 2)],
+      current: 'b',
+      order: 'inOrder',
+    };
+    const queue = sanitizeQueue(saved);
+    expect(queue.items.map((i) => i.id)).toEqual(['a', 'c']);
+    expect(queue.current).toBe('a');
+    expect(mergeDuplicates(queue).queue).toBe(queue);
+  });
+});
+
+describe('undoing a removal', () => {
+  const OTHER = '0123456789abcdef0123456789abcdef01234567';
+
+  it('puts the item back at its place and keeps what changed meanwhile', () => {
+    const start: Queue = {
+      ...emptyQueue(),
+      items: [item('a', 0), item('b', 1), item('c', 2)],
+      current: 'a',
+    };
+    const { queue: removedB, removed } = removeItem(start, 'b');
+    expect(removed).not.toBeNull();
+    if (removed === null) {
+      return;
+    }
+    // While the toast is up: a is played, the cursor moves on, and a video is queued.
+    let changed = markPlayed(removedB, 'a');
+    changed = setCurrent(changed, 'c');
+    changed = enqueue(changed, [item('d', 0, OTHER)]).queue;
+    const undone = restoreRemoved(changed, removed);
+    expect(undone.items.map((i) => i.id)).toEqual(['a', 'b', 'c', 'd']);
+    expect(isPlayed(undone, 'a')).toBe(true);
+    expect(undone.current).toBe('c');
+  });
+
+  it('restores the cursor only if it has not moved since', () => {
+    const start: Queue = { ...emptyQueue(), items: [item('a', 0), item('b', 1)], current: 'b' };
+    const { queue: after, removed } = removeItem(start, 'b');
+    expect(after.current).toBe('a');
+    if (removed === null) {
+      return;
+    }
+    expect(restoreRemoved(after, removed).current).toBe('b');
+    expect(restoreRemoved(setCurrent(after, null), removed).current).toBeNull();
+  });
+
+  it('does not add an item queued again meanwhile', () => {
+    const start: Queue = { ...emptyQueue(), items: [item('a', 0)] };
+    const { queue: after, removed } = removeItem(start, 'a');
+    if (removed === null) {
+      return;
+    }
+    const again = enqueue(after, [item('a2', 0)]).queue;
+    expect(restoreRemoved(again, removed)).toBe(again);
+    expect(removeItem(start, 'missing').removed).toBeNull();
   });
 });

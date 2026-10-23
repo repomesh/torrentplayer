@@ -228,7 +228,7 @@
         {#if active === 'playback'}
           <PlaybackSection settings={local} {errors} {update} />
         {:else if active === 'storage'}
-          <StorageSection settings={local} {view} {errors} {update} />
+          <StorageSection settings={local} {view} {errors} {update} onView={showSaved} />
         {:else if active === 'bandwidth'}
           <BandwidthSection settings={local} {errors} {update} />
         {:else if active === 'search'}
@@ -248,7 +248,7 @@
             }}
           />
         {:else if active === 'advanced'}
-          <AdvancedSection settings={local} {view} {errors} {update} />
+          <AdvancedSection settings={local} {view} {errors} {update} onView={showSaved} />
         {:else}
           <AboutSection />
         {/if}

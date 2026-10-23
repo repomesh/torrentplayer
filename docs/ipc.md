@@ -364,7 +364,8 @@ the container, and a size check that flags fake 4K. The formula is documented in
 `crates/torrentplayer-search/src/rank.rs`. Each result carries its parsed `quality`, a short `reason`
 (for example `1080p WEB-DL · 412 seeders · plays in built-in player`), its `quality.kind`
 (`video`, `notVideo` for audio, ebooks, software, and games, or `unknown`; with
-`quality.audio` and `quality.audioPlays` for the audio codec the title names; `health` and
+`quality.audio`, `quality.audioPlays`, and `quality.audioConverted` for the audio codec the title
+names (Dolby and DTS play, converted to stereo, when the build has the bundled FFmpeg); `health` and
 `suspicious` from the search service; the search page hides
 `notVideo` results by default and never hides `unknown` ones), and `bestPick`: at most
 one result, always first, that contains every query word, has seeders, is a video, and is not a
@@ -568,9 +569,12 @@ the magnet link, as [`prefetch_torrents`](#prefetch_torrents) does), which start
 
 Opens an indexer's page (a result's `detailsUrl`) in the system browser. Only http(s) links
 with a host name, no user name or password, at most 2 KiB, and not on this computer or the local
-network (`localhost`, `.local`, loopback, private, and link-local addresses) are opened; the
-link is handed to the system's own handler as one argument (`rundll32 url.dll` on Windows,
-`open` on macOS, `xdg-open` on Linux), never through a shell, and is not logged.
+network (`localhost`, `.local`, and every address `torrentplayer_net::is_public_ip` rejects:
+loopback, private, link-local, `100.64.0.0/10`, IPv4-mapped IPv6, and other reserved ranges) are
+opened; the link is handed to the system's own handler as one argument (`rundll32 url.dll` on
+Windows, `open` on macOS, `xdg-open` on Linux), never through a shell, and is not logged. The
+browser does not use TorrentPlayer's network mode, so in the SOCKS5 and WireGuard modes the
+result details say the page opens outside the proxy or tunnel.
 
 |            |                                                   |
 | ---------- | ------------------------------------------------- |
@@ -744,7 +748,9 @@ call stops the previous one's wait (its answer is empty). Never starts the engin
   as text, never as HTML.
 - **Videos**: a stream URL in `video` for a still frame, only when the file's start and end
   are already downloaded (so showing it downloads nothing new); otherwise a `note`. The URL
-  carries a session token: never log it. The previous preview's URL is withdrawn.
+  carries a session token: never log it. The previous preview's URL is withdrawn, also when a
+  file of another kind is previewed. While it is published, its torrent is kept from cache
+  clean-up.
 - **Anything else** (PDFs, archives, HTML, programs): metadata only. Nothing is rendered,
   executed, or opened.
 
@@ -756,6 +762,18 @@ A file that does not arrive within 20 s gives a `note` ("Still downloading…").
 | Returns    | [`FilePreviewDto`](../ui/src/lib/bindings/FilePreviewDto.ts): `kind`, `image`, `text`, `truncated`, `video`, `note` |
 | Errors     | `not-found` (torrent or file, or the engine has not started)                                                        |
 | Permission | `allow-preview-file`                                                                                                |
+
+#### `stop_preview`
+
+Called when the file explorer closes: stops a preview still waiting and withdraws the preview
+video's stream, so its torrent is no longer kept from cache clean-up.
+
+|            |                      |
+| ---------- | -------------------- |
+| Arguments  | none                 |
+| Returns    | nothing              |
+| Errors     | none                 |
+| Permission | `allow-stop-preview` |
 
 ### FFmpeg (optional)
 
@@ -801,16 +819,17 @@ prints, for the Settings page.
 
 #### `choose_ffmpeg_dir`
 
-Opens the system folder picker for the FFmpeg folder and returns the chosen path, or `null` if
-the user cancelled. Nothing is saved: the Settings page passes it to `update_settings` as
-`advanced.ffmpegDir`.
+Opens the system folder picker for the FFmpeg folder and saves the choice as
+`advanced.ffmpegDir` (validated like any change, and refused inside a download folder). Returns the
+saved `SettingsView`, or `null` if the user cancelled. This is the only way to set the folder:
+`update_settings` refuses a new value, because the programs in it run.
 
-|            |                           |
-| ---------- | ------------------------- |
-| Arguments  | none                      |
-| Returns    | `string` or `null`        |
-| Errors     | none                      |
-| Permission | `allow-choose-ffmpeg-dir` |
+|            |                                                                                      |
+| ---------- | ------------------------------------------------------------------------------------ |
+| Arguments  | none                                                                                 |
+| Returns    | `SettingsView` or `null`                                                             |
+| Errors     | `invalid-argument` (a network folder, or one inside the download folder), `internal` |
+| Permission | `allow-choose-ffmpeg-dir`                                                            |
 
 ### Settings
 
@@ -837,8 +856,9 @@ Applies a partial update with the same shape as
 [`Settings`](../ui/src/lib/bindings/Settings.ts), containing only the changed fields, for example
 `{ "bandwidth": { "peerLimit": 80 } }`; `null` clears an optional setting. The patch must be an
 object of at most 64 KiB, may not contain `version`, and may name only existing settings. The
-merged result is fully validated, and nothing is saved unless all of it is valid. A changed
-download folder is created and checked for write access first. On success the file is saved
+merged result is fully validated, and nothing is saved unless all of it is valid. A new
+`storage.downloadDir` or `advanced.ffmpegDir` is refused (`invalid-argument`): only
+`choose_download_dir` and `choose_ffmpeg_dir` set them; `null` (the default) is accepted. On success the file is saved
 atomically, the log level is applied at once, and `settings-changed` is emitted.
 
 |            |                                                                                                                   |
@@ -915,17 +935,17 @@ frontend asks for confirmation first.
 #### `choose_download_dir`
 
 Opens the system folder picker (modal to the window), starting at the saved download folder if it
-exists, and returns the chosen folder's full path, or `null` if the user cancelled. Nothing is
-saved: the Settings page passes the result to `update_settings` as `storage.downloadDir`, which
-validates it and checks that it is writable. The webview gets no general file-dialog or
+exists, and saves the chosen folder as `storage.downloadDir` (validated, and checked to be
+writable). Returns the saved `SettingsView`, or `null` if the user cancelled. This is the only way
+to set the folder: `update_settings` refuses a new value (`null`, the default folder, is allowed). The webview gets no general file-dialog or
 file-system permission.
 
-|            |                             |
-| ---------- | --------------------------- |
-| Arguments  | none                        |
-| Returns    | `string` or `null`          |
-| Errors     | none                        |
-| Permission | `allow-choose-download-dir` |
+|            |                                                                                  |
+| ---------- | -------------------------------------------------------------------------------- |
+| Arguments  | none                                                                             |
+| Returns    | `SettingsView` or `null`                                                         |
+| Errors     | `invalid-argument` (a network folder, or one that cannot be written), `internal` |
+| Permission | `allow-choose-download-dir`                                                      |
 
 ### Network
 
@@ -935,9 +955,10 @@ the backend follows every `update_settings`, `set_secret`, and `clear_secret` (t
 command). A Settings page saves the network section, then shows `network-status` events or
 calls `network_status`. A protected mode with incomplete settings (no host, no WireGuard
 configuration, a username without a stored password) is reported as state `error` with a
-reason, and blocks traffic. So is Direct mode while `network.vpnAdapterModeRemoved` is set
-(settings migrated from the removed VPN adapter mode): traffic is held until
-`update_settings` clears it (see [Network](network.md#using-a-vpn-app)).
+reason, and blocks traffic. So is Direct mode while `network.hold` is set
+(settings migrated from the removed VPN adapter mode, or settings that could not be read):
+traffic is held until `update_settings` clears it with `{"network": {"hold": null}}` (see
+[Network](network.md#using-a-vpn-app)).
 
 #### `network_status`
 

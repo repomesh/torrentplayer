@@ -26,7 +26,8 @@ Saved settings that selected the mode (`network.mode = "bindInterface"`) must ke
 must not silently lose the user's protection:
 
 - The settings migration (schema version 4) rewrites the mode to `direct`, drops
-  `network.interface`, and sets `network.vpnAdapterModeRemoved`. The rewrite applies to every
+  `network.interface`, and sets `network.vpnAdapterModeRemoved` (since 0.3.1, schema version 5:
+  `network.hold = "vpnAdapterModeRemoved"`, a hold also used for unreadable settings). The rewrite applies to every
   file whatever its version, so hand-edited files and test harnesses that still write the old
   value load too, and it is saved at once.
 - While that flag is set and the mode is Direct, the app passes a hold to the network manager

@@ -3,8 +3,9 @@
   /*
    * Connection mode (direct, SOCKS5, built-in WireGuard), the live connection state from the
    * network layer, the connection check, and WireGuard import. Saving a setting applies it: the
-   * backend follows every change, so there is no Apply button. Settings that used the removed VPN
-   * adapter mode show a notice until it is dismissed (see `src/lib/removedMode.ts`).
+   * backend follows every change, so there is no Apply button. While traffic is held (after an
+   * update from the removed VPN adapter mode, or because the settings could not be read), a
+   * notice shows until it is dismissed (see `src/lib/networkHold.ts`).
    */
   import { onMount } from 'svelte';
   import type { NetworkMode } from '../../bindings/NetworkMode';
@@ -30,9 +31,9 @@
     describeNetwork,
     followNetwork,
   } from '../../network';
-  import { removedModeHolds, showRemovedModeNotice } from '../../removedMode';
+  import { holdApplies, showHoldNotice } from '../../networkHold';
   import { followVpnHint, showVpnHint } from '../../vpnHint';
-  import RemovedModeNotice from '../RemovedModeNotice.svelte';
+  import NetworkHoldNotice from '../NetworkHoldNotice.svelte';
   import VpnHint from '../VpnHint.svelte';
   import Field from './Field.svelte';
   import SecretField from './SecretField.svelte';
@@ -94,7 +95,7 @@
   // Dismissed elsewhere (the status bar) since this page loaded its settings.
   let hintDismissedElsewhere = $state(false);
   let removedDismissedElsewhere = $state(false);
-  const removedNotice = $derived(showRemovedModeNotice(n) && !removedDismissedElsewhere);
+  const removedNotice = $derived(showHoldNotice(n) && !removedDismissedElsewhere);
 
   // WireGuard import: check first (a summary without keys), then save.
   let importText = $state('');
@@ -114,7 +115,7 @@
   onMount(() => {
     const stopHint = followVpnHint((network) => {
       hintDismissedElsewhere = network.vpnHintDismissed;
-      removedDismissedElsewhere = !network.vpnAdapterModeRemoved;
+      removedDismissedElsewhere = network.hold === null;
     });
     const stopNetwork = followNetwork((next) => {
       status = next;
@@ -228,12 +229,13 @@
 <section class="card" aria-labelledby="network-title">
   <h3 id="network-title">VPN and network</h3>
 
-  {#if removedNotice}
+  {#if removedNotice && n.hold}
     <div class="vpn-hint">
-      <RemovedModeNotice
-        held={removedModeHolds(n)}
+      <NetworkHoldNotice
+        reason={n.hold}
+        held={holdApplies(n)}
         onDismiss={() => {
-          update('network.vpnAdapterModeRemoved', false);
+          update('network.hold', null);
         }}
       />
     </div>

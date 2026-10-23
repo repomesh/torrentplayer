@@ -33,10 +33,13 @@ RUST_LOG=debug npm run tauri dev   # in ui/
 
 ### A video plays without sound
 
-- **A notice names Dolby or DTS audio:** the built-in player cannot decode AC-3, E-AC-3 (DD+,
-  Atmos), `TrueHD`, or DTS. Pick another release: search marks these as "no sound in built-in
-  player" and prefers releases with AAC or Opus audio. The full player (Phase 2) will play them;
-  see [ADR 0007](adr/0007-dolby-and-dts-audio.md).
+- **Dolby or DTS audio:** the web engine cannot decode AC-3, E-AC-3 (DD+, Atmos), `TrueHD`, or
+  DTS, so since 0.3.0 the bundled FFmpeg converts that audio to stereo AAC as the video plays
+  (search says "audio: converted to stereo" for such releases). If a notice still names the
+  codec, the build has no bundled FFmpeg (local development builds, by default), or the file is
+  one the conversion does not read (AVI, MPEG-TS, AC-4 audio): pick another release; without
+  FFmpeg, search marks these as "no sound in built-in player" and prefers AAC or Opus audio. See
+  [ADR 0007](adr/0007-dolby-and-dts-audio.md).
 - **"Muted — click to unmute" is shown:** the webview refused autoplay with sound. Click the
   button, or press M.
 - **Neither:** check the volume control and the system mixer. The log line `audio probed` (at the

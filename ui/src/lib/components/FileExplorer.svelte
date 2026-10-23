@@ -17,6 +17,7 @@
     errorMessage,
     previewFile,
     preloadStatus,
+    stopPreview,
     type FilePreviewDto,
     type PreloadStatusDto,
   } from '../ipc';
@@ -138,6 +139,8 @@
     return () => {
       stopped = true;
       clearTimeout(timer);
+      // The explorer closed: its preview video must not keep its torrent from clean-up.
+      stopPreview().catch(() => undefined);
     };
   });
 

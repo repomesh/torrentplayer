@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { FileSummary } from './bindings/FileSummary';
 import {
   LISTED_VIDEOS,
+  browserNote,
   formatDay,
   formatPieceSize,
   healthLabel,
@@ -81,10 +82,18 @@ describe('verdicts', () => {
   });
 
   it('says whether there will be sound', () => {
-    expect(soundVerdict({ audio: null, audioPlays: null })).toBeNull();
-    expect(soundVerdict({ audio: 'AAC', audioPlays: true })).toBe('AAC: plays with sound here');
-    expect(soundVerdict({ audio: 'DTS', audioPlays: false })).toBe(
+    expect(soundVerdict({ audio: null, audioPlays: null, audioConverted: false })).toBeNull();
+    expect(soundVerdict({ audio: 'AAC', audioPlays: true, audioConverted: false })).toBe(
+      'AAC: plays with sound here',
+    );
+    expect(soundVerdict({ audio: 'DTS', audioPlays: false, audioConverted: false })).toBe(
       'DTS: no sound in the built-in player',
+    );
+  });
+
+  it('says converted Dolby and DTS audio plays with sound', () => {
+    expect(soundVerdict({ audio: 'DTS', audioPlays: true, audioConverted: true })).toBe(
+      'DTS: plays with sound here, converted to stereo',
     );
   });
 
@@ -113,5 +122,18 @@ describe('toggled', () => {
     expect([...one]).toEqual(['a']);
     expect([...toggled(one, 'b')]).toEqual(['a', 'b']);
     expect([...toggled(one, 'a')]).toEqual([]);
+  });
+});
+
+describe('links that open in the browser', () => {
+  it('say they leave the tunnel or proxy only in a protected mode', () => {
+    expect(browserNote('wireGuard')).toBe(
+      "Opens in your browser, outside TorrentPlayer's WireGuard tunnel.",
+    );
+    expect(browserNote('socks5')).toBe(
+      "Opens in your browser, outside TorrentPlayer's SOCKS5 proxy.",
+    );
+    expect(browserNote('direct')).toBeNull();
+    expect(browserNote(null)).toBeNull();
   });
 });

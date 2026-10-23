@@ -26,11 +26,11 @@ export const VPN_HINT =
 export const VPN_POST_URL = 'https://torrentplayer.io/blog/vpn-for-torrenting/';
 
 /**
- * Whether the note applies: Direct mode, and not dismissed. Not while the notice about the removed
- * VPN adapter mode (`removedMode`, see `src/lib/removedMode.ts`) is shown, which says the same.
+ * Whether the note applies: Direct mode, and not dismissed. Not while a notice about held traffic
+ * (`held`, see `src/lib/networkHold.ts`) is shown, which says the same.
  */
-export function showVpnHint(mode: NetworkMode, dismissed: boolean, removedMode = false): boolean {
-  return mode === 'direct' && !dismissed && !removedMode;
+export function showVpnHint(mode: NetworkMode, dismissed: boolean, held = false): boolean {
+  return mode === 'direct' && !dismissed && !held;
 }
 
 /** Opens the blog post in the system browser. */

@@ -2,7 +2,7 @@
   "name": "torrentplayer",
   "private": true,
   "version": "0.3.0",
-  "description": "Stream openly licensed lecture libraries from torrents.",
+  "description": "Stream at the speed of the swarm.",
   "license": "MIT OR Apache-2.0",
   "type": "module",
   "engines": {

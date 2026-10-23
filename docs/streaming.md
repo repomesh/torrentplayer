@@ -1,7 +1,9 @@
 # Streaming and prioritization
 
-> **Status: Planned (Phase 1).** This page records the intended design. It will be updated with
-> the implemented behavior and measured results when Phase 1 lands.
+> **Status: Implemented.** The piece policy is in `torrentplayer-prioritize`, used by
+> TorrentPlayer's engine (`torrentplayer-swarm`); measured start-up and seek times are in
+> [Performance and benchmarking](performance.md). Where this page and the code differ, the code
+> is authoritative.
 
 ## Goals
 
@@ -35,13 +37,13 @@ makes the policy exhaustively testable.
 
 ## Feeds
 
-- **`stream_cb` (preferred):** libmpv calls back into Rust for reads and seeks, which map
-  directly onto librqbit's seekable file stream with no HTTP overhead.
-- **Loopback HTTP range server:** bound to `127.0.0.1` on a random port, requires a random
-  per-session token, and supports HTTP `Range` requests. Used by the fallback `<video>` player
-  and as an alternative libmpv feed.
-
-Both will be measured and the choice recorded in an ADR.
+- **Loopback HTTP range server** (`torrentplayer-stream`, in use): bound to `127.0.0.1` on a random
+  port, requires a random per-session token, and supports HTTP `Range` requests. The built-in
+  player (the system web engine's `<video>`) reads every video through it, and so do FFmpeg's
+  probes and the audio conversion, each under a token of its own.
+- **`stream_cb`** (for the libmpv player, Phase 2, see [Player integration](player.md)): libmpv
+  would call back into Rust for reads and seeks with no HTTP overhead. Whether it or the HTTP
+  server feeds libmpv will be measured and recorded in an ADR.
 
 ## Metrics
 

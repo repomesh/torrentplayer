@@ -232,11 +232,17 @@ impl Merger {
     }
 
     /// The merged, validated, ranked results so far.
-    pub(crate) fn response(&self, include_adult: bool, query: &str) -> SearchResponse {
+    pub(crate) fn response(
+        &self,
+        include_adult: bool,
+        converts_audio: bool,
+        query: &str,
+    ) -> SearchResponse {
         let mut response = build_response(
             self.candidates.clone(),
             self.statuses.clone(),
             include_adult,
+            converts_audio,
         );
         rank(&mut response.results, query);
         response.results.truncate(MAX_RESULTS);
@@ -368,7 +374,7 @@ mod tests {
         m.add(vec![c(5)], Vec::new());
         m.add(vec![c(50)], Vec::new());
         m.fail(&["b".to_owned()], &SearchError::RateLimited);
-        let r = m.response(false, "sintel");
+        let r = m.response(false, false, "sintel");
         assert_eq!(
             r.results.len(),
             1,

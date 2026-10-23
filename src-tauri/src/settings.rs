@@ -96,6 +96,20 @@ impl SettingsState {
         }
     }
 
+    /// At start-up, before anything uses the download folder: points `storage.downloadDir` at
+    /// `dir`, where the chosen folder moved with the app's data (see
+    /// [`crate::migrate::relocated`]), and saves that.
+    pub(crate) fn move_download_dir(&mut self, dir: &Path) {
+        let mut settings = self.current();
+        settings.storage.download_dir = Some(dir.to_string_lossy().into_owned());
+        if let Err(error) = self.store.save(&settings) {
+            tracing::warn!(%error, "could not save the moved download folder");
+        }
+        tracing::info!("the download folder moved with the app's data");
+        self.startup = settings.clone();
+        self.changes.send_replace(settings);
+    }
+
     /// The current settings.
     pub(crate) fn current(&self) -> Settings {
         self.changes.borrow().clone()
@@ -218,16 +232,65 @@ impl SettingsState {
         fields
     }
 
-    /// Applies a partial update (see [`update_settings`]), saves it, and announces it. Other
-    /// commands that change settings (for example a WireGuard import) go through here too.
+    /// Applies a partial update, saves it, and announces it. Commands that change settings for
+    /// the backend's own reasons (a WireGuard import, a folder picker) go through here; the
+    /// webview's [`update_settings`] goes through [`Self::update_from_webview`].
     pub(crate) async fn update(
         &self,
         app: &AppHandle,
         patch: &Value,
     ) -> Result<SettingsView, IpcError> {
         let _guard = self.updating.lock().await;
+        self.update_locked(app, patch, Origin::Backend).await
+    }
+
+    /// [`Self::update`] for a patch from the webview, which may not choose folders (see
+    /// [`check_picked_folders`]).
+    async fn update_from_webview(
+        &self,
+        app: &AppHandle,
+        patch: &Value,
+    ) -> Result<SettingsView, IpcError> {
+        let _guard = self.updating.lock().await;
+        self.update_locked(app, patch, Origin::Webview).await
+    }
+
+    /// [`Self::update`], with `updating` already held.
+    async fn update_locked(
+        &self,
+        app: &AppHandle,
+        patch: &Value,
+        origin: Origin,
+    ) -> Result<SettingsView, IpcError> {
+        let storage_policy_changed = self.save_locked(patch, origin).await?;
+        self.announce(app);
+        if storage_policy_changed {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                enforce_cache_policy(&app).await;
+            });
+        }
+        Ok(self.view())
+    }
+
+    /// Checks, saves, and applies a patch, with `updating` already held; everything
+    /// [`Self::update_locked`] does but tell the app. Returns whether the cache policy changed.
+    async fn save_locked(&self, patch: &Value, origin: Origin) -> Result<bool, IpcError> {
         let current = self.current();
         let next = apply_patch(&current, patch).map_err(|e| patch_error(&e))?;
+        if origin == Origin::Webview {
+            check_picked_folders(&current, &next)?;
+        }
+        if next.advanced.ffmpeg_dir != current.advanced.ffmpeg_dir
+            || next.storage.download_dir != current.storage.download_dir
+        {
+            let downloads = [
+                self.download_dir(&next),
+                self.active_download_dir(),
+                self.default_download_dir.clone(),
+            ];
+            check_ffmpeg_dir(next.advanced.ffmpeg_dir.as_deref(), &downloads)?;
+        }
         let storage_policy_changed = next.storage.cache_limit_gb != current.storage.cache_limit_gb
             || next.storage.cleanup_after_days != current.storage.cleanup_after_days;
         if next.storage.download_dir != current.storage.download_dir
@@ -257,20 +320,14 @@ impl SettingsState {
             .unwrap_or_else(PoisonError::into_inner)
             .clear();
         self.changes.send_replace(next);
-        self.announce(app);
-        if storage_policy_changed {
-            let app = app.clone();
-            tauri::async_runtime::spawn(async move {
-                enforce_cache_policy(&app).await;
-            });
-        }
-        Ok(self.view())
+        Ok(storage_policy_changed)
     }
 
     /// Saves an imported WireGuard configuration: its keys in the credential store and the rest
-    /// in `network.wireguard` (see `import_wireguard_config`). The settings are checked before
-    /// any key is stored, so an invalid import leaves nothing behind. A configuration without a
-    /// preshared key removes the previous one.
+    /// in `network.wireguard` (see `import_wireguard_config`). A configuration without a
+    /// preshared key removes the previous one. All or nothing: the settings are checked before
+    /// any key is stored, and if storing a key or saving the settings fails, the previous keys
+    /// are put back. Holds `updating` throughout, so no other change interleaves.
     pub(crate) async fn import_wireguard(
         &self,
         app: &AppHandle,
@@ -278,22 +335,52 @@ impl SettingsState {
         private_key: SecretString,
         preshared_key: Option<SecretString>,
     ) -> Result<(SettingsView, SecretStatus), IpcError> {
+        let _guard = self.updating.lock().await;
+        let status = self
+            .import_wireguard_locked(imported, private_key, preshared_key)
+            .await?;
+        // Announced once, with the keys already stored.
+        self.announce(app);
+        Ok((self.view(), status))
+    }
+
+    /// [`Self::import_wireguard`] without telling the app, with `updating` already held.
+    async fn import_wireguard_locked(
+        &self,
+        imported: &WireGuardSettings,
+        private_key: SecretString,
+        preshared_key: Option<SecretString>,
+    ) -> Result<SecretStatus, IpcError> {
         let patch = serde_json::json!({ "network": { "wireguard": imported } });
         apply_patch(&self.current(), &patch).map_err(|e| patch_error(&e))?;
         let store = self.secrets();
-        let status = blocking(move || {
-            store.set(SecretKey::WireGuardPrivateKey, &private_key)?;
-            match &preshared_key {
-                Some(key) => store.set(SecretKey::WireGuardPresharedKey, key)?,
-                None => store.clear(SecretKey::WireGuardPresharedKey)?,
+        let previous = blocking(move || {
+            let previous = WG_KEYS.map(|key| store.get(key));
+            let previous = match previous {
+                [Ok(private), Ok(preshared)] => [private, preshared],
+                [Err(error), _] | [_, Err(error)] => return Err(error),
+            };
+            let stored = store
+                .set(SecretKey::WireGuardPrivateKey, &private_key)
+                .and_then(|()| match &preshared_key {
+                    Some(key) => store.set(SecretKey::WireGuardPresharedKey, key),
+                    None => store.clear(SecretKey::WireGuardPresharedKey),
+                });
+            if let Err(error) = stored {
+                restore_keys(store.as_ref(), &previous);
+                return Err(error);
             }
-            Ok(SecretStatus::of(store.as_ref()))
+            Ok(previous)
         })
         .await?
         .map_err(|e| secret_error(&e))?;
-        // Announces the change once, with the keys already stored.
-        let view = self.update(app, &patch).await?;
-        Ok((view, status))
+        if let Err(error) = self.save_locked(&patch, Origin::Backend).await {
+            let store = self.secrets();
+            blocking(move || restore_keys(store.as_ref(), &previous)).await?;
+            return Err(error);
+        }
+        let store = self.secrets();
+        blocking(move || SecretStatus::of(store.as_ref())).await
     }
 
     /// Tells watchers that secrets changed (the settings value itself is unchanged).
@@ -397,7 +484,7 @@ pub(crate) async fn update_settings(
     state: State<'_, SettingsState>,
     patch: Value,
 ) -> Result<SettingsView, IpcError> {
-    state.update(&app, &patch).await
+    state.update_from_webview(&app, &patch).await
 }
 
 /// Stores a secret in the OS credential store. The value is never sent back.
@@ -609,6 +696,10 @@ fn protected_hashes(app: &AppHandle) -> Option<HashSet<String>> {
     if let Some(preload) = core.engine.preload_status() {
         hashes.insert(preload.info_hash.to_ascii_lowercase());
     }
+    // The explorer's video preview reads from its torrent while it is open.
+    if let Some(previewed) = app.state::<crate::preview::PreviewState>().previewed_hash() {
+        hashes.insert(previewed);
+    }
     Some(hashes)
 }
 
@@ -627,23 +718,33 @@ fn cache_limit_bytes(gigabytes: Option<u32>) -> Option<u64> {
 }
 
 /// Opens the system folder picker over `window`, starting at the saved download folder, and
-/// returns the chosen folder, or `None` if the user cancelled. Nothing is saved: the Settings
-/// page saves the choice with [`update_settings`], which checks it.
+/// saves the chosen folder as `storage.downloadDir` (checked like any change). Returns the saved
+/// settings, or `None` if the user cancelled. This is the only way to choose the folder (see
+/// [`check_picked_folders`]).
 #[tauri::command]
 pub(crate) async fn choose_download_dir(
+    app: AppHandle,
     window: tauri::WebviewWindow,
     state: State<'_, SettingsState>,
-) -> Result<Option<String>, IpcError> {
+) -> Result<Option<SettingsView>, IpcError> {
+    let Some(folder) = pick_download_dir(&window, &state).await else {
+        return Ok(None);
+    };
+    let patch = serde_json::json!({ "storage": { "downloadDir": folder } });
+    state.update(&app, &patch).await.map(Some)
+}
+
+async fn pick_download_dir(window: &tauri::WebviewWindow, state: &SettingsState) -> Option<String> {
     let start = state.download_dir(&state.current());
     let mut dialog = rfd::AsyncFileDialog::new()
         .set_title("Choose where TorrentPlayer saves downloaded videos")
-        .set_parent(&window);
+        .set_parent(window);
     // The picker cannot start in a folder that does not exist yet.
     if start.is_dir() {
         dialog = dialog.set_directory(&start);
     }
     let chosen = dialog.pick_folder().await;
-    Ok(chosen.map(|folder| folder.path().to_string_lossy().into_owned()))
+    chosen.map(|folder| folder.path().to_string_lossy().into_owned())
 }
 
 /// Runs blocking work (file system, credential store) off the async runtime.
@@ -668,6 +769,88 @@ fn secret_error(error: &SecretError) -> IpcError {
     }
 }
 
+/// The keys of an imported WireGuard configuration.
+const WG_KEYS: [SecretKey; 2] = [
+    SecretKey::WireGuardPrivateKey,
+    SecretKey::WireGuardPresharedKey,
+];
+
+/// Puts back the WireGuard keys from before a failed import (`None`: there was none).
+fn restore_keys(store: &dyn SecretStore, previous: &[Option<SecretString>; 2]) {
+    for (key, value) in WG_KEYS.into_iter().zip(previous) {
+        let restored = match value {
+            Some(value) => store.set(key, value),
+            None => store.clear(key),
+        };
+        if let Err(error) = restored {
+            tracing::warn!(%error, ?key, "could not put the previous WireGuard key back");
+        }
+    }
+}
+
+/// Who asked for a settings change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// The webview, through [`update_settings`].
+    Webview,
+    /// The backend: a folder picker, a WireGuard import.
+    Backend,
+}
+
+/// Refuses a new download or FFmpeg folder from the webview. Only the native folder pickers
+/// ([`choose_download_dir`], [`crate::media::choose_ffmpeg_dir`]) choose them, and save the
+/// choice themselves: FFmpeg from that folder runs on every stream start, and checking a folder
+/// touches it, so a compromised webview must not be able to name one. Going back to the default
+/// (`null`) is allowed.
+fn check_picked_folders(current: &Settings, next: &Settings) -> Result<(), IpcError> {
+    if next.storage.download_dir != current.storage.download_dir
+        && next.storage.download_dir.is_some()
+    {
+        return Err(IpcError::invalid(
+            "storage.downloadDir: Choose the folder with \"Choose folder…\".",
+        ));
+    }
+    if next.advanced.ffmpeg_dir != current.advanced.ffmpeg_dir && next.advanced.ffmpeg_dir.is_some()
+    {
+        return Err(IpcError::invalid(
+            "advanced.ffmpegDir: Choose the folder with \"Choose folder…\".",
+        ));
+    }
+    Ok(())
+}
+
+/// Refuses an FFmpeg folder inside a download folder (which holds the engine caches): files
+/// there come from torrents, and FFmpeg from that folder would run.
+fn check_ffmpeg_dir(ffmpeg_dir: Option<&str>, downloads: &[PathBuf]) -> Result<(), IpcError> {
+    let Some(dir) = ffmpeg_dir else {
+        return Ok(());
+    };
+    if downloads.iter().any(|d| is_within(Path::new(dir), d)) {
+        return Err(IpcError::invalid(
+            "advanced.ffmpegDir: Choose a folder outside the download folder.",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `path` is `parent` or inside it, comparing names case-insensitively on Windows.
+fn is_within(path: &Path, parent: &Path) -> bool {
+    let key = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| {
+                let s = c.as_os_str().to_string_lossy();
+                if cfg!(windows) {
+                    s.to_lowercase()
+                } else {
+                    s.into_owned()
+                }
+            })
+            .collect()
+    };
+    let (path, parent) = (key(path), key(parent));
+    !parent.is_empty() && path.starts_with(&parent)
+}
+
 /// Creates `dir` if needed and checks that files can be written in it.
 fn check_writable(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)?;
@@ -682,7 +865,7 @@ fn check_writable(dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use torrentplayer_settings::MemoryStore;
+    use torrentplayer_settings::{ExposeSecret as _, MemoryStore};
 
     #[test]
     fn bandwidth_limits_become_engine_rates() {
@@ -710,6 +893,116 @@ mod tests {
         )
     }
 
+    fn wireguard_import() -> WireGuardSettings {
+        WireGuardSettings {
+            name: Some("vpn.conf".into()),
+            addresses: vec!["10.0.0.2/32".into()],
+            peer_public_key: Some("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=".into()),
+            peer_endpoint: Some("198.51.100.1:51820".into()),
+            allowed_ips: vec!["0.0.0.0/0".into()],
+            ..WireGuardSettings::default()
+        }
+    }
+
+    fn secret(text: &str) -> SecretString {
+        SecretString::from(text)
+    }
+
+    fn key(store: &dyn SecretStore, key: SecretKey) -> Option<String> {
+        store
+            .get(key)
+            .unwrap()
+            .map(|s| s.expose_secret().to_owned())
+    }
+
+    #[tokio::test]
+    async fn a_wireguard_import_stores_keys_and_settings_together() {
+        let root = tempfile::tempdir().unwrap();
+        let state = state(root.path());
+        let secrets = state.secrets();
+        let status = state
+            .import_wireguard_locked(&wireguard_import(), secret("new-private"), None)
+            .await
+            .unwrap();
+        assert!(status.wire_guard_private_key);
+        assert_eq!(
+            key(secrets.as_ref(), SecretKey::WireGuardPrivateKey).as_deref(),
+            Some("new-private")
+        );
+        assert_eq!(state.current().network.wireguard, wireguard_import());
+    }
+
+    #[tokio::test]
+    async fn a_failed_wireguard_import_puts_the_previous_keys_back() {
+        let root = tempfile::tempdir().unwrap();
+        // The settings cannot be saved: a file stands where the config folder belongs.
+        fs::write(root.path().join("config"), "").unwrap();
+        let state = state(root.path());
+        let secrets = state.secrets();
+        secrets
+            .set(SecretKey::WireGuardPrivateKey, &secret("old-private"))
+            .unwrap();
+        secrets
+            .set(SecretKey::WireGuardPresharedKey, &secret("old-preshared"))
+            .unwrap();
+        let error = state
+            .import_wireguard_locked(&wireguard_import(), secret("new-private"), None)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Internal);
+        assert_eq!(
+            key(secrets.as_ref(), SecretKey::WireGuardPrivateKey).as_deref(),
+            Some("old-private")
+        );
+        assert_eq!(
+            key(secrets.as_ref(), SecretKey::WireGuardPresharedKey).as_deref(),
+            Some("old-preshared")
+        );
+        assert_eq!(
+            state.current().network.wireguard,
+            WireGuardSettings::default()
+        );
+
+        // Without earlier keys, nothing is left behind.
+        secrets.clear(SecretKey::WireGuardPrivateKey).unwrap();
+        secrets.clear(SecretKey::WireGuardPresharedKey).unwrap();
+        state
+            .import_wireguard_locked(
+                &wireguard_import(),
+                secret("new-private"),
+                Some(secret("new-preshared")),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(key(secrets.as_ref(), SecretKey::WireGuardPrivateKey), None);
+        assert_eq!(
+            key(secrets.as_ref(), SecretKey::WireGuardPresharedKey),
+            None
+        );
+    }
+
+    #[test]
+    fn a_moved_download_folder_is_saved_and_used_from_the_start() {
+        let root = tempfile::tempdir().unwrap();
+        let mut state = state(root.path());
+        let moved = root
+            .path()
+            .join("io.torrentplayer.desktop")
+            .join("downloads");
+        state.move_download_dir(&moved);
+        assert_eq!(state.active_download_dir(), moved);
+        assert_eq!(state.engine_config().download_dir, moved);
+        assert!(state.restart_required(&state.current()).is_empty());
+        let saved = SettingsStore::new(root.path().join("config"))
+            .load()
+            .settings;
+        assert_eq!(
+            saved.storage.download_dir.as_deref(),
+            moved.to_str(),
+            "saved, so the next start uses it too"
+        );
+    }
+
     #[test]
     fn engine_config_uses_settings() {
         let dir = tempfile::tempdir().unwrap();
@@ -720,6 +1013,64 @@ mod tests {
         if engine_override().is_none() {
             assert_eq!(config.choice, EngineChoice::Auto);
         }
+    }
+
+    #[test]
+    fn only_the_folder_pickers_choose_folders() {
+        let current = Settings::default();
+        let local = if cfg!(windows) {
+            r"D:\Videos"
+        } else {
+            "/home/me/Videos"
+        };
+        for patch in [
+            serde_json::json!({"storage": {"downloadDir": local}}),
+            serde_json::json!({"advanced": {"ffmpegDir": local}}),
+        ] {
+            let next = apply_patch(&current, &patch).unwrap();
+            let error = check_picked_folders(&current, &next).unwrap_err();
+            assert!(error.message.contains("Choose folder"), "{patch}");
+        }
+        // UNC paths never get as far as the file system.
+        let unc = serde_json::json!({"advanced": {"ffmpegDir": r"\\attacker\share"}});
+        assert!(apply_patch(&current, &unc).is_err());
+
+        // Going back to the default, and changes that keep the folders, are fine.
+        let mut chosen = current.clone();
+        chosen.storage.download_dir = Some(local.into());
+        chosen.advanced.ffmpeg_dir = Some(local.into());
+        let reset = apply_patch(
+            &chosen,
+            &serde_json::json!({"storage": {"downloadDir": null}, "advanced": {"ffmpegDir": null}}),
+        )
+        .unwrap();
+        assert_eq!(check_picked_folders(&chosen, &reset), Ok(()));
+        let other = apply_patch(
+            &chosen,
+            &serde_json::json!({"bandwidth": {"peerLimit": 80}}),
+        )
+        .unwrap();
+        assert_eq!(check_picked_folders(&chosen, &other), Ok(()));
+    }
+
+    #[test]
+    fn ffmpeg_is_never_run_from_the_download_folder() {
+        let root = if cfg!(windows) {
+            r"C:\Users\me"
+        } else {
+            "/home/me"
+        };
+        let downloads = [Path::new(root).join("Downloads").join("TorrentPlayer")];
+        let inside = downloads[0].join("torrentplayer-swarm").join("x");
+        assert!(check_ffmpeg_dir(inside.to_str(), &downloads).is_err());
+        assert!(check_ffmpeg_dir(downloads[0].to_str(), &downloads).is_err());
+        if cfg!(windows) {
+            let shouting = downloads[0].to_string_lossy().to_uppercase();
+            assert!(check_ffmpeg_dir(Some(&shouting), &downloads).is_err());
+        }
+        let beside = Path::new(root).join("Downloads").join("TorrentPlayer2");
+        assert_eq!(check_ffmpeg_dir(beside.to_str(), &downloads), Ok(()));
+        assert_eq!(check_ffmpeg_dir(None, &downloads), Ok(()));
     }
 
     #[test]

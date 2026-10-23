@@ -17,9 +17,11 @@
     view: SettingsView;
     errors: Record<string, string>;
     update: (path: string, value: unknown) => void;
+    /** Shows settings saved by the folder picker. */
+    onView: (view: SettingsView) => void;
   }
 
-  let { settings, view, errors, update }: Props = $props();
+  let { settings, view, errors, update, onView }: Props = $props();
 
   /** Longer than the settings page takes to save a change, so a new folder is searched. */
   const RECHECK_AFTER_MS = 600;
@@ -52,8 +54,8 @@
     }
   }
 
-  function setFolder(folder: string | null): void {
-    update('advanced.ffmpegDir', folder);
+  function usePath(): void {
+    update('advanced.ffmpegDir', null);
     setTimeout(() => void check(), RECHECK_AFTER_MS);
   }
 
@@ -61,9 +63,12 @@
     picking = true;
     toolsError = null;
     try {
-      const folder = await chooseFfmpegDir();
-      if (folder !== null) {
-        setFolder(folder);
+      // The picker checks and saves the folder: the only way to choose one, since FFmpeg from it
+      // runs. The field is read-only.
+      const saved = await chooseFfmpegDir();
+      if (saved !== null) {
+        onView(saved);
+        void check();
       }
     } catch (reason: unknown) {
       toolsError = errorMessage(reason);
@@ -174,13 +179,10 @@
         spellcheck="false"
         autocomplete="off"
         placeholder="On PATH"
+        readonly
         value={a.ffmpegDir ?? ''}
         aria-describedby="advanced-ffmpeg-help advanced-ffmpeg-status"
         aria-invalid={errors['advanced.ffmpegDir'] !== undefined}
-        onchange={(e: Event) => {
-          const value = (e.currentTarget as HTMLInputElement).value.trim();
-          setFolder(value === '' ? null : value);
-        }}
       />
       <p class="status" id="advanced-ffmpeg-status" aria-live="polite">{toolsSummary}</p>
       <div class="folder-actions">
@@ -191,7 +193,7 @@
           <button
             type="button"
             onclick={() => {
-              setFolder(null);
+              usePath();
             }}>Use PATH</button
           >
         {/if}

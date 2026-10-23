@@ -2,6 +2,7 @@
 import type { EncryptionMode } from "./EncryptionMode";
 import type { IncomingPeersSettings } from "./IncomingPeersSettings";
 import type { Ipv6Policy } from "./Ipv6Policy";
+import type { NetworkHold } from "./NetworkHold";
 import type { NetworkMode } from "./NetworkMode";
 import type { Socks5Settings } from "./Socks5Settings";
 import type { WireGuardSettings } from "./WireGuardSettings";
@@ -49,8 +50,8 @@ incomingPeers: IncomingPeersSettings,
  */
 vpnHintDismissed: boolean, 
 /**
- * The settings used the VPN adapter mode, which was removed in 0.3.0, and were moved to
- * Direct (see [`crate::migrate`]). While this is set and the mode is Direct, TorrentPlayer
- * holds all traffic and shows a notice; dismissing the notice clears it.
+ * Why traffic is held, if it is: set when loading could not keep the connection the user
+ * chose (see [`NetworkHold`]). While this is set and the mode is Direct, TorrentPlayer holds
+ * all traffic and shows a notice; confirming the notice clears it.
  */
-vpnAdapterModeRemoved: boolean, };
+hold: NetworkHold | null, };

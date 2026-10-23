@@ -147,11 +147,15 @@ interval.
 
 **Held traffic.** `NetworkConfig::hold` blocks all traffic, whatever the mode, with a reason:
 the state is `error`, and the policy counts as protected, so librqbit starts behind the bridge
-as it does in a protected mode. The app sets it in one case: settings migrated from the removed
-VPN adapter mode load as Direct with `network.vpnAdapterModeRemoved`, and traffic is held until
-the user dismisses the notice in Settings → Network or beside the status bar's indicator (or
-picks the SOCKS5 or WireGuard mode, whose own kill switch then applies). A user who chose to send
-nothing outside their VPN therefore never sends anything directly without confirming it first.
+as it does in a protected mode. The app sets it while `network.hold` is set in Direct mode, which
+loading does in two cases: settings migrated from the removed VPN adapter mode
+(`vpnAdapterModeRemoved`), and a `settings.json` that exists but could not be read or parsed, or
+whose network section or connection mode is invalid (`settingsUnreadable`, see
+[Configuration](configuration.md#where-settings-are-stored)). Traffic is held until the user dismisses
+the notice in Settings → VPN and network or beside the status bar's indicator (or picks the
+SOCKS5 or WireGuard mode, whose own kill switch then applies). A user who chose to send nothing
+outside their VPN therefore never sends anything directly without confirming it first, even when
+an update or a damaged file loses that choice.
 
 **Epochs and leases.** Each change that could leave a connection on the wrong path (a new mode,
 the kill switch engaging) starts a new epoch. Every
@@ -310,7 +314,7 @@ itself: it does not import `.ovpn` files or start VPN apps.
 
 **The VPN adapter mode was removed in 0.3.0** ([ADR 0009](adr/0009-remove-vpn-adapter-mode.md)).
 It pinned every socket to the VPN app's network interface. Saved settings that used it
-(`network.mode = "bindInterface"`) load as Direct with `network.vpnAdapterModeRemoved` set: Settings
+(`network.mode = "bindInterface"`) load as Direct with `network.hold = "vpnAdapterModeRemoved"`: Settings
 → Network and the status bar show a notice, and all traffic is held (see
 [Held traffic](#kill-switch-and-connection-state)) until the notice is dismissed or another mode is
 chosen. `network.interface` is dropped.
@@ -339,19 +343,19 @@ It runs:
 The Settings page (`torrentplayer-settings`) stores what the user chooses; the app turns it into a
 `torrentplayer_net::NetworkConfig`:
 
-| Setting                         | Effect                                                                                                     |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `network.mode`                  | The mode.                                                                                                  |
-| `network.vpnAdapterModeRemoved` | Set by the migration from the removed VPN adapter mode; in Direct mode it holds all traffic until cleared. |
-| `network.socks5.host`, `port`   | The proxy.                                                                                                 |
-| `network.socks5.username`       | With the `socks5Password` secret from the credential store. A username without a password blocks traffic.  |
-| `network.socks5.proxyDns`       | Proxy resolves host names (`socks5h`). Off: resolved locally, only addresses are sent.                     |
-| `network.socks5.proxyTrackers`  | Off: trackers are not contacted in this mode.                                                              |
-| `network.socks5.proxyDht`       | Enables DHT through UDP ASSOCIATE; off means no DHT in SOCKS5 mode.                                        |
-| `network.wireguard`             | Shown in the status (endpoint). The private key is not read until the tunnel exists.                       |
-| `network.ipv6`                  | `tunnel` allows IPv6 destinations in protected modes; `disable` refuses them.                              |
-| `network.incomingPeers`         | `enabled`, `port` (0: random), `upnp` (direct mode only); see [Incoming](#incoming-peer-connections).      |
-| `network.encryption`            | Not implemented by either engine yet.                                                                      |
+| Setting                        | Effect                                                                                                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `network.mode`                 | The mode.                                                                                                                                                     |
+| `network.hold`                 | Set when loading could not keep the chosen connection (the removed VPN adapter mode, unreadable settings); in Direct mode it holds all traffic until cleared. |
+| `network.socks5.host`, `port`  | The proxy.                                                                                                                                                    |
+| `network.socks5.username`      | With the `socks5Password` secret from the credential store. A username without a password blocks traffic.                                                     |
+| `network.socks5.proxyDns`      | Proxy resolves host names (`socks5h`). Off: resolved locally, only addresses are sent.                                                                        |
+| `network.socks5.proxyTrackers` | Off: trackers are not contacted in this mode.                                                                                                                 |
+| `network.socks5.proxyDht`      | Enables DHT through UDP ASSOCIATE; off means no DHT in SOCKS5 mode.                                                                                           |
+| `network.wireguard`            | Shown in the status (endpoint). The private key is not read until the tunnel exists.                                                                          |
+| `network.ipv6`                 | `tunnel` allows IPv6 destinations in protected modes; `disable` refuses them.                                                                                 |
+| `network.incomingPeers`        | `enabled`, `port` (0: random), `upnp` (direct mode only); see [Incoming](#incoming-peer-connections).                                                         |
+| `network.encryption`           | Not implemented by either engine yet.                                                                                                                         |
 
 ## Limits
 

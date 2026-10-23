@@ -119,8 +119,21 @@ pub fn run() -> anyhow::Result<()> {
             // Settings live in the config folder; downloads default to Downloads\TorrentPlayer.
             let folders = Folders::resolve(app)?;
             let earlier_default = folders.local_data.join("downloads");
-            let settings =
-                settings::SettingsState::load(folders.config, folders.downloads.clone(), log);
+            let mut settings = settings::SettingsState::load(
+                folders.config.clone(),
+                folders.downloads.clone(),
+                log,
+            );
+            // A download folder chosen inside the app's data folder moved with it in
+            // `Folders::resolve`; follow it, or the engine would recreate the old folder.
+            if let Some(chosen) = settings.current().storage.download_dir
+                && let Some(moved) = migrate::relocated(
+                    std::path::Path::new(&chosen),
+                    &[&folders.config, &folders.data, &folders.local_data],
+                )
+            {
+                settings.move_download_dir(&moved);
+            }
             // Downloads used to default to the app's data folder: move them along, unless the
             // user chose a folder of their own.
             if settings.current().storage.download_dir.is_none()
@@ -211,6 +224,7 @@ pub fn run() -> anyhow::Result<()> {
             downloads::queue_downloads,
             library::library_items,
             preview::preview_file,
+            preview::stop_preview,
             media::seek_thumbnail,
             media::media_tools,
             media::choose_ffmpeg_dir,

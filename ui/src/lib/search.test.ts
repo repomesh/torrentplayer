@@ -187,6 +187,7 @@ describe('qualityNotes', () => {
     kind: 'video',
     audio: null,
     audioPlays: null,
+    audioConverted: false,
   };
 
   it('shows the label, with warnings first', () => {

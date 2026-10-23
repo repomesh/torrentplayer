@@ -22,8 +22,8 @@ use torrentplayer_net::{
     PublicIp, Secret, Socks5Config, WireGuardConfig, WireGuardSummary,
 };
 use torrentplayer_settings::{
-    ExposeSecret as _, Ipv6Policy, NetworkSettings, SecretError, SecretKey, SecretStatus,
-    SecretStore, SecretString, Settings, WireGuardSettings, Zeroize as _,
+    ExposeSecret as _, Ipv6Policy, NetworkHold, NetworkSettings, SecretError, SecretKey,
+    SecretStatus, SecretStore, SecretString, Settings, WireGuardSettings, Zeroize as _,
 };
 use ts_rs::TS;
 
@@ -48,6 +48,10 @@ const PUBLIC_IP_TIMEOUT: Duration = Duration::from_secs(25);
 /// Direct, until the user confirms (see [`config_from_settings`]).
 pub(crate) const VPN_ADAPTER_HOLD: &str =
     "the VPN adapter mode was removed; confirm the change in Settings → Network";
+/// Why traffic is held after `settings.json` (or its network settings) could not be read, so
+/// the mode the user chose is unknown, until the user confirms a mode.
+pub(crate) const SETTINGS_UNREADABLE_HOLD: &str =
+    "the network settings could not be read; choose a connection in Settings → VPN and network";
 
 /// Managed state: the network manager.
 #[derive(Clone)]
@@ -247,6 +251,8 @@ pub(crate) fn incoming_from_settings(settings: &NetworkSettings) -> IncomingConf
 /// Settings moved from the removed VPN adapter mode to Direct hold all traffic
 /// ([`VPN_ADAPTER_HOLD`]) until the user dismisses the notice or picks another mode: the user
 /// chose to send nothing outside their VPN, so nothing is sent before they confirm the change.
+/// Settings that could not be read ([`NetworkHold::SettingsUnreadable`]) load as Direct and are
+/// held the same way ([`SETTINGS_UNREADABLE_HOLD`]): the mode the user chose is unknown.
 ///
 /// There is no kill-switch setting: every mode except direct always fails closed. `proxy_dht`
 /// controls DHT through SOCKS5 UDP ASSOCIATE, without a direct fallback. `encryption` is not
@@ -277,8 +283,12 @@ pub(crate) fn config_from_settings(
             NetworkMode::WireGuard(wireguard(&settings.wireguard, secrets))
         }
     };
-    let hold = (settings.vpn_adapter_mode_removed && mode == NetworkMode::Direct)
-        .then(|| VPN_ADAPTER_HOLD.to_owned());
+    let hold = match settings.hold {
+        _ if mode != NetworkMode::Direct => None,
+        Some(NetworkHold::VpnAdapterModeRemoved) => Some(VPN_ADAPTER_HOLD.to_owned()),
+        Some(NetworkHold::SettingsUnreadable) => Some(SETTINGS_UNREADABLE_HOLD.to_owned()),
+        None => None,
+    };
     NetworkConfig {
         mode,
         allow_ipv6: settings.ipv6 == Ipv6Policy::Tunnel,
@@ -575,29 +585,54 @@ mod tests {
     #[test]
     fn the_removed_vpn_adapter_mode_holds_direct_traffic_until_confirmed() {
         let store = MemoryStore::new();
-        let mut migrated = NetworkSettings {
-            vpn_adapter_mode_removed: true,
-            ..NetworkSettings::default()
-        };
-        let config = config_from_settings(&migrated, &store);
-        assert_eq!(config.mode, NetworkMode::Direct);
-        assert_eq!(config.hold.as_deref(), Some(VPN_ADAPTER_HOLD));
-        assert!(
-            config.is_protected(),
-            "held like a mode behind the kill switch"
-        );
+        for (reason, message) in [
+            (NetworkHold::VpnAdapterModeRemoved, VPN_ADAPTER_HOLD),
+            (NetworkHold::SettingsUnreadable, SETTINGS_UNREADABLE_HOLD),
+        ] {
+            let mut held = NetworkSettings {
+                hold: Some(reason),
+                ..NetworkSettings::default()
+            };
+            let config = config_from_settings(&held, &store);
+            assert_eq!(config.mode, NetworkMode::Direct);
+            assert_eq!(config.hold.as_deref(), Some(message));
+            assert!(
+                config.is_protected(),
+                "held like a mode behind the kill switch"
+            );
 
-        // Another mode has its own kill switch, so it does not need the hold.
-        migrated.mode = torrentplayer_settings::NetworkMode::WireGuard;
-        assert_eq!(config_from_settings(&migrated, &store).hold, None);
+            // Another mode has its own kill switch, so it does not need the hold.
+            held.mode = torrentplayer_settings::NetworkMode::WireGuard;
+            assert_eq!(config_from_settings(&held, &store).hold, None);
 
-        // Dismissing the notice lets Direct connect.
-        migrated.mode = torrentplayer_settings::NetworkMode::Direct;
-        migrated.vpn_adapter_mode_removed = false;
-        assert_eq!(
-            config_from_settings(&migrated, &store),
-            NetworkConfig::default()
-        );
+            // Dismissing the notice lets Direct connect.
+            held.mode = torrentplayer_settings::NetworkMode::Direct;
+            held.hold = None;
+            assert_eq!(
+                config_from_settings(&held, &store),
+                NetworkConfig::default()
+            );
+        }
+    }
+
+    #[test]
+    fn unreadable_settings_hold_traffic_and_a_first_run_connects_directly() {
+        let secrets = MemoryStore::new();
+        let dir = tempfile::tempdir().unwrap();
+        let store = torrentplayer_settings::SettingsStore::new(dir.path());
+        let config = config_from_settings(&store.load().settings.network, &secrets);
+        assert_eq!(config, NetworkConfig::default(), "no file: Direct, no hold");
+
+        for text in ["{ damaged", r#"{"version":5,"network":{"mode":"openvpn"}}"#] {
+            std::fs::write(store.path(), text).unwrap();
+            let config = config_from_settings(&store.load().settings.network, &secrets);
+            assert_eq!(config.mode, NetworkMode::Direct, "{text}");
+            assert_eq!(
+                config.hold.as_deref(),
+                Some(SETTINGS_UNREADABLE_HOLD),
+                "{text}"
+            );
+        }
     }
 
     #[test]

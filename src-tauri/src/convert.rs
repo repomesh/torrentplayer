@@ -13,7 +13,6 @@ use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::Stdio;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -21,7 +20,7 @@ use std::time::Duration;
 use serde::Serialize;
 use tauri::State;
 use tokio::io::{AsyncRead, AsyncReadExt as _, ReadBuf};
-use tokio::process::{Child, ChildStdout, Command};
+use tokio::process::{Child, ChildStdout};
 use torrentplayer_stream::{LiveSource, MediaSource, ServerConfig, StreamId, StreamServer};
 use ts_rs::TS;
 
@@ -249,24 +248,9 @@ impl Conversion {
         track: Option<String>,
         start: f64,
     ) -> Result<Self, ConversionError> {
-        let mut command = Command::new(ffmpeg);
-        command
-            .args(arguments(input_url, track, start))
-            // FFmpeg's HTTP client follows these; the input is on the loopback interface.
-            .env_remove("http_proxy")
-            .env_remove("HTTP_PROXY")
-            .env_remove("no_proxy")
-            .env_remove("NO_PROXY")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        {
-            /// No console window for the child process.
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
+        // No proxy (the input is a loopback URL with a token), no stdin, no console window.
+        let mut command = torrentplayer_media::ffmpeg_command(ffmpeg);
+        command.args(arguments(input_url, track, start));
         let mut child = command.spawn().map_err(ConversionError::Spawn)?;
         let log = Arc::new(Log::default());
         if let Some(stderr) = child.stderr.take() {

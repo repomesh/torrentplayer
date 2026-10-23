@@ -67,6 +67,50 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   network. A link, or a redirect it sends the app to, that leads to a private, loopback, or
   link-local address or to `localhost` (such as your router or a cloud metadata address) is now
   refused, in every network mode, and a redirect from https to http is no longer followed.
+- Settings that cannot be read no longer switch a VPN or proxy user to a direct connection. When
+  `settings.json` exists but is damaged, unreadable (for example locked by an antivirus or sync
+  client, or too large), or names a connection mode this version does not know, TorrentPlayer now
+  starts with all traffic paused and a notice ("Your network settings could not be read…") until
+  you choose a connection in Settings → VPN and network or select **Connect directly**. The file
+  is kept as `settings.invalid.json` and is never overwritten while it cannot be backed up. One
+  bad network value (such as an unknown IPv6 policy) now resets only itself, not the connection
+  mode. A first run without a settings file still starts in Direct mode.
+- FFmpeg runs for durations and seek-bar thumbnails no longer follow the `http_proxy` environment
+  variable, which sent the private stream address (with its access token) to that proxy. They
+  now share the hardening of the audio conversion.
+- Search no longer labels Dolby (AC-3, E-AC-3, TrueHD) and DTS releases "no sound in built-in
+  player" or ranks them down when the bundled FFmpeg converts their audio to stereo; they now
+  say "audio: converted to stereo". Builds without FFmpeg keep the warning.
+- The download folder and the FFmpeg folder can now be chosen only with **Choose folder…**; the
+  fields are no longer typed in, and the app refuses a new folder from anywhere else. Network
+  (UNC) and device paths are refused, so checking a folder can no longer make Windows send your
+  sign-in credentials to another computer, and an FFmpeg folder inside the download folder is
+  refused, so TorrentPlayer never runs a program that came from a torrent.
+- The queue no longer holds the same video twice when one entry was queued from a search result
+  (its main video, file not chosen yet) and the other names the file, or when two indexers list
+  the same torrent with and without its hash. Such entries merge as soon as the torrent's files
+  are known, queues saved with duplicates are cleaned up, and the "Queued" mark on search
+  results shows them. Queueing other episodes of a season pack still works. (#55)
+- A download folder chosen inside the app's own data folder from before the rename (for example
+  `%LOCALAPPDATA%\io.torrentstream.desktop\downloads`) is now followed when that folder moves to
+  its new name, instead of the settings still pointing at the old path.
+- Importing a WireGuard configuration is now all or nothing: if its settings cannot be saved, the
+  previous keys are put back instead of new keys being paired with the old configuration, and no
+  other settings change can slip in during the import.
+- Cache clean-up no longer removes the torrent whose video the file explorer is previewing, and
+  closing the explorer now ends its video preview instead of leaving it published.
+- Undoing the removal of a queued video puts that video back in its place instead of restoring
+  the whole queue as it was, which lost anything played, moved, or queued in the meantime.
+- Indexer links from search results no longer open when they point at this computer or a
+  private network through an IPv4-mapped IPv6 address, an IPv6 link-local address
+  (`fe80::/10`), or the shared `100.64.0.0/10` range; they are checked like peer addresses.
+- In the SOCKS5 and WireGuard modes, a search result's "Open the indexer's page" link now says
+  that the page opens in your browser, outside TorrentPlayer's proxy or tunnel.
+- Documentation caught up with 0.3: the comparison page no longer says the engine does not upload
+  or that Dolby and DTS audio is only warned about, and names the LGPL and MPL-2.0 parts that
+  ship with the app; the security policy lists 0.3.x as supported; the streaming page is no
+  longer marked as planned; the build guide says which Ubuntu versions CI and releases use and
+  that libmpv is not needed.
 
 ## [0.3.0] - 2026-10-21
 
