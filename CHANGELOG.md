@@ -59,6 +59,44 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the one that protects the video playing: background downloads that wait for it now say
   "Waiting for playback", and it never changes your own pauses. A finished video that is
   sharing reads "Downloaded · seeding".
+- Downloaded data is kept across restarts: torrents in the queue, finished ones included, no longer
+  download everything again each time TorrentPlayer starts. After a normal quit the pieces are
+  available at once and each is checked against the torrent's hashes when first played or shared;
+  after a crash everything is checked in the background first, on at most two threads, the video
+  being played first. Caches from earlier versions can't be reused and start empty once.
+- Faster peer discovery: DHT lookups send each query once instead of twice (a bug in the vendored
+  DHT), and the first lookup no longer stalls on a fresh node. DHT-only torrents found their first
+  peer in about 1 s instead of 2–12 s (up to 40 s).
+- DHT lookups follow what each torrent needs: every 20 s while it downloads with few peers, every
+  5 minutes once it has enough, and none while it is paused or has nothing to download. A lookup
+  that finds nobody is retried within seconds. Idle torrents no longer send about 19 DHT packets a
+  second each.
+- With incoming peers on, TorrentPlayer announces its listening port in the DHT (BEP 5) while it is
+  listening in the current mode, never in SOCKS5 mode; otherwise its DHT queries are marked
+  read-only (BEP 43).
+- A paused torrent no longer announces itself to its trackers; resuming announces it again at once.
+- Lower CPU and disk use: paused and finished torrents re-plan once a second instead of ten times;
+  playback history is saved every 30 s instead of every 5 s (seeks, stopping and quitting still
+  save at once); the DHT node list is saved every 10 minutes and only when it changed; the queue
+  panel no longer animates its progress bars (about 1 % of a core for the UI during downloads
+  instead of about 9 %) and stops checking downloads while the window is minimized; the VPN tunnel,
+  player and status bar wake up less often.
+- The queue says when the kill switch blocks downloads, with a button to Network & VPN settings,
+  instead of "Finding peers…" forever.
+- When a video ends, a card offers Play next (Shift+N) or Replay, also in fullscreen. Nothing plays
+  on its own.
+- Resuming no longer asks: with "Resume where I left off" on, the video continues and a chip offers
+  "Start over".
+- Clearer queue pause: its own icon, "Paused by you", P to pause or resume from the keyboard, and the
+  queue's buttons reachable with Tab. Removing a torrent's videos and "Clear played" offer Undo
+  instead of asking first.
+- Toasts stack, stay while you read them, keep errors until closed, and show in fullscreen.
+- Buffering says how many peers were found and how fast it downloads, and tells you when no one is
+  sharing the file. The player says when it converts audio, and when the conversion failed.
+- Plainer wording: "sharing" instead of "seeding", "blocked" for the kill switch, time left instead
+  of ETA, and "May not play here (format: …)" instead of pointing to a full player that doesn't
+  exist yet. The rail's "Playing" item is now "Queue". Hardware decoding and protocol encryption
+  settings are hidden until a player or engine applies them.
 
 ### Fixed
 
@@ -234,9 +272,16 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Updated `ctutils` (used by the Linux credential store's cryptography) to 0.4.5 for
   [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385), non-constant-time
   comparisons.
+- Trackerless magnet links found no peers through the WireGuard tunnel or a SOCKS5 proxy ("input
+  address stream exhausted"): the metadata lookup now gets up to 200 DHT peers instead of 20.
+- Videos with chapters whose Dolby or DTS audio needs converting, such as Sintel, now play with
+  sound. The conversion used to fail at once with "The audio could not be converted".
 
 ### Known limitations
 
+- On some high-refresh displays (seen at 165 Hz with an NVIDIA GPU), 4K 60 fps video can drop about
+  15 % of frames in the built-in player. Edge and Chrome drop the same on that machine, so it comes
+  from the system web engine; running the display at 120 or 144 Hz may help.
 - Tracker addresses on your own network are refused for HTTP trackers only: UDP trackers at a
   local address, and librqbit's own tracker requests with the `rqbit` engine in Direct mode,
   can still reach them.
