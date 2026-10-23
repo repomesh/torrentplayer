@@ -155,6 +155,10 @@ pub struct StreamEngineConfig {
     /// librqbit keeps none: restored from a saved table, it fetched magnet metadata more
     /// slowly than from a fresh start (see docs/performance.md).
     pub dht_state_dir: Option<PathBuf>,
+    /// Download `.torrent` links (and follow their redirects) to the local network too. Off in
+    /// the app: links come from untrusted search results and sites, and must not reach the
+    /// user's router, other devices, or local services. For tests with a local server.
+    pub allow_local_links: bool,
 }
 
 impl StreamEngineConfig {
@@ -169,6 +173,7 @@ impl StreamEngineConfig {
             upload_limit_bps: None,
             peer_limit: 40,
             dht_state_dir: None,
+            allow_local_links: false,
         }
     }
 }
@@ -286,6 +291,8 @@ struct PreloadSlot {
 const PRELOAD_POLL: Duration = Duration::from_millis(250);
 /// How long an add waits for a preload that is still fetching the same torrent's metadata.
 const PRELOAD_METADATA_WAIT: Duration = Duration::from_secs(130);
+/// The thumbnail engine's folder inside torrentplayer-swarm's (see `StreamEngine::thumbnail_dir`).
+const THUMBNAIL_DIR: &str = "thumbnails";
 /// Suffix of the marker file next to an unplayed preload's cache.
 const PRELOAD_MARKER: &str = ".preload";
 
@@ -390,6 +397,7 @@ impl StreamEngine {
         let http = http_for(
             concat!("TorrentPlayer/", env!("CARGO_PKG_VERSION")),
             network.as_ref(),
+            config.allow_local_links,
         )?;
         info!(choice = ?config.choice, "stream engine started");
         let engine = Self {
@@ -467,6 +475,7 @@ impl StreamEngine {
         // as long as from an empty table, which waits for the bootstrap servers' responsive nodes.
         c.enable_trackers = self.config.public_discovery;
         c.network.clone_from(&self.network);
+        c.allow_local_links = self.config.allow_local_links;
         c.peer_limit = Some(self.config.peer_limit);
         (c.download_limit_bps, c.upload_limit_bps) = self.limits();
         let listen = self.rqbit_listen(protected);
@@ -550,7 +559,7 @@ impl StreamEngine {
     }
 
     /// Stops librqbit and forgets its torrents, whose ids would otherwise point into the next
-    /// session.
+    /// session. Returns once its operations in flight have ended (see `Engine::shutdown`).
     async fn stop_rqbit(&self, slot: &mut Option<Engine>) {
         let Some(engine) = slot.take() else {
             return;
@@ -568,9 +577,10 @@ impl StreamEngine {
 
     /// Switches the network mode (see [`torrentplayer_net::Network::apply`]). librqbit's DHT, listening
     /// socket, and proxy are fixed when its session starts, so when protection turns on or off,
-    /// librqbit is stopped first (its torrents are dropped) and the next magnet link starts a new
-    /// session; no librqbit traffic is sent under the wrong mode. torrentplayer-swarm follows the change
-    /// by itself.
+    /// librqbit is stopped first (its torrents are dropped, and what it was doing for a caller,
+    /// such as fetching a magnet link's metadata, ends with an error before the mode changes)
+    /// and the next magnet link starts a new session; no librqbit traffic is sent under the
+    /// wrong mode. torrentplayer-swarm follows the change by itself.
     ///
     /// # Errors
     ///
@@ -806,7 +816,7 @@ impl StreamEngine {
             }
             None => {}
         }
-        match fetch_torrent_file(&self.http, url).await {
+        match fetch_torrent_file(&self.http, url, self.config.allow_local_links).await {
             Ok(bytes) => {
                 // Checked when it is used; the hash is only needed to remember it.
                 if let Ok(meta) = Metainfo::from_bytes(&bytes) {
@@ -888,6 +898,10 @@ impl StreamEngine {
     /// Returns an error if the metadata is invalid or unsafe, or the download fails.
     pub async fn thumbnail(&self, info_hash: &str) -> Result<Option<Thumbnail>, EngineError> {
         let info_hash = info_hash.to_ascii_lowercase();
+        // It names a cache folder below; anything but an info hash is no torrent of ours.
+        if !is_hex_hash(&info_hash) {
+            return Ok(None);
+        }
         let running = self.torrents().values().find_map(|b| match b {
             Backed::Swarm { torrent, info } if info.info_hash == info_hash => Some(torrent.clone()),
             _ => None,
@@ -912,7 +926,7 @@ impl StreamEngine {
         };
         // One download per torrent at a time: they would share a cache folder.
         let _fetching = self.metadata.lock(&format!("thumbnail {info_hash}")).await;
-        let dir = self.config.download_dir.join("thumbnails").join(&info_hash);
+        let dir = self.thumbnail_dir().join(&info_hash);
         // An interrupted earlier download of this torrent may have left its cache behind.
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let torrent = swarm.add(meta, cached.peers).map_err(swarm_err)?;
@@ -966,9 +980,9 @@ impl StreamEngine {
         let swarm = self
             .thumbnails
             .get_or_try_init(|| async {
-                let dir = self.config.download_dir.join("thumbnails");
+                let dir = self.thumbnail_dir();
                 // Pictures left over from a previous run.
-                let _ = tokio::fs::remove_dir_all(&dir).await;
+                remove_thumbnail_caches(&dir);
                 let mut c = SwarmConfig::new(dir);
                 c.enable_trackers = self.config.public_discovery;
                 c.network.clone_from(&self.network);
@@ -1846,6 +1860,12 @@ impl StreamEngine {
         self.config.download_dir.join("torrentplayer-swarm")
     }
 
+    /// The thumbnail engine's cache. It lives in torrentplayer-swarm's own folder: the download
+    /// folder is the user's, and so may be a `thumbnails` folder in it.
+    fn thumbnail_dir(&self) -> PathBuf {
+        self.swarm_dir().join(THUMBNAIL_DIR)
+    }
+
     fn preload_slot(&self) -> std::sync::MutexGuard<'_, Option<PreloadSlot>> {
         self.preload.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -1863,6 +1883,24 @@ impl StreamEngine {
 enum Handle {
     Rqbit(TorrentId),
     Swarm(Torrent),
+}
+
+/// Deletes the thumbnail caches (`<info hash>` folders) a previous run left in `dir`. Nothing
+/// else there is touched, and nothing at all if `dir` is not a real folder.
+fn remove_thumbnail_caches(dir: &Path) {
+    if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir()) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_str().is_some_and(is_hex_hash)
+            && std::fs::symlink_metadata(entry.path()).is_ok_and(|m| m.file_type().is_dir())
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Deletes the caches of preloads that were never played (marked by `<hash>.preload` files).
@@ -1885,18 +1923,25 @@ fn remove_stale_preloads(dir: &Path) {
     }
 }
 
-/// Peers for a magnet link from scoped DHT and UDP trackers through a protected network mode
-/// (WireGuard or a SOCKS5 relay). librqbit's unbound UDP stays disabled there, so TorrentPlayer
-/// finds peers with its own scoped sockets and hands them to whichever engine fetches the
-/// metadata. Empty in direct mode (librqbit uses its own DHT and trackers), while the mode
-/// blocks traffic, or with `public_discovery` off.
+/// Peers for a magnet link from scoped DHT, UDP trackers, and HTTP trackers through a protected
+/// network mode (WireGuard or a SOCKS5 relay). librqbit's unbound UDP stays disabled there,
+/// and it contacts no trackers (its HTTP client would resolve their names with the system
+/// resolver), so TorrentPlayer finds peers itself, through the mode, and hands them to
+/// whichever engine fetches the metadata. HTTP trackers are announced to through the network's
+/// bridge, which passes their host names unresolved to the tunnel or proxy. Returns the first
+/// source's peers, or waits for the others while one finds none. Empty in direct mode
+/// (librqbit uses its own DHT and trackers), while the mode blocks traffic, or with
+/// `public_discovery` off.
 pub async fn protected_magnet_peers(
     network: &torrentplayer_net::Network,
     link: &str,
     public_discovery: bool,
 ) -> Vec<SocketAddr> {
+    use futures_util::StreamExt as _;
+    use futures_util::stream::FuturesUnordered;
+
     let policy = network.policy();
-    if policy.udp_allowed || !policy.bound_udp_allowed || !policy.traffic_allowed {
+    if policy.udp_allowed || !policy.traffic_allowed || !public_discovery {
         return Vec::new();
     }
     let Some(info_hash) = magnet_info_hash(link).and_then(|h| hex_hash(&h)) else {
@@ -1910,34 +1955,35 @@ pub async fn protected_magnet_peers(
         .filter(|(key, _)| key == "tr")
         .filter_map(|(_, value)| url::Url::parse(&value).ok())
         .collect();
-    let tracker_peers = async {
-        if !public_discovery || !policy.trackers_allowed {
-            return Vec::new();
+    let deadline = Duration::from_secs(12);
+    let mut sources: FuturesUnordered<BoxFuture<'_, Vec<SocketAddr>>> = FuturesUnordered::new();
+    if policy.trackers_allowed {
+        sources.push(Box::pin(torrentplayer_swarm::http_tracker::announce_all(
+            network, &trackers, info_hash, deadline,
+        )));
+        if policy.bound_udp_allowed {
+            sources.push(Box::pin(torrentplayer_swarm::udp_tracker::announce_all(
+                Some(network),
+                &trackers,
+                info_hash,
+                deadline,
+            )));
         }
-        torrentplayer_swarm::udp_tracker::announce_all(
-            Some(network),
-            &trackers,
-            info_hash,
-            Duration::from_secs(12),
-        )
-        .await
-    };
-    let dht_peers = async {
-        if !public_discovery || !policy.dht_allowed {
-            return Vec::new();
-        }
-        torrentplayer_swarm::dht_bootstrap_peers(
+    }
+    if policy.dht_allowed && policy.bound_udp_allowed {
+        sources.push(Box::pin(torrentplayer_swarm::dht_bootstrap_peers(
             network.clone(),
             info_hash,
-            Duration::from_secs(12),
-        )
-        .await
-    };
-    tokio::pin!(tracker_peers, dht_peers);
-    let peers = tokio::select! {
-        peers = &mut tracker_peers => if peers.is_empty() { dht_peers.await } else { peers },
-        peers = &mut dht_peers => if peers.is_empty() { tracker_peers.await } else { peers },
-    };
+            deadline,
+        )));
+    }
+    let mut peers = Vec::new();
+    while let Some(found) = sources.next().await {
+        if !found.is_empty() {
+            peers = found;
+            break;
+        }
+    }
     info!(
         peers = peers.len(),
         "Peer discovery bootstrap completed through the protected network"

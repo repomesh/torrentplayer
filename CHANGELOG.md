@@ -43,6 +43,30 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (about two hours of traffic, sooner when handshakes repeat) every later one was refused as a
   flood and stalled for at least 5 seconds, or failed with a server that ignores WireGuard
   cookies, until the app was restarted.
+- Search result thumbnails no longer delete a folder named `thumbnails` in the download folder.
+  The app kept their temporary downloads there and emptied it when it started fetching them, so
+  a folder of yours with that name lost its contents. Thumbnail downloads now live in the app's
+  own `torrentplayer-swarm/thumbnails` cache folder, and a `thumbnails` folder in the download
+  folder is never touched.
+- A malformed `.torrent` file (from a file, a link, or a search result) no longer crashes the
+  engine that opens it. Files with a piece length of 0 or above 64 MiB, no data, or file
+  lengths too large to add up are now refused as not a valid `.torrent` file, with the reason,
+  before either engine reads them.
+- Switching between Direct and WireGuard or SOCKS5 now stops librqbit's work in progress, such
+  as fetching a magnet link's details from peers, before the new mode takes effect. Before, a
+  fetch already running kept connecting to peers directly after a switch to WireGuard or
+  SOCKS5, outside the tunnel or proxy and the kill switch, for up to two minutes. The torrent
+  being opened fails with a message to try again.
+- In the WireGuard and SOCKS5 modes, tracker host names are no longer looked up outside the
+  tunnel or proxy. With the librqbit engine, and while fetching a magnet link's details, HTTP
+  tracker names were resolved by the system's DNS, even while the kill switch was blocking
+  traffic. TorrentPlayer now contacts those trackers itself, with the names resolved by the
+  tunnel or proxy, and librqbit contacts none, so turning "Send tracker requests through the
+  proxy" off also stops every tracker request of torrents already open.
+- Links to `.torrent` files (pasted, or from search results) can no longer reach your local
+  network. A link, or a redirect it sends the app to, that leads to a private, loopback, or
+  link-local address or to `localhost` (such as your router or a cloud metadata address) is now
+  refused, in every network mode, and a redirect from https to http is no longer followed.
 
 ## [0.3.0] - 2026-10-21
 

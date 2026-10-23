@@ -55,6 +55,11 @@ pub enum SourceError {
     /// download links of search sites often do. Add the magnet link instead.
     #[error("the link leads to a magnet link, not a .torrent file")]
     MagnetRedirect(String),
+    /// The link (or a redirect) leads to the local network (a private, loopback, or
+    /// link-local address, or `localhost`): links come from untrusted sites, and must not
+    /// reach the user's router, other devices, or local services.
+    #[error("the link leads to the local network, which is not allowed")]
+    NotPublic,
 }
 
 impl TorrentSource {
@@ -138,22 +143,94 @@ pub fn magnet_link(info_hash: &str, name: &str, trackers: &[Url]) -> String {
     link
 }
 
-/// Settings of the HTTP client used to download `.torrent` files.
-pub(crate) fn http_client_builder(user_agent: &str) -> reqwest::ClientBuilder {
+/// Settings of the HTTP client used to download `.torrent` files. Redirects are followed at
+/// most 5 times, only to http(s), never from https to http, and (unless `allow_local`) only to
+/// public hosts (see [`link_allowed`]). Redirects to anything else (a magnet link) stop there,
+/// for [`fetch_torrent_file`] to report.
+///
+/// Names are checked when they are resolved: route the client through the network's
+/// public-only bridge (`Network::configure_http_public`), or without a network manager give it
+/// [`PublicResolver`].
+pub(crate) fn http_client_builder(user_agent: &str, allow_local: bool) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(user_agent)
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
-        // Only follow redirects to http(s), and not too many of them.
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                attempt.error("too many redirects")
-            } else if matches!(attempt.url().scheme(), "http" | "https") {
-                attempt.follow()
-            } else {
-                attempt.stop()
+        .redirect(reqwest::redirect::Policy::custom(
+            move |attempt| match redirect_verdict(attempt.url(), attempt.previous(), allow_local) {
+                Redirect::Follow => attempt.follow(),
+                Redirect::Stop => attempt.stop(),
+                Redirect::Refuse(Some(error)) => attempt.error(error),
+                Redirect::Refuse(None) => attempt.error("redirect refused"),
+            },
+        ))
+}
+
+/// What to do with a redirect of a `.torrent` download.
+#[derive(Debug, PartialEq, Eq)]
+enum Redirect {
+    Follow,
+    /// Not http(s): hand the redirect itself to the caller (a magnet link, see
+    /// [`fetch_torrent_file`]).
+    Stop,
+    /// Fail the download, with this error if it is one to report as such.
+    Refuse(Option<SourceError>),
+}
+
+/// The redirect policy of [`http_client_builder`] for a redirect to `next` after `previous`
+/// (the first request included).
+fn redirect_verdict(next: &Url, previous: &[Url], allow_local: bool) -> Redirect {
+    if previous.len() >= 5 {
+        Redirect::Refuse(None)
+    } else if !matches!(next.scheme(), "http" | "https") {
+        Redirect::Stop
+    } else if next.scheme() == "http" && previous.iter().any(|u| u.scheme() == "https") {
+        // A downgrade would let anyone on the path change the `.torrent` file.
+        Redirect::Refuse(None)
+    } else if !allow_local && !link_allowed(next) {
+        Redirect::Refuse(Some(SourceError::NotPublic))
+    } else {
+        Redirect::Follow
+    }
+}
+
+/// Whether a `.torrent` link may be fetched: http(s), and a public host when it is an address
+/// (see `torrentplayer_net::is_public_ip`) and not a `localhost` name. Other names are checked
+/// when they are resolved (see [`http_client_builder`]).
+pub(crate) fn link_allowed(url: &Url) -> bool {
+    if !matches!(url.scheme(), "http" | "https") {
+        return false;
+    }
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => torrentplayer_net::is_public_ip(ip.into()),
+        Some(url::Host::Ipv6(ip)) => torrentplayer_net::is_public_ip(ip.into()),
+        Some(url::Host::Domain(name)) => {
+            let name = name.trim_end_matches('.').to_ascii_lowercase();
+            name != "localhost" && !name.ends_with(".localhost")
+        }
+        None => false,
+    }
+}
+
+/// Resolves names to their public addresses only, for `.torrent` downloads when no network
+/// manager is configured (with one, its public-only bridge does the same).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PublicResolver;
+
+impl reqwest::dns::Resolve for PublicResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_owned();
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await?
+                .filter(|a| torrentplayer_net::is_public_ip(a.ip()))
+                .collect();
+            if addrs.is_empty() {
+                return Err(SourceError::NotPublic.into());
             }
-        }))
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
 }
 
 /// Downloads a `.torrent` file, refusing anything larger than [`MAX_TORRENT_FILE_BYTES`].
@@ -168,8 +245,22 @@ pub(crate) fn http_client_builder(user_agent: &str) -> reqwest::ClientBuilder {
 pub(crate) async fn fetch_torrent_file(
     client: &reqwest::Client,
     url: &Url,
+    allow_local: bool,
 ) -> Result<Bytes, SourceError> {
-    let download = |e: reqwest::Error| SourceError::Download(e.without_url().to_string());
+    if !allow_local && !link_allowed(url) {
+        return Err(SourceError::NotPublic);
+    }
+    let download = |e: reqwest::Error| {
+        // Refused by the redirect policy or `PublicResolver`: say why.
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&e);
+        while let Some(error) = source {
+            if let Some(SourceError::NotPublic) = error.downcast_ref::<SourceError>() {
+                return SourceError::NotPublic;
+            }
+            source = error.source();
+        }
+        SourceError::Download(e.without_url().to_string())
+    };
     let response = client.get(url.clone()).send().await.map_err(download)?;
     if response.status().is_redirection()
         && let Some(location) = response
@@ -284,9 +375,10 @@ mod tests {
             "HTTP/1.1 302 Found\r\nLocation: magnet:?xt=urn:btih:7EDD96C56641A3B80DB0C3E607171A99E5ADD1E3&dn=X\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         )
         .await;
-        let client = http_client_builder("test").build().unwrap();
+        // Local links allowed: the server is on the loopback interface.
+        let client = http_client_builder("test", true).build().unwrap();
         assert_eq!(
-            fetch_torrent_file(&client, &url).await,
+            fetch_torrent_file(&client, &url, true).await,
             Err(SourceError::MagnetRedirect(
                 "magnet:?xt=urn:btih:7EDD96C56641A3B80DB0C3E607171A99E5ADD1E3&dn=X".into()
             ))
@@ -297,7 +389,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            fetch_torrent_file(&client, &url).await,
+            fetch_torrent_file(&client, &url, true).await,
             Err(SourceError::BadFileSize),
             "other schemes are not followed"
         );
@@ -307,7 +399,7 @@ mod tests {
         )
         .await;
         assert_eq!(
-            fetch_torrent_file(&client, &url).await,
+            fetch_torrent_file(&client, &url, true).await,
             Ok(Bytes::from_static(b"de"))
         );
     }
@@ -355,5 +447,145 @@ mod tests {
         let magnet = format!("magnet:?xt=urn:btih:{HASH}");
         let s = TorrentSource::parse_link(&magnet).unwrap();
         assert!(!format!("{s:?}").contains(HASH));
+    }
+
+    fn url(s: &str) -> Url {
+        Url::parse(s).unwrap()
+    }
+
+    #[test]
+    fn redirects_stay_public_and_never_downgrade() {
+        let start = [url("https://indexer.example/dl/1")];
+        assert_eq!(
+            redirect_verdict(&url("https://cdn.example/a.torrent"), &start, false),
+            Redirect::Follow
+        );
+        assert_eq!(
+            redirect_verdict(&url("http://93.184.215.14/a.torrent"), &[], false),
+            Redirect::Follow
+        );
+        for local in [
+            "https://192.168.1.1/a.torrent",
+            "https://10.0.0.8/a.torrent",
+            "https://169.254.169.254/latest/meta-data/",
+            "https://127.0.0.1:8080/a.torrent",
+            "https://[::1]/a.torrent",
+            "https://[fe80::1]/a.torrent",
+            "https://[::ffff:192.168.0.1]/a.torrent",
+            "https://localhost/a.torrent",
+            "https://router.localhost./a.torrent",
+        ] {
+            assert_eq!(
+                redirect_verdict(&url(local), &start, false),
+                Redirect::Refuse(Some(SourceError::NotPublic)),
+                "{local}"
+            );
+            assert!(!link_allowed(&url(local)), "{local}");
+            assert_eq!(
+                redirect_verdict(&url(local), &start, true),
+                Redirect::Follow,
+                "{local} with local links allowed"
+            );
+        }
+        // https to http, even to a public host, and even with local links allowed.
+        assert_eq!(
+            redirect_verdict(&url("http://cdn.example/a.torrent"), &start, true),
+            Redirect::Refuse(None)
+        );
+        let magnet = url(&format!("magnet:?xt=urn:btih:{HASH}"));
+        assert_eq!(redirect_verdict(&magnet, &start, false), Redirect::Stop);
+        let many = vec![url("https://a.example/"); 5];
+        assert_eq!(
+            redirect_verdict(&url("https://b.example/"), &many, false),
+            Redirect::Refuse(None)
+        );
+        assert!(link_allowed(&url("https://indexer.example/dl/1")));
+    }
+
+    /// A server on the loopback interface that redirects each path to a location, and records
+    /// the paths asked for.
+    async fn redirecting_server(
+        routes: Vec<(&'static str, String)>,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    ) {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let path = request.split(' ').nth(1).unwrap_or("").to_owned();
+                record.lock().unwrap().push(path.clone());
+                let reply = match routes.iter().find(|(p, _)| *p == path) {
+                    Some((_, location)) => format!(
+                        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\
+                         Connection: close\r\n\r\n"
+                    ),
+                    None => "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nde"
+                        .to_owned(),
+                };
+                let _ = socket.write_all(reply.as_bytes()).await;
+            }
+        });
+        (addr, seen)
+    }
+
+    #[tokio::test]
+    async fn downloads_refuse_local_links_and_redirects() {
+        let (addr, seen) = redirecting_server(Vec::new()).await;
+        let local = url(&format!("http://{addr}/ok"));
+        let client = http_client_builder("test", false)
+            .dns_resolver(PublicResolver)
+            .build()
+            .unwrap();
+        // A local link is refused before anything is sent.
+        assert_eq!(
+            fetch_torrent_file(&client, &local, false).await,
+            Err(SourceError::NotPublic)
+        );
+        assert!(seen.lock().unwrap().is_empty());
+        assert!(fetch_torrent_file(&client, &local, true).await.is_ok());
+
+        // Redirects from a link to the local network are refused before they are followed.
+        let (addr, seen) = redirecting_server(vec![
+            (
+                "/metadata",
+                "http://169.254.169.254/latest/meta-data/".to_owned(),
+            ),
+            ("/router", "http://192.168.1.1/a.torrent".to_owned()),
+            ("/loopback", format!("http://{addr}/ok")),
+            ("/name", "http://localhost/a.torrent".to_owned()),
+        ])
+        .await;
+        for path in ["/metadata", "/router", "/loopback", "/name"] {
+            let link = url(&format!("http://{addr}{path}"));
+            // The first request is allowed here, to test the redirect policy alone.
+            assert_eq!(
+                fetch_torrent_file(&client, &link, true).await,
+                Err(SourceError::NotPublic),
+                "{path}"
+            );
+        }
+        assert!(!seen.lock().unwrap().iter().any(|p| p == "/ok"));
+    }
+
+    #[tokio::test]
+    async fn the_public_resolver_refuses_local_names() {
+        use reqwest::dns::Resolve as _;
+        let name: reqwest::dns::Name = "localhost".parse().unwrap();
+        let error = PublicResolver
+            .resolve(name)
+            .await
+            .err()
+            .expect("localhost has no public address");
+        assert!(error.downcast_ref::<SourceError>().is_some(), "{error}");
     }
 }

@@ -90,7 +90,9 @@ type AppInfo = {
 
 Adds a torrent from a magnet link or an http(s) link to a `.torrent` file, with no files
 selected. Only `magnet:`, `http:`, and `https:` are accepted; downloaded `.torrent` files are
-limited to 16 MiB. Redirects are followed only to http(s); an http(s) link that redirects to a
+limited to 16 MiB. Links and their redirects must lead to public hosts: addresses and names that
+resolve to the local network (private, loopback, link-local, `localhost`) are refused, and
+redirects are followed at most 5 times, only to http(s), and never from https to http. An http(s) link that redirects to a
 magnet link (as search sites' download links, such as `search.emberglow.tech/download/…`, do
 for indexers that only have magnets) adds that magnet link (`StreamEngine::resolve_source`;
 adds, preloads, and prefetches resolve links the same way). What each link gave is remembered
@@ -464,7 +466,7 @@ sent to `onReady` as it is ready. A result with a download link on the search se
 fetched through it first (plain HTTP when the link serves the `.torrent` file, which also works
 without the DHT; most redirect to a magnet link), the torrent it gives is checked against
 `infoHash` when that is known, and the magnet link is used if the link fails, is refused (16 MiB
-limit, http(s)-only redirects), or gives another torrent. Download links count against the
+limit, public hosts and http(s)-only redirects without downgrades), or gives another torrent. Download links count against the
 search rate limiter, and only the first four per call are followed: each new one costs the
 service a request to an indexer, and its operators ask clients to follow only links they will
 use. A newer
