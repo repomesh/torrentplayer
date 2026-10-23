@@ -607,6 +607,22 @@ async fn a_torrents_poster_becomes_its_thumbnail() {
     ])
     .await;
     let dir = tempfile::tempdir().unwrap();
+    let hash = torrentplayer_swarm::Metainfo::from_bytes(&torrent)
+        .unwrap()
+        .info_hash_hex();
+    // The download folder is the user's: a `thumbnails` folder in it is theirs, even one with
+    // a folder named like the torrent's hash.
+    let users = dir.path().join("thumbnails");
+    std::fs::create_dir_all(users.join(&hash)).unwrap();
+    std::fs::write(users.join("keep.txt"), b"mine").unwrap();
+    std::fs::write(users.join(&hash).join("keep.jpg"), b"mine too").unwrap();
+    // A previous run's leftovers in the thumbnail engine's own folder: only `<hash>` folders
+    // are its caches.
+    let own = dir.path().join("torrentplayer-swarm").join("thumbnails");
+    let stale = own.join("0123456789abcdef0123456789abcdef01234567");
+    std::fs::create_dir_all(&stale).unwrap();
+    std::fs::write(stale.join("pieces"), b"old").unwrap();
+    std::fs::write(own.join("notes.txt"), b"not a cache").unwrap();
     let engine = StreamEngine::start(StreamEngineConfig {
         download_dir: dir.path().to_path_buf(),
         choice: EngineChoice::Swarm,
@@ -618,9 +634,6 @@ async fn a_torrents_poster_becomes_its_thumbnail() {
     })
     .await
     .unwrap();
-    let hash = torrentplayer_swarm::Metainfo::from_bytes(&torrent)
-        .unwrap()
-        .info_hash_hex();
 
     // Unknown metadata: nothing is fetched.
     assert!(engine.thumbnail(&hash).await.unwrap().is_none());
@@ -641,6 +654,28 @@ async fn a_torrents_poster_becomes_its_thumbnail() {
     );
     assert_eq!(thumbnail.bytes, poster, "the poster, not the banner");
     assert_eq!(thumbnail.info_hash, hash);
+    assert!(
+        !stale.exists(),
+        "a previous run's thumbnail cache is deleted"
+    );
+    assert_eq!(
+        std::fs::read(own.join("notes.txt")).unwrap(),
+        b"not a cache"
+    );
+    // Anything but an info hash is refused before it names a folder.
+    assert!(
+        engine
+            .thumbnail("../../thumbnails")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    assert_eq!(std::fs::read(users.join("keep.txt")).unwrap(), b"mine");
+    assert_eq!(
+        std::fs::read(users.join(&hash).join("keep.jpg")).unwrap(),
+        b"mine too"
+    );
     engine.shutdown().await;
 }
 
@@ -676,13 +711,23 @@ async fn a_stopped_thumbnail_download_leaves_nothing_behind() {
         .prefetch_metadata(TorrentSource::from_file_bytes(torrent).unwrap())
         .await
         .unwrap();
-    let cache = dir.path().join("thumbnails").join(&hash);
-    assert!(
-        tokio::time::timeout(Duration::from_millis(500), engine.thumbnail(&hash))
-            .await
-            .is_err(),
-        "no peers, so it is still waiting"
-    );
+    // The cache is in the thumbnail engine's own folder, not the download folder's.
+    let cache = dir
+        .path()
+        .join("torrentplayer-swarm")
+        .join("thumbnails")
+        .join(&hash);
+    let created = async {
+        while !cache.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    };
+    tokio::select! {
+        _ = engine.thumbnail(&hash) => panic!("no peers, so it should still be waiting"),
+        () = created => {}
+        () = tokio::time::sleep(Duration::from_secs(10)) => panic!("no cache at {}", cache.display()),
+    }
+    assert!(!dir.path().join("thumbnails").exists());
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(!cache.exists(), "the stopped download's cache is deleted");
     engine.shutdown().await;

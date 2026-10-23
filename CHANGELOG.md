@@ -43,6 +43,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (about two hours of traffic, sooner when handshakes repeat) every later one was refused as a
   flood and stalled for at least 5 seconds, or failed with a server that ignores WireGuard
   cookies, until the app was restarted.
+- Search result thumbnails no longer delete a folder named `thumbnails` in the download folder.
+  The app kept their temporary downloads there and emptied it when it started fetching them, so
+  a folder of yours with that name lost its contents. Thumbnail downloads now live in the app's
+  own `torrentplayer-swarm/thumbnails` cache folder, and a `thumbnails` folder in the download
+  folder is never touched.
 
 ## [0.3.0] - 2026-10-21
 

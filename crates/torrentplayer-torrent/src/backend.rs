@@ -286,6 +286,8 @@ struct PreloadSlot {
 const PRELOAD_POLL: Duration = Duration::from_millis(250);
 /// How long an add waits for a preload that is still fetching the same torrent's metadata.
 const PRELOAD_METADATA_WAIT: Duration = Duration::from_secs(130);
+/// The thumbnail engine's folder inside torrentplayer-swarm's (see `StreamEngine::thumbnail_dir`).
+const THUMBNAIL_DIR: &str = "thumbnails";
 /// Suffix of the marker file next to an unplayed preload's cache.
 const PRELOAD_MARKER: &str = ".preload";
 
@@ -888,6 +890,10 @@ impl StreamEngine {
     /// Returns an error if the metadata is invalid or unsafe, or the download fails.
     pub async fn thumbnail(&self, info_hash: &str) -> Result<Option<Thumbnail>, EngineError> {
         let info_hash = info_hash.to_ascii_lowercase();
+        // It names a cache folder below; anything but an info hash is no torrent of ours.
+        if !is_hex_hash(&info_hash) {
+            return Ok(None);
+        }
         let running = self.torrents().values().find_map(|b| match b {
             Backed::Swarm { torrent, info } if info.info_hash == info_hash => Some(torrent.clone()),
             _ => None,
@@ -912,7 +918,7 @@ impl StreamEngine {
         };
         // One download per torrent at a time: they would share a cache folder.
         let _fetching = self.metadata.lock(&format!("thumbnail {info_hash}")).await;
-        let dir = self.config.download_dir.join("thumbnails").join(&info_hash);
+        let dir = self.thumbnail_dir().join(&info_hash);
         // An interrupted earlier download of this torrent may have left its cache behind.
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let torrent = swarm.add(meta, cached.peers).map_err(swarm_err)?;
@@ -966,9 +972,9 @@ impl StreamEngine {
         let swarm = self
             .thumbnails
             .get_or_try_init(|| async {
-                let dir = self.config.download_dir.join("thumbnails");
+                let dir = self.thumbnail_dir();
                 // Pictures left over from a previous run.
-                let _ = tokio::fs::remove_dir_all(&dir).await;
+                remove_thumbnail_caches(&dir);
                 let mut c = SwarmConfig::new(dir);
                 c.enable_trackers = self.config.public_discovery;
                 c.network.clone_from(&self.network);
@@ -1846,6 +1852,12 @@ impl StreamEngine {
         self.config.download_dir.join("torrentplayer-swarm")
     }
 
+    /// The thumbnail engine's cache. It lives in torrentplayer-swarm's own folder: the download
+    /// folder is the user's, and so may be a `thumbnails` folder in it.
+    fn thumbnail_dir(&self) -> PathBuf {
+        self.swarm_dir().join(THUMBNAIL_DIR)
+    }
+
     fn preload_slot(&self) -> std::sync::MutexGuard<'_, Option<PreloadSlot>> {
         self.preload.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -1863,6 +1875,24 @@ impl StreamEngine {
 enum Handle {
     Rqbit(TorrentId),
     Swarm(Torrent),
+}
+
+/// Deletes the thumbnail caches (`<info hash>` folders) a previous run left in `dir`. Nothing
+/// else there is touched, and nothing at all if `dir` is not a real folder.
+fn remove_thumbnail_caches(dir: &Path) {
+    if !std::fs::symlink_metadata(dir).is_ok_and(|m| m.file_type().is_dir()) {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_str().is_some_and(is_hex_hash)
+            && std::fs::symlink_metadata(entry.path()).is_ok_and(|m| m.file_type().is_dir())
+        {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Deletes the caches of preloads that were never played (marked by `<hash>.preload` files).

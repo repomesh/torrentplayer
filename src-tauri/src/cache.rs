@@ -477,6 +477,24 @@ mod tests {
     }
 
     #[test]
+    fn the_thumbnail_engines_folder_is_measured_but_never_a_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        // The thumbnail engine keeps `<hash>` caches in `torrentplayer-swarm/thumbnails`.
+        let thumbnails = root.path().join("torrentplayer-swarm/thumbnails");
+        entry(&thumbnails, ".", OLD, 10, 1);
+        let plan = plan(
+            root.path(),
+            &HashSet::new(),
+            CleanupMode::AllFinished,
+            UNIX_EPOCH,
+        );
+        assert!(plan.candidates.is_empty());
+        assert_eq!(plan.usage.bytes, 11);
+        remove(root.path(), OLD).unwrap();
+        assert!(thumbnails.join(OLD).exists());
+    }
+
+    #[test]
     fn removal_is_limited_to_valid_hash_directories() {
         let root = tempfile::tempdir().unwrap();
         entry(root.path(), "torrentplayer-swarm", OLD, 10, 1);
