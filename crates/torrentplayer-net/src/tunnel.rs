@@ -3,7 +3,7 @@
 //! An application-local WireGuard tunnel. Only encrypted UDP reaches the OS network.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -38,8 +38,23 @@ struct Session {
     /// Started because the server stopped answering the previous tunnel: until the server
     /// answers this one's traffic, it is not connected.
     unproven: bool,
-    /// Closed because the server stopped answering it (see [`Tunnel::abandoned`]).
-    abandoned: AtomicBool,
+    /// Why the health check closed it, as an [`Abandoned`] (see [`Tunnel::abandoned`]).
+    abandoned: AtomicU8,
+    /// Which of the endpoint's addresses it uses, and how many there were.
+    endpoint: (usize, usize),
+    /// When it last had a session (or started, before its first).
+    keyed_at: Mutex<Instant>,
+}
+
+/// Why the health check closed a tunnel, so that a new one replaces it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Abandoned {
+    /// Still in use, or closed for another reason.
+    No = 0,
+    /// The server stopped answering its traffic.
+    Unanswered = 1,
+    /// It had no session for too long.
+    NoHandshake = 2,
 }
 
 /// Where a health probe goes.
@@ -147,15 +162,26 @@ pub(crate) fn validate(config: &WireGuardConfig) -> Result<(), NetError> {
 }
 
 impl Tunnel {
-    /// Starts a tunnel. `unproven`: it replaces one whose server stopped answering (see
-    /// [`Tunnel::abandoned`]), so it counts as connected only once the server answers it.
-    pub(crate) async fn start(config: &WireGuardConfig, unproven: bool) -> Result<Self, NetError> {
+    /// Starts a tunnel, resolving the endpoint again. If it replaces `previous`, which the
+    /// health check abandoned (see [`Tunnel::abandoned`]), it uses the endpoint's next address,
+    /// and if the server had stopped answering, it counts as connected only once the server
+    /// answers it.
+    pub(crate) async fn start(
+        config: &WireGuardConfig,
+        previous: Option<&Tunnel>,
+    ) -> Result<Self, NetError> {
         validate(config)?;
         let peer = &config.peers[0];
-        let endpoint = tokio::net::lookup_host(&peer.endpoint)
-            .await?
-            .next()
-            .ok_or_else(|| invalid("the WireGuard endpoint did not resolve"))?;
+        let abandoned = previous.map_or(Abandoned::No, Tunnel::abandoned);
+        let unproven = abandoned == Abandoned::Unanswered;
+        let addresses = endpoint_addresses(&peer.endpoint).await?;
+        let index = match (previous, abandoned) {
+            (Some(previous), Abandoned::Unanswered | Abandoned::NoHandshake) => {
+                (previous.0.endpoint.0 + 1) % addresses.len()
+            }
+            _ => 0,
+        };
+        let endpoint = addresses[index];
         let interface = Interface::new_with(
             config::Config {
                 interface: config::Interface {
@@ -216,14 +242,25 @@ impl Tunnel {
             dns,
             probes: Mutex::default(),
             unproven,
-            abandoned: AtomicBool::new(false),
+            abandoned: AtomicU8::new(Abandoned::No as u8),
+            endpoint: (index, addresses.len()),
+            keyed_at: Mutex::new(Instant::now()),
         })))
     }
 
-    /// Whether the health check closed this tunnel because its server stopped answering, so
-    /// its replacement starts unproven.
-    pub(crate) fn abandoned(&self) -> bool {
-        self.0.abandoned.load(Ordering::Relaxed)
+    /// Why the health check closed this tunnel, if it did.
+    pub(crate) fn abandoned(&self) -> Abandoned {
+        match self.0.abandoned.load(Ordering::Relaxed) {
+            1 => Abandoned::Unanswered,
+            2 => Abandoned::NoHandshake,
+            _ => Abandoned::No,
+        }
+    }
+
+    /// Closes the tunnel so that the monitor replaces it (see [`Tunnel::start`]).
+    fn abandon(&self, why: Abandoned) {
+        self.0.abandoned.store(why as u8, Ordering::Relaxed);
+        self.close();
     }
 
     pub(crate) fn close(&self) {
@@ -273,13 +310,50 @@ impl Tunnel {
         let session = liveness
             .handshake_age
             .is_some_and(|age| age < REJECT_AFTER_TIME);
+        let without_session = {
+            let mut last = self
+                .0
+                .keyed_at
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if session {
+                *last = Instant::now();
+            }
+            last.elapsed()
+        };
         let unanswered = liveness.unanswered.unwrap_or_default();
-        if unanswered >= reply_timeout || (self.0.unproven && liveness.received_age.is_none()) {
+        let answering =
+            unanswered < reply_timeout && (!self.0.unproven || liveness.received_age.is_some());
+        // Without a session for a while, try the endpoint's next address (a host name can
+        // resolve to an address this computer cannot reach, such as IPv6 on an IPv4-only
+        // network), or, with only one, resolve it again after `restart_after` (the server
+        // may have moved). Each address gets three checks' worth of handshake attempts (15 s
+        // by default: three REKEY_TIMEOUTs).
+        let (_, addresses) = self.0.endpoint;
+        if !session
+            && (without_session >= restart_after
+                || (addresses > 1 && without_session >= timeout * 3))
+        {
+            self.abandon(if answering {
+                Abandoned::NoHandshake
+            } else {
+                Abandoned::Unanswered
+            });
+            return Err(NetError::InterfaceUnavailable(
+                if answering {
+                    NO_HANDSHAKE
+                } else {
+                    NOT_ANSWERING
+                }
+                .into(),
+            ));
+        }
+        if !answering {
             if unanswered >= restart_after {
-                // A fresh interface starts over with a new handshake (and source port). Each
-                // tunnel must go unanswered this long first, so restarts are as far apart.
-                self.0.abandoned.store(true, Ordering::Relaxed);
-                self.close();
+                // A fresh interface starts over with a new handshake (and source port), at the
+                // endpoint's next address if it has several. Each tunnel must go unanswered
+                // this long first, so restarts are as far apart.
+                self.abandon(Abandoned::Unanswered);
             } else {
                 // Keep asking, so the check sees the server answer again as soon as it does.
                 if !session {
@@ -569,6 +643,25 @@ impl Tunnel {
     }
 }
 
+/// The endpoint's addresses (resolved again on every call), IPv4 first: an IPv6 address
+/// listed first fails on the many networks without IPv6, while IPv4 works almost everywhere.
+async fn endpoint_addresses(endpoint: &str) -> Result<Vec<SocketAddr>, NetError> {
+    #[cfg(test)]
+    if let Some(addresses) = tests::RESOLVE
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(endpoint)
+    {
+        return Ok(addresses.clone());
+    }
+    let mut addresses: Vec<SocketAddr> = tokio::net::lookup_host(endpoint).await?.collect();
+    addresses.sort_by_key(SocketAddr::is_ipv6);
+    if addresses.is_empty() {
+        return Err(invalid("the WireGuard endpoint did not resolve"));
+    }
+    Ok(addresses)
+}
+
 /// The tunnel's TCP settings. A listener keeps a socket with full buffers (80 KiB) ready for
 /// each pending connection, so its backlog is 16 rather than 128. A connection whose peer
 /// stops acknowledging for 2 minutes is aborted (keep-alives every 30 s cover idle ones),
@@ -705,6 +798,11 @@ mod tests {
     use super::*;
     use crate::wireguard::{WgInterface, WgPeer};
     use crate::{ConnectionState, Network, NetworkConfig, NetworkOptions, Secret};
+
+    /// Test seam: endpoint host names and what they resolve to (see `endpoint_addresses`).
+    pub(super) static RESOLVE: std::sync::LazyLock<
+        Mutex<std::collections::HashMap<String, Vec<SocketAddr>>>,
+    > = std::sync::LazyLock::new(Mutex::default);
 
     fn pair() -> (Interface, WireGuardConfig) {
         let (server_key, server_public) = x25519::keypair();
@@ -990,7 +1088,7 @@ mod tests {
                     });
                 }
             });
-            let tunnel = Tunnel::start(&config, false).await.unwrap();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
             tunnel
                 .healthy(
                     Duration::from_secs(2),
@@ -1052,7 +1150,7 @@ mod tests {
                 stream.write_all(&bytes).await.unwrap();
                 let _ = stream.shutdown().await;
             });
-            let tunnel = Tunnel::start(&config, false).await.unwrap();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
             tunnel
                 .healthy(
                     Duration::from_secs(2),
@@ -1193,10 +1291,7 @@ mod tests {
 
     /// A UDP relay in front of the WireGuard test server at `server`, filtered by `mode`. Returns
     /// the endpoint for the client, and what the client sent.
-    async fn relay(
-        server: SocketAddr,
-        mode: Arc<std::sync::atomic::AtomicU8>,
-    ) -> (SocketAddr, Arc<Traffic>) {
+    async fn relay(server: SocketAddr, mode: Arc<AtomicU8>) -> (SocketAddr, Arc<Traffic>) {
         let outside = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let inside = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         inside.connect(server).await.unwrap();
@@ -1303,8 +1398,8 @@ mod tests {
     async fn through_relay(
         mut config: WireGuardConfig,
         options: NetworkOptions,
-    ) -> (Network, Arc<std::sync::atomic::AtomicU8>, Arc<Traffic>) {
-        let mode = Arc::new(std::sync::atomic::AtomicU8::new(PASS_ALL));
+    ) -> (Network, Arc<AtomicU8>, Arc<Traffic>) {
+        let mode = Arc::new(AtomicU8::new(PASS_ALL));
         let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
         let (endpoint, traffic) = relay(target, Arc::clone(&mode)).await;
         config.peers[0].endpoint = endpoint.to_string();
@@ -1537,7 +1632,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(20), async {
             let (server, mut config) = pair();
             config.interface.dns.clear();
-            let tunnel = Tunnel::start(&config, false).await.unwrap();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
             assert_eq!(
                 tunnel.0.probe_target.unwrap().remote,
                 "192.0.2.1:9".parse().unwrap()
@@ -1639,6 +1734,97 @@ mod tests {
         assert_eq!(network("10.64.3.9/33"), None);
     }
 
+    /// Starts a network whose endpoint is `host`, resolving (through the test seam) to
+    /// `addresses`.
+    async fn with_endpoint(
+        mut config: WireGuardConfig,
+        host: &str,
+        addresses: Vec<SocketAddr>,
+        options: NetworkOptions,
+    ) -> Network {
+        RESOLVE.lock().unwrap().insert(host.to_owned(), addresses);
+        config.peers[0].endpoint = host.to_owned();
+        Network::start(
+            NetworkConfig {
+                mode: crate::NetworkMode::WireGuard(config),
+                allow_ipv6: false,
+                hold: None,
+            },
+            options,
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_endpoint_address_that_never_handshakes_moves_on_to_the_next() {
+        // Only the first resolved address was ever used: a host name whose first address is
+        // unreachable (IPv6 on an IPv4-only network, a dead server) never connected.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let (server, config) = pair();
+            let live: SocketAddr = config.peers[0].endpoint.parse().unwrap();
+            let net = with_endpoint(
+                config,
+                "failover.torrentplayer.test:51820",
+                vec![silent.local_addr().unwrap(), live],
+                health_options(Duration::from_secs(1)),
+            )
+            .await;
+            wait_for(&net, |s| *s == ConnectionState::Connected).await;
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_tunnel_without_a_session_resolves_its_endpoint_again() {
+        // The endpoint was resolved only when the tunnel started; a server that moved to a
+        // new address was never found again.
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let (server, config) = pair();
+            let live: SocketAddr = config.peers[0].endpoint.parse().unwrap();
+            let host = "moved.torrentplayer.test:51820";
+            let net = with_endpoint(
+                config,
+                host,
+                vec![silent.local_addr().unwrap()],
+                NetworkOptions {
+                    wireguard_restart_after: Duration::from_secs(2),
+                    ..health_options(Duration::from_secs(1))
+                },
+            )
+            .await;
+            assert!(matches!(
+                net.settled(Duration::from_secs(3)).await.state,
+                ConnectionState::KillSwitchActive { .. }
+            ));
+            RESOLVE.lock().unwrap().insert(host.to_owned(), vec![live]);
+            wait_for(&net, |s| *s == ConnectionState::Connected).await;
+            net.shutdown();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn endpoint_addresses_list_ipv4_first() {
+        let addresses = endpoint_addresses("localhost:51820").await.unwrap();
+        assert!(!addresses.is_empty());
+        assert!(
+            addresses.is_sorted_by_key(SocketAddr::is_ipv6),
+            "{addresses:?}"
+        );
+        assert_eq!(
+            endpoint_addresses("[::1]:51820").await.unwrap(),
+            vec!["[::1]:51820".parse::<SocketAddr>().unwrap()]
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_server_that_never_answers_never_counts_as_connected() {
         // Everything sent to this endpoint is dropped.
@@ -1685,7 +1871,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(30), async {
             let (server, mut config) = pair();
             let dns = dns_server(&server).await;
-            let mode = Arc::new(std::sync::atomic::AtomicU8::new(PASS_ALL));
+            let mode = Arc::new(AtomicU8::new(PASS_ALL));
             let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
             config.peers[0].endpoint = relay(target, Arc::clone(&mode)).await.0.to_string();
             let reply_timeout = Duration::from_secs(1);
@@ -1826,7 +2012,7 @@ mod tests {
                 stream.write_all(&answer).await.unwrap();
                 let _ = stream.shutdown().await;
             });
-            let tunnel = Tunnel::start(&config, false).await.unwrap();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
             tunnel
                 .healthy(
                     Duration::from_secs(3),
@@ -1855,7 +2041,7 @@ mod tests {
     async fn missing_dns_never_falls_back_to_the_system_resolver() {
         let (server, mut config) = pair();
         config.interface.dns.clear();
-        let tunnel = Tunnel::start(&config, false).await.unwrap();
+        let tunnel = Tunnel::start(&config, None).await.unwrap();
         assert!(matches!(
             tunnel.resolve("api.ipify.org", 443, true).await,
             Err(NetError::InvalidConfig(_))
@@ -1876,11 +2062,11 @@ mod tests {
                 .unwrap()
                 .try_into()
                 .unwrap();
-            let mode = Arc::new(std::sync::atomic::AtomicU8::new(PASS_ALL));
+            let mode = Arc::new(AtomicU8::new(PASS_ALL));
             let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
             let (endpoint, traffic) = relay(target, Arc::clone(&mode)).await;
             config.peers[0].endpoint = endpoint.to_string();
-            let tunnel = Tunnel::start(&config, false).await.unwrap();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
             tunnel
                 .healthy(
                     Duration::from_secs(2),
@@ -1946,11 +2132,11 @@ mod tests {
         // datagrams kept arriving no keepalive, handshake, or rekey was sent.
         tokio::time::timeout(Duration::from_secs(15), async {
             let (server, mut config) = pair();
-            let mode = Arc::new(std::sync::atomic::AtomicU8::new(PASS_ALL));
+            let mode = Arc::new(AtomicU8::new(PASS_ALL));
             let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
             let (endpoint, traffic) = relay(target, Arc::clone(&mode)).await;
             config.peers[0].endpoint = endpoint.to_string();
-            let tunnel = Tunnel::start(&config, false).await.unwrap();
+            let tunnel = Tunnel::start(&config, None).await.unwrap();
             tunnel
                 .healthy(
                     Duration::from_secs(2),
@@ -1960,7 +2146,7 @@ mod tests {
                 .await
                 .unwrap();
             let (_, client) = traffic.init.lock().unwrap().clone().unwrap();
-            let stop = Arc::new(AtomicBool::new(false));
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let flood = std::thread::spawn({
                 let stop = Arc::clone(&stop);
                 move || {

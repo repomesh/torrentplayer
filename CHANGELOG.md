@@ -68,6 +68,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connections to the proxy trigger an extra check at most once per check interval. Providers with
   connection caps no longer cause a drop-and-reconnect loop; a proxy that is really down still
   blocks traffic within seconds.
+- A WireGuard endpoint given as a host name now works when its first address does not: IPv4
+  addresses are tried first, a tunnel that completes no handshake for 15 seconds moves on to the
+  next address, and the name is resolved again whenever the tunnel is restarted (after 6 minutes
+  without a session or an answer), so a server that moved is found again. Before, only the first
+  address was used, and an IPv6 address listed first never connected on an IPv4-only network.
 
 ## [0.3.0] - 2026-10-21
 

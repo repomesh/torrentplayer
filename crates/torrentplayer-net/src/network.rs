@@ -1274,10 +1274,10 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
                     {
                         tunnel.clone()
                     } else {
-                        // A tunnel closed because its server stopped answering is replaced by
-                        // one that must hear from the server before traffic resumes.
-                        let unproven = existing.as_ref().is_some_and(Tunnel::abandoned);
-                        let tunnel = Tunnel::start(&cfg, unproven).await?;
+                        // A tunnel the health check closed is replaced by one at the endpoint's
+                        // next address; if its server had stopped answering, the new one must
+                        // hear from the server before traffic resumes.
+                        let tunnel = Tunnel::start(&cfg, existing.as_ref()).await?;
                         let mut st = net.state();
                         if st.generation != generation || st.conn == ConnectionState::Disconnected {
                             tunnel.close();
