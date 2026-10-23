@@ -268,7 +268,7 @@ MP4, files without a keyframe index, and other containers fall back to the flat 
 report says so. `--startup-mib` and `--seek-mib` force the flat reads.
 
 **Torrents and magnet links** play from their public swarm with both engines, a 10 MiB/s
-download limit (`--download-mibps`), 3 runs, and the same seeks. They download from and upload
+download limit (`--download-mibps N`; `--download-mibps 0` removes it), 3 runs, and the same seeks. They download from and upload
 to other people's computers, which see your IP address, so the suite skips them unless the
 command includes `public` or `--public`, and prints a notice before it starts. Only list
 content you have the right to download and share; this project uses openly licensed films

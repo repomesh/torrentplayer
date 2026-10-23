@@ -28,6 +28,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- `cargo bench-suite … --download-mibps 0` now runs public entries with no download limit (labelled
+  "no cap"); before, 0 fell back to the 10 MiB/s default.
 - A WireGuard tunnel whose server stops answering is no longer shown as Connected. The tunnel
   now counts as connected only while its server completes handshakes and answers traffic within
   20 seconds (an idle tunnel is probed with a tiny DNS query inside it); otherwise the kill
