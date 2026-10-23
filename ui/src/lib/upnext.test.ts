@@ -2,7 +2,13 @@
 
 import { describe, expect, it } from 'vitest';
 import type { QueueItem } from './bindings/QueueItem';
-import { PRELOAD_NEXT_LEAD_SECS, preloadTarget, shouldPreloadNext } from './upnext';
+import {
+  PRELOAD_NEXT_LEAD_SECS,
+  endCard,
+  endCardTakesFocus,
+  preloadTarget,
+  shouldPreloadNext,
+} from './upnext';
 
 describe('shouldPreloadNext', () => {
   const base = {
@@ -48,5 +54,22 @@ describe('preloadTarget', () => {
     const paused = { ...queue, items: [item('a'), item('b', true), item('c')] };
     expect(preloadTarget(paused)).toBeNull();
     expect(preloadTarget({ ...queue, current: 'c' })).toBeNull();
+  });
+});
+
+describe('endCard', () => {
+  it('offers the next video when there is one, else a replay', () => {
+    expect(endCard('Lecture 3')).toEqual({
+      heading: 'Finished',
+      next: 'Next: Lecture 3',
+      primary: 'next',
+    });
+    expect(endCard(null)).toEqual({ heading: 'Finished', next: null, primary: 'replay' });
+  });
+
+  it('takes focus only from the player', () => {
+    expect(endCardTakesFocus(true, true)).toBe(true);
+    expect(endCardTakesFocus(false, false)).toBe(true);
+    expect(endCardTakesFocus(false, true)).toBe(false);
   });
 });

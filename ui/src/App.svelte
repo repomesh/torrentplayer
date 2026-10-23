@@ -1542,6 +1542,8 @@
                     onBack={goBack}
                     {onEnded}
                     {onTime}
+                    nextTitle={next?.title ?? null}
+                    onPlayNext={playNext}
                   />
                 {/key}
               {:else}

@@ -52,3 +52,26 @@ export function shouldPreloadNext(input: NextPreloadInput): boolean {
   const missing = Math.max(0, fileLength - fileDownloaded);
   return (missing / downloadBps) * SAFETY_FACTOR < remaining;
 }
+
+/** The card over a finished video: what plays next, if anything, and which button leads. */
+export interface EndCard {
+  heading: 'Finished';
+  /** `Next: Lecture 3`, or null when the queue has nothing next. */
+  next: string | null;
+  /** The button that takes focus: "Play next" when there is a next video, else "Replay". */
+  primary: 'next' | 'replay';
+}
+
+export function endCard(nextTitle: string | null): EndCard {
+  return nextTitle === null
+    ? { heading: 'Finished', next: null, primary: 'replay' }
+    : { heading: 'Finished', next: `Next: ${nextTitle}`, primary: 'next' };
+}
+
+/**
+ * Whether the end card takes focus when it appears: only when focus was on the player (or on
+ * nothing, after a click on the video), never taking it from the queue or a menu.
+ */
+export function endCardTakesFocus(focusOnPlayer: boolean, focusOnPage: boolean): boolean {
+  return focusOnPlayer || !focusOnPage;
+}

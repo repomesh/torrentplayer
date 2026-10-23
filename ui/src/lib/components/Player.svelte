@@ -1,6 +1,6 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 <script lang="ts">
-  import { onDestroy, onMount, type Snippet } from 'svelte';
+  import { onDestroy, onMount, tick, type Snippet } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import {
     AudioDecodeWatch,
@@ -49,6 +49,7 @@
   import { thumbnailSource } from '../seekbar';
   import type { SettingsSection } from '../settings';
   import { Ewma, bufferHealth, bufferedSeconds, etaSeconds, type StatusInfo } from '../stats';
+  import { endCard, endCardTakesFocus } from '../upnext';
   import Controls from './Controls.svelte';
   import DebugOverlay from './DebugOverlay.svelte';
   import SettingsPage from './settings/SettingsPage.svelte';
@@ -75,6 +76,10 @@
     fullscreenTarget?: HTMLElement | undefined;
     /** Audio-only media (music, podcasts, audiobooks): shown as "now playing" artwork. */
     audio?: { title: string; album: string | null } | null;
+    /** The queue's next video (what Shift+N plays), for the card shown when this one ends. */
+    nextTitle?: string | null;
+    /** Plays the queue's next video (the end card's "Play next"). */
+    onPlayNext?: () => void;
   }
 
   let {
@@ -88,6 +93,8 @@
     children,
     audio = null,
     fullscreenTarget,
+    nextTitle = null,
+    onPlayNext,
   }: Props = $props();
   // Whether `startAt` has been applied.
   let resumed = false;
@@ -126,6 +133,10 @@
   let muted = $state(false);
   let volume = $state(1);
   let fullscreen = $state(false);
+  // The video played to its end: the end card shows until it plays or seeks again.
+  let ended = $state(false);
+  let endPrimary: HTMLButtonElement | undefined = $state();
+  const card = $derived(endCard(onPlayNext ? nextTitle : null));
   // Seek-bar pictures of this video (not of audio). The duration is read when one is asked
   // for, so it learning the duration does not forget the pictures.
   const thumbnails = $derived.by(() => {
@@ -697,7 +708,7 @@
       settingsSection !== null ||
       (event.target instanceof Element &&
         event.target.closest(
-          'dialog, aside, [role="tree"], [role="menu"], input, select, textarea',
+          'dialog, aside, [role="tree"], [role="menu"], .end-card, input, select, textarea',
         ) !== null)
     ) {
       return;
@@ -867,6 +878,7 @@
     ondblclick={toggleFullscreen}
     onplay={() => {
       paused = false;
+      ended = false;
     }}
     onpause={() => {
       paused = true;
@@ -891,7 +903,16 @@
     }}
     onended={() => {
       report();
+      const active = document.activeElement;
+      const takeFocus = endCardTakesFocus(
+        active !== null && container?.contains(active) === true,
+        active !== null && active !== document.body,
+      );
+      ended = true;
       onEnded?.();
+      if (takeFocus) {
+        void tick().then(() => endPrimary?.focus());
+      }
     }}
     onratechange={() => {
       if (video) {
@@ -908,6 +929,7 @@
       }
     }}
     onseeking={() => {
+      ended = false;
       timer.seeking();
       converted?.seeking();
       if (video) {
@@ -1087,6 +1109,41 @@
     }}
   />
 
+  {#if ended}
+    <section class="end-card" aria-labelledby="end-card-heading">
+      <h2 id="end-card-heading">{card.heading}</h2>
+      {#if card.next}<p class="next" title={card.next}>{card.next}</p>{/if}
+      <div class="end-actions">
+        {#if card.primary === 'next' && onPlayNext}
+          <button
+            bind:this={endPrimary}
+            type="button"
+            class="primary"
+            aria-keyshortcuts="Shift+N"
+            onclick={onPlayNext}>Play next <kbd>(Shift+N)</kbd></button
+          >
+          <button
+            type="button"
+            onclick={() => {
+              seekTo(0);
+              void startPlaying();
+            }}>Replay</button
+          >
+        {:else}
+          <button
+            bind:this={endPrimary}
+            type="button"
+            class="primary"
+            onclick={() => {
+              seekTo(0);
+              void startPlaying();
+            }}>Replay</button
+          >
+        {/if}
+      </div>
+    </section>
+  {/if}
+
   {@render children?.()}
 
   {#if showDebug}
@@ -1260,6 +1317,99 @@
     letter-spacing: 0.03em;
     transform: translate(-50%, -50%);
     pointer-events: none;
+  }
+
+  /* Over a finished video, also in fullscreen. Nothing plays next until the user chooses. */
+  .end-card {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 4;
+    display: grid;
+    justify-items: center;
+    gap: 0.5rem;
+    max-width: min(28rem, 85%);
+    padding: 1.1rem 1.4rem;
+    border: 1px solid rgb(255 255 255 / 8%);
+    border-radius: 0.8rem;
+    background: rgb(15 15 20 / 88%);
+    box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 50%);
+    transform: translate(-50%, -50%);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .end-card {
+      animation: end-card-in 0.2s ease-out;
+    }
+  }
+
+  @keyframes end-card-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  .end-card h2 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .end-card .next {
+    max-width: 100%;
+    margin: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .end-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-top: 0.35rem;
+  }
+
+  .end-actions button {
+    padding: 0.45rem 0.9rem;
+    border: 1px solid rgb(255 255 255 / 14%);
+    border-radius: 0.5rem;
+    background: rgb(255 255 255 / 4%);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.875rem;
+    cursor: pointer;
+  }
+
+  .end-actions button:hover {
+    background: rgb(255 255 255 / 10%);
+  }
+
+  .end-actions button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .end-actions .primary {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #1a1408;
+    font-weight: 600;
+  }
+
+  .end-actions .primary:hover {
+    background: var(--accent);
+    filter: brightness(1.08);
+  }
+
+  .end-actions kbd {
+    margin-left: 0.3rem;
+    font: inherit;
+    font-size: 0.75rem;
+    font-weight: 500;
   }
 
   /* Below the title, above the video; they stay while the controls fade. */
