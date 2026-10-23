@@ -950,6 +950,18 @@ impl Scheduler {
         self.fill_up_to(key, now, usize::MAX)
     }
 
+    /// The critical pieces in the order to request them.
+    fn critical_order(&self) -> Vec<u32> {
+        let mut critical = self.critical_pieces.clone();
+        // A player reading ahead as fast as data arrives keeps its next piece due now; the
+        // index it also waits for goes first.
+        critical.sort_by_key(|&p| {
+            let index = self.index_pieces.binary_search(&p).is_ok();
+            (self.urgency[p as usize], !index, p)
+        });
+        critical
+    }
+
     /// Chooses up to `max` requests to top up a peer's queue.
     fn fill_up_to(&mut self, key: PeerKey, now: Instant, max: usize) -> Vec<Request> {
         let Some(peer) = self.peers.get(&key) else {
@@ -964,22 +976,18 @@ impl Scheduler {
         let rivals = self.rivals(key);
 
         // 1. Urgent pieces, most urgent first. In the critical phase, only critical pieces.
-        let urgent = if self.critical {
-            let mut critical = self.critical_pieces.clone();
-            // A player reading ahead as fast as data arrives keeps its next piece due now; the
-            // index it also waits for goes first.
-            critical.sort_by_key(|&p| {
-                let index = self.index_pieces.binary_search(&p).is_ok();
-                (self.urgency[p as usize], !index, p)
-            });
-            critical
-        } else {
-            self.urgent_order.clone()
-        };
-        for piece in urgent {
+        // Outside the critical phase `urgent_order` is read in place (nothing below changes it),
+        // so a fill does not copy it.
+        let critical = self.critical.then(|| self.critical_order());
+        let urgent_len = critical.as_ref().map_or(self.urgent_order.len(), Vec::len);
+        for i in 0..urgent_len {
             if want == 0 {
                 break;
             }
+            let piece = match &critical {
+                Some(critical) => critical[i],
+                None => self.urgent_order[i],
+            };
             let due = self.urgency[piece as usize].unwrap_or(Duration::MAX);
             if !self.peer_has(key, piece) || self.have(piece) || self.verifying.contains_key(&piece)
             {
@@ -1191,19 +1199,22 @@ impl Scheduler {
             };
             peers.get(&holder).is_some_and(|p| {
                 let rate = p.rate.bytes_per_sec.max(p.rate.peak);
-                let position = p
+                // The cheap test first: the queue scan below is linear in the holder's
+                // outstanding requests, and most holders are not much slower.
+                if !(p.rate.measured && rate > 0.0 && rate * FASTER_BY < rescue.rate) {
+                    return false;
+                }
+                let Some(at) = p
                     .outstanding
                     .iter()
-                    .position(|o| o.piece == piece && o.block == block);
-                match position {
-                    Some(at) if p.rate.measured && rate > 0.0 && rate * FASTER_BY < rescue.rate => {
-                        #[allow(clippy::cast_precision_loss)]
-                        let bytes = (at + 1) as f64 * f64::from(BLOCK_LEN);
-                        let remaining = Duration::from_secs_f64(bytes / rate);
-                        remaining > rescue.needed_in && remaining > rescue.eta.mul_f64(FASTER_BY)
-                    }
-                    _ => false,
-                }
+                    .position(|o| o.piece == piece && o.block == block)
+                else {
+                    return false;
+                };
+                #[allow(clippy::cast_precision_loss)]
+                let bytes = (at + 1) as f64 * f64::from(BLOCK_LEN);
+                let remaining = Duration::from_secs_f64(bytes / rate);
+                remaining > rescue.needed_in && remaining > rescue.eta.mul_f64(FASTER_BY)
             })
         };
         let suspect = self.suspects.contains_key(&piece);
