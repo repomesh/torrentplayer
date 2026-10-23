@@ -141,12 +141,13 @@ time. Every view stays reachable from the rail.
   per view. Leaving the player unmounts it but keeps the stream open (it keeps downloading).
   Coming back resumes at the same position. Playing something else, or a failed start, closes
   the stream.
-- **Queue** (`ui/src/lib/queue.ts`, persisted by `torrentplayer-library`) is a playlist with a cursor.
-  It is manual: a video that ends is marked played and stays on its end; nothing plays next on
-  its own. Moving the cursor never changes an item's flags, and only the user pauses, removes,
-  or reorders items (the same file of one torrent queued twice is merged into one entry). The
-  playlist panel beside the player collapses with Q, and Shift+N plays the next item. Fullscreen is requested on the stage that holds the player,
-  not the player itself, so it stays on when the next video's player replaces the last one.
+- **Queue** (`ui/src/lib/queue.ts`, persisted by `torrentplayer-library`) is a playlist with a
+  cursor. It is manual: a video that ends is marked played and stays on its end; nothing plays next
+  on its own. Moving the cursor never changes an item's flags, and only the user pauses, removes, or
+  reorders items (the same file of one torrent queued twice is merged into one entry). The playlist
+  panel beside the player collapses with Q, and Shift+N plays the next item. Fullscreen is requested
+  on the stage that holds the player, not the player itself, so it stays on when the next video's
+  player replaces the last one.
 - **Library and resume** (`torrentplayer-library`, `ui/src/lib/library.ts`) identify a playable file by
   `(info hash, file index)` and store its safe replay link, display metadata, last position,
   duration, and completion state in `library.sqlite3`. Ordinary playback is checkpointed every
@@ -182,25 +183,25 @@ time. Every view stays reachable from the rail.
 - **Readiness.** Every 4 s while the queue is shown, `queue_readiness` reports which items are
   downloaded or have their start and end, for the queue's "Ready" labels. The queue's order
   changes only when the user moves items.
-- **Background downloads** (`src-tauri/src/downloads.rs`, `torrentplayer_torrent::bandwidth`). Queued
-  items download without pressing Play, all at once unless the user sets a maximum
-  (`bandwidth.maxDownloads`, 0 = no limit). Once a second the downloader measures every
-  torrent, and the planner decides how fast each may go. The video being watched comes first:
-  while its buffer is short, background torrents share only what its media rate (×1.5) leaves
-  of the link's measured capacity, higher-ranked torrents getting more (1, 1/2, 1/3, …;
-  librqbit's cannot be limited one by one), and while it is starving they pause, connections
-  kept, until it recovers. Once the buffer is comfortable the limits lift. The item after the
-  current one ranks first, then the rest after the current item, then items before it
-  (played, or passed over), each in queue order. This ranking only matters with a maximum of
-  downloads at once. Torrents are added four at a time so
-  a long queue does not fetch all of its metadata at once. Items keep paused and completed
-  state independently (`QueueItem.paused`, `.played`), and only the user sets `paused`;
-  unticking a video removes it. Paused, finished, and waiting items' files are deselected. A queued torrent keeps running and uploading, finished or not, watched or not,
-  until the user pauses all of its items (one pause stops its download and upload together) or
-  removes them from the queue. The only automatic hold is the playback protection above, shown
-  as "Waiting for playback"; it never changes `QueueItem.paused`. The settings' download limit covers everything together (both engines, playback
-  included) and caps the planner's estimate; one upload limit covers both engines. Queue rows
-  show speed, peers, progress, and time left, coloured green (playable), yellow (downloading
+- **Background downloads** (`src-tauri/src/downloads.rs`, `torrentplayer_torrent::bandwidth`).
+  Queued items download without pressing Play, all at once unless the user sets a maximum
+  (`bandwidth.maxDownloads`, 0 = no limit). Once a second the downloader measures every torrent, and
+  the planner decides how fast each may go. The video being watched comes first: while its buffer is
+  short, background torrents share only what its media rate (×1.5) leaves of the link's measured
+  capacity, higher-ranked torrents getting more (1, 1/2, 1/3, …; librqbit's cannot be limited one by
+  one), and while it is starving they pause, connections kept, until it recovers. Once the buffer is
+  comfortable the limits lift. The item after the current one ranks first, then the rest after the
+  current item, then items before it (played, or passed over), each in queue order. This ranking
+  only matters with a maximum of downloads at once. Torrents are added four at a time so a long
+  queue does not fetch all of its metadata at once. Items keep paused and completed state
+  independently (`QueueItem.paused`, `.played`), and only the user sets `paused`; unticking a video
+  removes it. Paused, finished, and waiting items' files are deselected. A queued torrent keeps
+  running and uploading, finished or not, watched or not, until the user pauses all of its items
+  (one pause stops its download and upload together) or removes them from the queue. The only
+  automatic hold is the playback protection above, shown as "Waiting for playback"; it never changes
+  `QueueItem.paused`. The settings' download limit covers everything together (both engines,
+  playback included) and caps the planner's estimate; one upload limit covers both engines. Queue
+  rows show speed, peers, progress, and time left, coloured green (playable), yellow (downloading
   from peers), or grey (waiting).
 - **Preloading the next item** starts only once the playing file is fully downloaded, or
   nearly over with the rest arriving in time, so it never competes with the video being

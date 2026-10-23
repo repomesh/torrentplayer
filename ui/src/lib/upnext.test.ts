@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import { describe, expect, it } from 'vitest';
-import { PRELOAD_NEXT_LEAD_SECS, shouldPreloadNext } from './upnext';
+import type { QueueItem } from './bindings/QueueItem';
+import { PRELOAD_NEXT_LEAD_SECS, preloadTarget, shouldPreloadNext } from './upnext';
 
 describe('shouldPreloadNext', () => {
   const base = {
@@ -25,5 +26,27 @@ describe('shouldPreloadNext', () => {
     expect(shouldPreloadNext({ ...nearEnd, downloadBps: 5 }), '100 s to go: too slow').toBe(false);
     expect(shouldPreloadNext({ ...nearEnd, downloadBps: 0 })).toBe(false);
     expect(shouldPreloadNext({ ...nearEnd, duration: Number.NaN }), 'duration unknown').toBe(false);
+  });
+});
+
+describe('preloadTarget', () => {
+  const item = (id: string, paused = false): QueueItem => ({
+    id,
+    source: `https://example.org/${id}.torrent`,
+    infoHash: null,
+    fileIndex: null,
+    title: id,
+    torrentName: null,
+    sizeBytes: null,
+    paused,
+    played: false,
+  });
+
+  it('preloads the next item, but not one the user paused', () => {
+    const queue = { items: [item('a'), item('b'), item('c')], current: 'a' };
+    expect(preloadTarget(queue)?.id).toBe('b');
+    const paused = { ...queue, items: [item('a'), item('b', true), item('c')] };
+    expect(preloadTarget(paused)).toBeNull();
+    expect(preloadTarget({ ...queue, current: 'c' })).toBeNull();
   });
 });

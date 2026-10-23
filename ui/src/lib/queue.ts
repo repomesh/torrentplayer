@@ -387,6 +387,50 @@ export function playbackEnded(queue: Queue, id: string | null): Queue {
   return id === null ? queue : markPlayed(queue, id);
 }
 
+/** What a queue row's label depends on (see {@link queueRowLabel}). */
+export interface RowLabelInput {
+  /** Its file is playing. */
+  playing: boolean;
+  /** Its torrent is loading to play. */
+  busy: boolean;
+  /** Its queue item, if the file is queued. */
+  item: QueueItem | null;
+  /** It is the queue's next item ({@link nextItem}: what Shift+N plays). */
+  next: boolean;
+  /** What the next item's preload is doing, if anything. */
+  nextStatus: string | null;
+  /** Its saved watch progress (`Watched 40%`), if any. */
+  watched: string | null;
+  /** It can start at once. */
+  ready: boolean;
+}
+
+/** A queue row's label: `Playing`, `Loading…`, `Next · Ready`, `Played`, `Ready`, or none. */
+export function queueRowLabel(row: RowLabelInput): string | null {
+  const { item, watched } = row;
+  if (row.playing) {
+    return watched === null ? 'Playing' : `Playing · ${watched}`;
+  }
+  if (row.busy) {
+    return 'Loading…';
+  }
+  if (item === null) {
+    return null;
+  }
+  if (row.next) {
+    const parts = [
+      'Next',
+      watched,
+      row.nextStatus ?? (watched === null && row.ready ? 'Ready' : null),
+    ];
+    return parts.filter((p): p is string => p !== null).join(' · ');
+  }
+  if (item.played) {
+    return 'Played';
+  }
+  return watched ?? (row.ready ? 'Ready' : null);
+}
+
 /**
  * Pauses or resumes background downloading of the items in `ids` (playing them still works).
  * Returns the same queue if nothing changed.

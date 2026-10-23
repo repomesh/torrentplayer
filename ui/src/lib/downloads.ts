@@ -113,8 +113,9 @@ export function describeDownload(d: ItemDownload): string | null {
       );
       break;
   }
-  // Sharing with other peers, whatever else it is doing.
-  if (d.uploadBps > 0) {
+  // Sharing with other peers, whatever else it is doing. A paused video in a torrent that
+  // keeps sharing for its other videos shows no upload of its own.
+  if (d.uploadBps > 0 && d.state !== 'paused') {
     parts.push(`↑ ${formatRate(d.uploadBps)}`);
   }
   return parts.length === 0 ? null : parts.join(' · ');
@@ -140,6 +141,22 @@ export function toneOf(d: ItemDownload): Tone {
     return 'downloading';
   }
   return 'waiting';
+}
+
+/**
+ * An item's download as shown: pausing and resuming show at once, before the backend's next
+ * report (about a second later). The user's pause shows first, as there.
+ */
+export function withPause(paused: boolean, d: ItemDownload | undefined): ItemDownload | undefined {
+  if (d === undefined || d.state === 'watching') {
+    return d;
+  }
+  if (paused) {
+    return d.state === 'paused'
+      ? d
+      : { ...d, state: 'paused', downloadBps: 0, uploadBps: 0, etaSecs: null };
+  }
+  return d.state === 'paused' ? { ...d, state: 'queued' } : d;
 }
 
 /** Whether an item is moving data now (for a live progress bar). */

@@ -131,7 +131,8 @@ sources, details, and where other tools are the better fit.
 - **In your order.** The queue downloads in the order you set, so series, albums, and courses
   arrive in sequence; only you reorder it, by dragging or once with **Sort by…** (name, recently
   added, size, progress, speed, peers, or time left). Pause any video, a whole torrent, or
-  everything with one click; a pause stops download and upload until you resume.
+  everything with one click: pausing a torrent or everything stops download and upload until you
+  resume; pausing one video of a torrent stops its download.
 - **You stay in charge.** Nothing in the queue is paused, removed, or reordered for you, and the
   next video plays only when you pick it.
 

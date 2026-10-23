@@ -52,8 +52,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   after", and "Stop seeding at ratio" settings (`bandwidth.seedAfterWatching`,
   `bandwidth.seedRatioTarget`, `bandwidth.seedTimeLimitMinutes`) are removed. Older settings
   files load as before and drop them on the next save.
-- One pause per video, torrent, or the whole queue stops both downloading and uploading until
-  you resume it, and now applies to finished videos too. The only automatic hold is
+- Pausing a torrent, or the whole queue, stops both downloading and uploading until you resume
+  it; pausing one video of a torrent stops its download, while the torrent keeps sharing for its
+  other queued videos. Pausing now applies to finished videos too, and the VPN note appears the
+  first time a torrent uploads instead of after playback. The only automatic hold is
   the one that protects the video playing: background downloads that wait for it now say
   "Waiting for playback", and it never changes your own pauses. A finished video that is
   sharing reads "Downloaded · seeding".

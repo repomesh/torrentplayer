@@ -19,7 +19,8 @@
   <h3 id="bandwidth-title">Bandwidth &amp; seeding</h3>
   <p class="intro">
     Queued torrents keep downloading and sharing, finished or not, until you pause or remove them in
-    the queue. Pausing stops both.
+    the queue. Pausing a torrent, or the whole queue, stops both; pausing one video of a torrent
+    stops its download while the torrent keeps sharing for its other queued videos.
   </p>
   <RateField
     id="bandwidth-down"

@@ -22,6 +22,7 @@
   import { fileName, isPlayable, mediaNoun } from '../files';
   import {
     canPause,
+    withPause,
     describeDownload,
     isMoving,
     progressOf,
@@ -31,7 +32,8 @@
   import { formatBytes, formatRate } from '../format';
   import { libraryKey, watchedLabel } from '../library';
   import {
-    currentIndex,
+    nextItem,
+    queueRowLabel,
     groupQueue,
     groupTree,
     type Queue,
@@ -110,7 +112,7 @@
         parent: string | null;
       };
 
-  const cursor = $derived(currentIndex(queue));
+  const next = $derived(nextItem(queue));
   const groups = $derived(groupQueue(queue));
   let collapsed = $state.raw<readonly string[]>([]);
   let focusId = $state<string | null>(null);
@@ -219,34 +221,16 @@
   }
 
   function rowLabel(group: QueueGroup, row: TreeRow): string | null {
-    const watchedState = savedWatch(row.item);
-    if (isPlaying(group, row)) {
-      return watchedState === null ? 'Playing' : `Playing · ${watchedState}`;
-    }
-    if (isBusy(group.key)) {
-      return 'Loading…';
-    }
-    const item = row.item;
-    if (item === null) {
-      return null;
-    }
-    const index = queue.items.indexOf(item);
-    if (index === cursor + 1) {
-      if (nextStatus !== null) {
-        return watchedState === null
-          ? `Next · ${nextStatus}`
-          : `Next · ${watchedState} · ${nextStatus}`;
-      }
-      return watchedState === null
-        ? isReady(item)
-          ? 'Next · Ready'
-          : 'Next'
-        : `Next · ${watchedState}`;
-    }
-    if (item.played) {
-      return 'Played';
-    }
-    return watchedState ?? (isReady(item) ? 'Ready' : null);
+    return queueRowLabel({
+      playing: isPlaying(group, row),
+      busy: isBusy(group.key),
+      item: row.item,
+      // The same item Shift+N plays.
+      next: row.item !== null && row.item.id === next?.id,
+      nextStatus,
+      watched: savedWatch(row.item),
+      ready: row.item !== null && isReady(row.item),
+    });
   }
 
   /** Its torrent's download rate (its items share the torrent), while any of them moves. */
@@ -257,22 +241,6 @@
       .map((d) => d.downloadBps);
     const bps = Math.max(0, ...rates);
     return bps > 0 ? `↓ ${formatRate(bps)}` : null;
-  }
-
-  /**
-   * An item's download as shown: pausing and resuming show at once, before the backend's next
-   * report (about a second later). The user's pause shows first, as there.
-   */
-  function withPause(item: QueueItem, d: ItemDownload | undefined): ItemDownload | undefined {
-    if (d === undefined || d.state === 'watching') {
-      return d;
-    }
-    if (item.paused) {
-      return d.state === 'paused'
-        ? d
-        : { ...d, state: 'paused', downloadBps: 0, uploadBps: 0, etaSecs: null };
-    }
-    return d.state === 'paused' ? { ...d, state: 'queued' } : d;
   }
 
   /** Whether every queued video of a torrent is paused. */
@@ -487,7 +455,7 @@
   {@const row = node.row}
   {@const label = rowLabel(node.group, row)}
   {@const size = rowSize(row)}
-  {@const download = row.item ? withPause(row.item, downloads.get(row.item.id)) : undefined}
+  {@const download = row.item ? withPause(row.item.paused, downloads.get(row.item.id)) : undefined}
   {@const status = download ? describeDownload(download) : null}
   {@const progress = download ? progressOf(download) : null}
   {@const tone = download ? toneOf(download) : 'waiting'}
@@ -560,18 +528,21 @@
     </button>
     {#if row.item !== null && onTogglePause}
       {@const item = row.item}
+      <!-- The only queued video of its torrent pauses the torrent; in a torrent with others
+           queued, the torrent keeps sharing for them. -->
+      {@const what = node.group.items.length === 1 ? 'downloading and uploading' : 'downloading'}
       <button
         type="button"
         class="icon pause"
         tabindex="-1"
         disabled={!canPause(download)}
         aria-label={item.paused
-          ? `Resume downloading and uploading ${rowTitle(row)}`
-          : `Pause downloading and uploading ${rowTitle(row)}`}
+          ? `Resume ${what} ${rowTitle(row)}`
+          : `Pause ${what} ${rowTitle(row)}`}
         aria-pressed={item.paused}
         title={item.paused
-          ? 'Resume downloading and uploading'
-          : 'Pause downloading and uploading until you resume (playing it still works)'}
+          ? `Resume ${what}`
+          : `Pause ${what} until you resume (playing it still works)`}
         onclick={(event: MouseEvent) => {
           event.stopPropagation();
           onTogglePause([item.id], !item.paused);

@@ -9,6 +9,17 @@
  * of the file will arrive well before the end.
  */
 
+import { nextItem, type Queue, type QueueItem } from './queue';
+
+/**
+ * The queue item to preload: its next item ({@link nextItem}, what Shift+N plays), unless the
+ * user paused it, since preloading downloads.
+ */
+export function preloadTarget(queue: Queue): QueueItem | null {
+  const next = nextItem(queue);
+  return next !== null && !next.paused ? next : null;
+}
+
 /** Playback time left at which the next video may start preloading. */
 export const PRELOAD_NEXT_LEAD_SECS = 120;
 /** The rest of the file must arrive this many times faster than it plays. */

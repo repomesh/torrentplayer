@@ -100,7 +100,7 @@
   } from './lib/queue';
   import { preloadActive, preloadLabel } from './lib/search';
   import type { SettingsSection } from './lib/settings';
-  import { shouldPreloadNext } from './lib/upnext';
+  import { preloadTarget, shouldPreloadNext } from './lib/upnext';
   import { TorrentLoads, torrentLoadKeys } from './lib/torrent-loads';
 
   /** The video open in the player (it may be hidden while the user browses). */
@@ -164,7 +164,7 @@
   let toast = $state<{ message: string; error: boolean; undo: (() => void) | null } | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
   let announcement = $state('');
-  // The VPN note, once per run, when the first torrent starts seeding in Direct mode.
+  // The VPN note, once per run, when the first torrent starts uploading in Direct mode.
   // It disappears as soon as it no longer applies (dismissed anywhere, or another mode chosen).
   let vpnHintApplies = $state(false);
   let seedingHintOpen = $state(false);
@@ -192,6 +192,7 @@
     view.name === 'torrent' ? (torrents.find((t) => t.id === view.torrentId) ?? null) : null,
   );
   const next = $derived(nextItem(queue));
+  const toPreload = $derived(preloadTarget(queue));
   const nextStatus = $derived(next ? preloadLabel(nextPreload, next.infoHash ?? '') : null);
   const playingId = $derived(nowPlaying?.queueId ?? null);
 
@@ -1085,7 +1086,7 @@
    */
   $effect(() => {
     const playing = nowPlaying;
-    const item = next;
+    const item = toPreload;
     if (!playing || !item) {
       return;
     }
@@ -1566,7 +1567,7 @@
 
     {#if seedingHint}
       <div class="seeding-hint" role="status">
-        <strong>Seeding started</strong>
+        <strong>Uploading to other peers</strong>
         <VpnHint
           onDismiss={() => {
             seedingHintError = null;

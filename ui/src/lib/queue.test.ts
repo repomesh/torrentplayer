@@ -21,6 +21,7 @@ import {
   moveGroup,
   putFirst,
   queueEntryState,
+  queueRowLabel,
   isPlayed,
   move,
   moveBy,
@@ -710,5 +711,46 @@ describe('sort by', () => {
     const undone = restoreOrder(changed, before);
     expect(ids(undone)).toEqual(['a', 'c', 'd']);
     expect(undone.current).toBe('a');
+  });
+});
+
+describe('row labels', () => {
+  const base = {
+    playing: false,
+    busy: false,
+    item: item('a'),
+    next: false,
+    nextStatus: null,
+    watched: null,
+    ready: false,
+  };
+
+  it('says what a row is doing, playing first', () => {
+    expect(queueRowLabel({ ...base, playing: true, next: true })).toBe('Playing');
+    expect(queueRowLabel({ ...base, playing: true, watched: 'Watched 40%' })).toBe(
+      'Playing · Watched 40%',
+    );
+    expect(queueRowLabel({ ...base, busy: true })).toBe('Loading…');
+    expect(queueRowLabel({ ...base, item: null })).toBeNull();
+    expect(queueRowLabel(base)).toBeNull();
+    expect(queueRowLabel({ ...base, ready: true })).toBe('Ready');
+    expect(queueRowLabel({ ...base, item: { ...item('a'), played: true } })).toBe('Played');
+  });
+
+  it('marks the next item with its preload or readiness', () => {
+    expect(queueRowLabel({ ...base, next: true })).toBe('Next');
+    expect(queueRowLabel({ ...base, next: true, ready: true })).toBe('Next · Ready');
+    expect(queueRowLabel({ ...base, next: true, nextStatus: 'Ready to play instantly' })).toBe(
+      'Next · Ready to play instantly',
+    );
+    expect(queueRowLabel({ ...base, next: true, watched: 'Watched 40%', ready: true })).toBe(
+      'Next · Watched 40%',
+    );
+  });
+
+  it('marks the item Shift+N plays, after the cursor', () => {
+    const q = setCurrent(queueOf('a', 'b', 'c'), 'a');
+    expect(nextItem(q)?.id).toBe('b');
+    expect(nextItem(setCurrent(q, 'c'))).toBeNull();
   });
 });

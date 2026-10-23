@@ -2,7 +2,7 @@
 
 //! The play queue: persisted in `queue.json` (see `torrentplayer_library::QueueStore`).
 //!
-//! The UI owns the queue's logic (order, cursor, auto-play) and saves the whole queue after
+//! The UI owns the queue's logic (order, cursor, pauses) and saves the whole queue after
 //! each change; the backend validates it and writes it atomically. Items hold torrent links,
 //! never stream URLs.
 //!

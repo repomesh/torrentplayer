@@ -10,6 +10,7 @@ import {
   formatEta,
   progressOf,
   toneOf,
+  withPause,
   type ItemDownload,
   type LinkUse,
 } from './downloads';
@@ -128,5 +129,20 @@ describe('download status', () => {
       'Connection ≈ 12.0 MB/s · 9.8 MB/s in use · 3 of max 4 downloading',
     );
     expect(describeLink({ ...link, capacityBps: 0, usedBps: 0, active: 0 })).toBeNull();
+  });
+});
+
+describe('pausing as shown', () => {
+  it('shows a pause or resume at once, and leaves the video playing alone', () => {
+    expect(withPause(true, d())).toMatchObject({ state: 'paused', downloadBps: 0, uploadBps: 0 });
+    expect(withPause(false, d({ state: 'paused' }))?.state).toBe('queued');
+    expect(withPause(true, d({ state: 'watching' }))?.state).toBe('watching');
+    expect(withPause(true, undefined)).toBeUndefined();
+    const reported = d({ state: 'paused' });
+    expect(withPause(true, reported)).toBe(reported);
+  });
+
+  it('shows no upload on a paused video, even while its torrent shares for others', () => {
+    expect(describeDownload(d({ state: 'paused', uploadBps: 51_000 }))).toBe('Paused · 37%');
   });
 });

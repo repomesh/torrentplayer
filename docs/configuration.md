@@ -69,20 +69,20 @@ Loading never fails, and it never turns a VPN or proxy into a direct connection:
 
 Every problem is logged and shown at the top of the Settings page. Older files are upgraded by
 `torrentplayer_settings::migrate`, which gains one step per schema change. Version 2 removed
-`network.killSwitch` (the kill switch is always on in protected modes, see [Network](#network));
-a version 1 file loads normally and the field is dropped the next time settings are saved.
-Version 3 added the optional seeding time target. 0.3.1 removed `bandwidth.seedAfterWatching`,
+`network.killSwitch` (the kill switch is always on in protected modes, see [Network](#network)); a
+version 1 file loads normally and the field is dropped the next time settings are saved. Version 3
+added the optional seeding time target. 0.3.1 removed `bandwidth.seedAfterWatching`,
 `bandwidth.seedRatioTarget`, `bandwidth.seedTimeLimitMinutes`, `playback.autoplayNext`,
-`playback.optimizeQueue`, and `playback.keepCourseOrder` (the queue is manual now, see
-[Bandwidth and seeding](#bandwidth-and-seeding)) without a version change: unknown fields are ignored when loading, so older files load normally and the fields are
-dropped the next time settings are saved.
+`playback.optimizeQueue`, and `playback.keepCourseOrder` (the queue is manual now, see [Bandwidth
+and seeding](#bandwidth-and-seeding)) without a version change: unknown fields are ignored when
+loading, so older files load normally and the fields are dropped the next time settings are saved.
 `network.incomingPeers` was added later without a version change: files without it load with
-incoming connections off, and an out-of-range port is reset to 0 (random). Version 4 (0.3.0)
-removed the VPN adapter mode: `network.mode = "bindInterface"` becomes `direct` with
-`network.vpnAdapterModeRemoved` set, and `network.interface` is dropped. This rewrite applies to
-a file of any version (a hand-edited one too) and is saved at once; see [Network](#network).
-Version 5 (0.3.1) generalised that flag: `network.vpnAdapterModeRemoved = true` becomes
-`network.hold = "vpnAdapterModeRemoved"`, and a removed mode found later is migrated the same way.
+incoming connections off, and an out-of-range port is reset to 0 (random). Version 4 (0.3.0) removed
+the VPN adapter mode: `network.mode = "bindInterface"` becomes `direct` with
+`network.vpnAdapterModeRemoved` set, and `network.interface` is dropped. This rewrite applies to a
+file of any version (a hand-edited one too) and is saved at once; see [Network](#network). Version 5
+(0.3.1) generalised that flag: `network.vpnAdapterModeRemoved = true` becomes `network.hold =
+"vpnAdapterModeRemoved"`, and a removed mode found later is migrated the same way.
 
 ## Settings
 
@@ -241,10 +241,11 @@ forwards it. A SOCKS5 proxy cannot accept incoming connections, so TorrentPlayer
 listen at all in that mode. Settings shows whether it is listening. See
 [Incoming peer connections](network.md#incoming-peer-connections).
 
-**VPN recommendation:** in Direct mode, Settings → Network & VPN, a **VPN recommended** button beside
-the status bar's network indicator, and a note the first time in a run that a torrent keeps sharing after its playback ends
-say that every peer and tracker sees your IP address, so a VPN is recommended when downloading
-or seeding, and link to the [blog post on VPNs](https://torrentplayer.io/blog/vpn-for-torrenting/).
+**VPN recommendation:** in Direct mode, Settings → Network & VPN, a **VPN recommended** button
+beside the status bar's network indicator, and a note the first time in a run that a torrent uploads
+to other peers say that every peer and tracker sees your IP address, so a VPN is recommended when
+downloading or seeding, and link to the [blog post on
+VPNs](https://torrentplayer.io/blog/vpn-for-torrenting/).
 **Don't show again** in any of them sets `network.vpnHintDismissed` and hides all three.
 
 The SOCKS5 password and the WireGuard private and preshared keys are [secrets](#secrets).
