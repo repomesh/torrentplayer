@@ -60,6 +60,12 @@ Appending is always sequential, needs no sparse-file APIs (which would require `
 calls), and makes the cache-size limit and cleanup straightforward. Exporting complete files to
 the normal layout can be added later.
 
+Since 0.3.1 the index is also appended to disk (`pieces.idx`: a header with the format version and
+the info hash, then one checksummed record per stored piece), so the cache survives restarts.
+Nothing is flushed: every piece found through it is checked against the torrent's SHA-1 again
+before use, which also covers torn records and data lost in a crash (see
+[Streaming](../streaming.md#downloaded-once)).
+
 ## Milestones
 
 | Milestone | Scope                                                                                   | Gate                                                                    |

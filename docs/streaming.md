@@ -18,6 +18,22 @@
 Torrents are added with no files selected. A file is selected only when the user plays or queues
 it. This keeps disk use and swarm load proportional to what is actually watched.
 
+## Downloaded once
+
+The engine stores verified pieces in an append-only cache file per torrent (`pieces.dat`) and
+appends where each one is to an index next to it (`pieces.idx`), so pieces downloaded before a
+restart are used again. When a torrent is added, its stored pieces are checked against the
+torrent's SHA-1 hashes in the background, on up to four threads, pieces the player is waiting for
+first; each piece becomes available (to the player, and to peers if sharing is on) as soon as it
+passes, and is not requested from peers meanwhile. A piece that fails is downloaded again. The
+index is never trusted on its own: a torn or damaged record, or one pointing past the end of the
+cache file (after a crash or power loss), is skipped. A cache file with more unused bytes than the
+whole torrent (pieces stored again over many sessions) starts empty instead of being compacted.
+
+A torrent with nothing to download (paused, complete, or with every selected file downloaded and
+nothing playing) re-plans once a second instead of ten times; selecting a file, playing, seeking, or
+resuming re-plans at once.
+
 ## Piece priorities
 
 Priorities are computed by `torrentplayer-prioritize`, which is pure logic: given the file layout, piece

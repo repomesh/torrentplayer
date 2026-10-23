@@ -35,6 +35,11 @@ use crate::wire::{self, HANDSHAKE_LEN, Outgoing};
 
 /// How often the driver re-plans, refills queues, and checks timeouts.
 const TICK: Duration = Duration::from_millis(100);
+/// How often it does while there is nothing to download: the torrent is paused, or complete,
+/// or has no reader and every selected piece (see [`crate::sched::Scheduler::is_idle`]). Seeding
+/// torrents stay in the queue until paused, so most of them are idle. Anything that changes
+/// this wakes the driver at once.
+const IDLE_TICK: Duration = Duration::from_secs(1);
 /// Rebuild the rarest-first order every this many ticks.
 const BACKGROUND_REFRESH_TICKS: u32 = 10;
 /// Disconnect peers after this many timed-out requests (unless the swarm is thin).
@@ -386,17 +391,18 @@ impl Swarm {
         let meta = Arc::new(meta);
         let dir = self.cfg.download_dir.join(meta.info_hash_hex());
         // Held until the new instance is registered, so two adds of one torrent cannot both
-        // create the cache file.
+        // open the cache file.
         let mut torrents = self.torrents.lock().unwrap_or_else(PoisonError::into_inner);
         // A previous instance still in use (by a reader finishing a request) keeps reading the
-        // cache file: append to it instead of truncating it under that reader. Any earlier
-        // instance counts, not only the latest, which may be gone while an older one is not.
+        // cache file: share it instead of opening it again, which could truncate it under that
+        // reader. Any earlier instance counts, not only the latest, which may be gone while an
+        // older one is not.
         let shared_store = torrents
             .get(&meta.info_hash)
-            .and_then(|t| PieceStore::share(&t.cache_file, meta.piece_count()));
+            .and_then(|t| PieceStore::share(&t.cache_file));
         let store = match shared_store {
             Some(store) => store,
-            None => PieceStore::create(&dir, meta.piece_count())?,
+            None => PieceStore::open(&dir, &meta)?,
         };
         let cache_file = store.cache_file();
         let shared = Arc::new(Shared {
@@ -421,6 +427,7 @@ impl Swarm {
             wake: Notify::new(),
             seek_pending: AtomicBool::new(false),
             refresh_background: AtomicBool::new(true),
+            idle: AtomicBool::new(false),
             peers: Mutex::new(HashMap::new()),
             verdicts: Mutex::new(HashMap::new()),
             blame: Mutex::new(HashMap::new()),
@@ -445,6 +452,8 @@ impl Swarm {
             },
         );
         drop(torrents);
+        // Before any peer connects, so pieces kept from an earlier session are not requested.
+        crate::reload::start(&shared);
         shared.add_candidates(peers);
         if let Some(node) = &self.dht {
             tokio::spawn(crate::dht::discover(
@@ -1104,6 +1113,8 @@ pub(crate) struct Shared {
     pub(crate) wake: Notify,
     pub(crate) seek_pending: AtomicBool,
     refresh_background: AtomicBool,
+    /// The driver ticks slowly (see [`IDLE_TICK`]).
+    idle: AtomicBool,
     pub(crate) peers: Mutex<HashMap<PeerKey, mpsc::Sender<Outgoing>>>,
     /// Why the torrent disconnected a peer, for its task to report when it ends.
     verdicts: Mutex<HashMap<PeerKey, Verdict>>,
@@ -1350,6 +1361,20 @@ impl Shared {
         );
     }
 
+    /// Tells every peer that `piece` is now verified.
+    pub(crate) fn announce_have(&self, piece: u32) {
+        let keys: Vec<PeerKey> = self
+            .peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect();
+        for key in keys {
+            self.send(key, [Outgoing::Have(piece)]);
+        }
+    }
+
     pub(crate) fn send_cancels(&self, cancels: &[(PeerKey, Request)]) {
         for (key, r) in cancels {
             self.send(
@@ -1400,16 +1425,7 @@ impl Shared {
                 trace!(piece, "piece verified");
                 shared.downloaded.fetch_add(len, Ordering::Relaxed);
                 shared.piece_done.notify_waiters();
-                let keys: Vec<PeerKey> = shared
-                    .peers
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .keys()
-                    .copied()
-                    .collect();
-                for key in keys {
-                    shared.send(key, [Outgoing::Have(piece)]);
-                }
+                shared.announce_have(piece);
                 if !verified.banned.is_empty() {
                     debug!(
                         piece,
@@ -1585,16 +1601,20 @@ async fn next_policy(rx: &mut Option<watch::Receiver<Policy>>, last: Option<Poli
 
 /// The per-torrent driver: re-plans, refills queues, handles timeouts, and connects peers.
 async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
-    let mut tick = tokio::time::interval(TICK);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Every TICK, or IDLE_TICK while there is nothing to download.
+    let mut next_tick = tokio::time::Instant::now();
     let mut ticks: u32 = 0;
     let mut policy_rx = shared.cfg.network.as_ref().map(Network::subscribe);
     let mut policy = policy_rx.as_mut().map(|rx| *rx.borrow_and_update());
     let mut announces = trackers.as_ref().and_then(|t| t.start(policy));
     loop {
+        let mut ticked = false;
         tokio::select! {
             () = shared.cancel.cancelled() => break,
-            _ = tick.tick() => ticks = ticks.wrapping_add(1),
+            () = tokio::time::sleep_until(next_tick) => {
+                ticks = ticks.wrapping_add(1);
+                ticked = true;
+            }
             () = shared.wake.notified() => {}
             Some(addr) = async {
                 match announces.as_mut() {
@@ -1639,7 +1659,7 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             .keys()
             .copied()
             .collect();
-        let (cancels, fills, unresponsive) = {
+        let (cancels, fills, unresponsive, idle) = {
             let mut sched = shared.sched();
             let mut cancels = sched.reprioritize(seek);
             if seek {
@@ -1649,8 +1669,14 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             cancels.extend(sched.tick(now, refresh));
             let unresponsive = sched.unresponsive_peers(MAX_TIMEOUTS);
             let fills = sched.fill_all(&keys, now);
-            (cancels, fills, unresponsive)
+            let idle = shared.paused.load(Ordering::Relaxed) || sched.is_idle();
+            (cancels, fills, unresponsive, idle)
         };
+        shared.idle.store(idle, Ordering::Relaxed);
+        // A wake-up can only bring the next tick forward: a burst of them (peers connecting,
+        // pieces verifying) must not hold it off.
+        let due = tokio::time::Instant::now() + if idle { IDLE_TICK } else { TICK };
+        next_tick = if ticked { due } else { next_tick.min(due) };
         if !unresponsive.is_empty() {
             let mut peers = shared.peers.lock().unwrap_or_else(PoisonError::into_inner);
             for key in unresponsive {
@@ -2185,11 +2211,141 @@ mod tests {
         .await
         .expect("the stopped instance is dropped");
 
-        // Adding C must not truncate the cache file under A.
-        let _c = swarm.add(meta, Vec::new()).unwrap();
+        // Adding C must not truncate the cache file under A, and C has A's verified piece.
+        let c = swarm.add(meta, Vec::new()).unwrap();
         let mut buf = [0u8; 10];
         a.shared.store.read(0, 0, &mut buf).unwrap();
         assert_eq!(&buf, b"piece of a");
+        assert_eq!(c.have_pieces(), vec![true]);
+        swarm.shutdown();
+    }
+
+    const PIECES: [&[u8]; 3] = [b"zeroth..", b"first...", b"sec"];
+
+    fn config(dir: &std::path::Path) -> SwarmConfig {
+        let mut cfg = SwarmConfig::new(dir.to_path_buf());
+        cfg.enable_trackers = false;
+        cfg.enable_web_seeds = false;
+        cfg
+    }
+
+    async fn wait_for(what: &str, within: Duration, mut done: impl FnMut() -> bool) {
+        tokio::time::timeout(within, async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out: {what}"));
+    }
+
+    /// A session that stored every piece of `meta` in `dir`, then ended.
+    async fn earlier_session(dir: &std::path::Path, meta: &Metainfo) {
+        let swarm = Swarm::start(config(dir)).await.unwrap();
+        let torrent = swarm.add(meta.clone(), Vec::new()).unwrap();
+        for (piece, data) in (0..).zip(PIECES) {
+            torrent.shared.store.write_piece(piece, data).unwrap();
+        }
+        swarm.shutdown();
+        let gone = Arc::downgrade(&torrent.shared);
+        drop(torrent);
+        wait_for("the torrent closes", Duration::from_secs(5), || {
+            gone.strong_count() == 0
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pieces_stored_before_a_restart_are_used_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        earlier_session(dir.path(), &meta).await;
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta, Vec::new()).unwrap();
+        wait_for("the stored pieces verify", Duration::from_secs(10), || {
+            torrent.have_pieces().iter().all(|h| *h)
+        })
+        .await;
+        let mut all = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut torrent.reader(0).unwrap(), &mut all)
+            .await
+            .unwrap();
+        assert_eq!(all, PIECES.concat());
+        assert_eq!(torrent.stats().downloaded_bytes, 0, "nothing downloaded");
+        swarm.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_corrupted_stored_piece_is_not_trusted_and_is_requested_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        earlier_session(dir.path(), &meta).await;
+        let data = dir.path().join(meta.info_hash_hex()).join("pieces.dat");
+        let mut bytes = std::fs::read(&data).unwrap();
+        bytes[9] ^= 0xff;
+        std::fs::write(&data, &bytes).unwrap();
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta, Vec::new()).unwrap();
+        wait_for(
+            "the stored pieces are checked",
+            Duration::from_secs(10),
+            || torrent.have_pieces() == [true, false, true] && torrent.shared.sched().is_idle(),
+        )
+        .await;
+        let mut buf = [0u8; 8];
+        assert!(torrent.shared.store.read(1, 0, &mut buf).is_err());
+
+        // A peer with every piece is asked for piece 1 only.
+        torrent.select_file(0).unwrap();
+        let mut sched = torrent.shared.sched();
+        sched.add_peer(99);
+        assert!(sched.on_bitfield(99, &[0xe0]));
+        sched.on_unchoke(99);
+        sched.tick(Instant::now(), true);
+        let requests = sched.fill(99, Instant::now());
+        drop(sched);
+        assert!(!requests.is_empty());
+        assert!(requests.iter().all(|r| r.piece == 1), "{requests:?}");
+        swarm.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_driver_ticks_slowly_while_there_is_nothing_to_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta, Vec::new()).unwrap();
+        let idle = || torrent.shared.idle.load(Ordering::Relaxed);
+        // Less than IDLE_TICK: these changes take effect at once, not at the next slow tick.
+        let soon = IDLE_TICK / 2;
+
+        wait_for("idle with nothing selected", soon, idle).await;
+        torrent.select_file(0).unwrap();
+        wait_for("busy once a file is selected", soon, || !idle()).await;
+        torrent.set_paused(true);
+        wait_for("idle while paused", soon, idle).await;
+        torrent.set_paused(false);
+        wait_for("busy once resumed", soon, || !idle()).await;
+        torrent.deselect_file(0).unwrap();
+        wait_for("idle once deselected", soon, idle).await;
+        torrent.set_playhead(0, 0, None).unwrap();
+        wait_for("busy with a playhead", soon, || !idle()).await;
+
+        // Complete: idle even while playing.
+        for (piece, data) in (0..).zip(PIECES) {
+            torrent.shared.store.write_piece(piece, data).unwrap();
+            torrent
+                .shared
+                .sched()
+                .on_verified(piece, PieceCheck::Valid(None));
+        }
+        torrent.shared.request_replan(false);
+        wait_for("idle once complete", soon, idle).await;
+        torrent.set_playhead(0, 20, None).unwrap();
+        tokio::time::sleep(TICK * 3).await;
+        assert!(idle(), "nothing to download for the playhead");
         swarm.shutdown();
     }
 }

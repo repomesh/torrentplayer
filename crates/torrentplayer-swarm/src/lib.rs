@@ -27,6 +27,7 @@ mod metainfo;
 mod peer;
 mod pex;
 mod reader;
+mod reload;
 pub mod sched;
 mod store;
 

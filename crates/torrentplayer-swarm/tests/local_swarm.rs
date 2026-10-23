@@ -40,6 +40,9 @@ fn test_data() -> Vec<u8> {
 struct Fixture {
     _seeder: Arc<Session>,
     _dirs: (tempfile::TempDir, tempfile::TempDir),
+    /// The engine's download folder.
+    leech_dir: std::path::PathBuf,
+    seeder_addr: SocketAddr,
     data: Vec<u8>,
     swarm: Swarm,
     torrent: Torrent,
@@ -120,7 +123,9 @@ async fn fixture_with_peer(
     let torrent = swarm.add(meta, peers).unwrap();
     Fixture {
         _seeder: seeder,
+        leech_dir: leech_dir.path().to_path_buf(),
         _dirs: (seed_dir, leech_dir),
+        seeder_addr,
         data,
         swarm,
         torrent,
@@ -309,12 +314,98 @@ async fn adding_a_torrent_again_leaves_readers_of_the_old_instance_intact() {
     let mut old = f.torrent.stored_reader(0).unwrap();
     f.torrent.stop();
     let again = f.swarm.add(f.torrent.meta().clone(), Vec::new()).unwrap();
-    assert!(again.have_pieces().iter().all(|h| !h));
+    let have = again.have_pieces();
+    assert!(
+        have[..4].iter().all(|h| *h),
+        "the new instance shares the pieces the old one verified"
+    );
 
     let mut buf = vec![0u8; start.len()];
     old.read_exact(&mut buf).await.unwrap();
     assert!(buf == f.data[..buf.len()], "the old reader got other bytes");
+    let mut buf = vec![0u8; start.len()];
+    again
+        .stored_reader(0)
+        .unwrap()
+        .read_exact(&mut buf)
+        .await
+        .unwrap();
+    assert!(buf == f.data[..buf.len()], "the new reader got other bytes");
     f.swarm.shutdown();
+}
+
+/// Downloads the whole file, then ends the session as quitting the app does, and starts a new
+/// engine on the same download folder.
+async fn restart_after_downloading(f: Fixture) -> (Fixture, Swarm) {
+    f.torrent.select_file(0).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !f.torrent.have_pieces().iter().all(|h| *h) {
+        assert!(Instant::now() < deadline, "the first download finished");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(f.torrent.stats().downloaded_bytes >= LEN as u64);
+    f.swarm.shutdown();
+    let mut cfg = SwarmConfig::new(f.leech_dir.clone());
+    cfg.enable_trackers = false;
+    let swarm = Swarm::start(cfg).await.unwrap();
+    (f, swarm)
+}
+
+/// Waits until every piece of `torrent` is verified, and checks the file's bytes.
+async fn read_whole_file(torrent: &Torrent, data: &[u8]) {
+    let mut all = Vec::with_capacity(LEN);
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        torrent.reader(0).unwrap().read_to_end(&mut all),
+    )
+    .await
+    .expect("timed out")
+    .unwrap();
+    assert!(all == data, "the bytes differ from the seeded file");
+    assert!(torrent.have_pieces().iter().all(|h| *h));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_complete_torrent_added_after_a_restart_downloads_nothing() {
+    let (f, swarm) = restart_after_downloading(fixture(None).await).await;
+    let started = Instant::now();
+    // The seeder is still there: nothing may be downloaded from it all the same.
+    let torrent = swarm
+        .add(f.torrent.meta().clone(), vec![f.seeder_addr])
+        .unwrap();
+    torrent.select_file(0).unwrap();
+    read_whole_file(&torrent, &f.data).await;
+    println!(
+        "{} MiB checked in {:?} after the restart",
+        LEN >> 20,
+        started.elapsed()
+    );
+    let stats = torrent.stats();
+    assert_eq!(stats.downloaded_bytes, 0, "nothing downloaded again");
+    assert_eq!(stats.wasted_bytes, 0);
+    swarm.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_piece_corrupted_on_disk_is_downloaded_again_after_a_restart() {
+    let (f, swarm) = restart_after_downloading(fixture(None).await).await;
+    let meta = f.torrent.meta().clone();
+    let cache = f.leech_dir.join(meta.info_hash_hex()).join("pieces.dat");
+    // The first piece stored, whichever it is.
+    let mut bytes = std::fs::read(&cache).unwrap();
+    bytes[100] ^= 0xff;
+    std::fs::write(&cache, &bytes).unwrap();
+    drop(bytes);
+
+    let torrent = swarm.add(meta, vec![f.seeder_addr]).unwrap();
+    torrent.select_file(0).unwrap();
+    read_whole_file(&torrent, &f.data).await;
+    assert_eq!(
+        torrent.stats().downloaded_bytes,
+        u64::from(PIECE),
+        "only the bad piece is downloaded again"
+    );
+    swarm.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

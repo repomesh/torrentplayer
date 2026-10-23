@@ -492,6 +492,35 @@ impl Scheduler {
         self.suspects.contains_key(&piece)
     }
 
+    /// Whether there is nothing to request now: no request, partial piece, or check in flight,
+    /// and either every piece is verified or no playhead or reader is open and every wanted
+    /// piece is verified. Anything that changes this (a new reader, a seek, a selection)
+    /// re-plans at once.
+    pub(crate) fn is_idle(&self) -> bool {
+        let busy = !self.progress.is_empty()
+            || !self.verifying.is_empty()
+            || self.peers.values().any(|p| !p.outstanding.is_empty());
+        let complete = self.have_count as usize == self.have.len();
+        let satisfied = self.interests.is_empty()
+            && !self.wanted.iter().zip(&self.have).any(|(&w, &h)| w && !h);
+        !busy && (complete || satisfied)
+    }
+
+    /// Missing pieces the playhead and readers need, most urgent first, as of the last
+    /// [`Scheduler::reprioritize`].
+    pub(crate) fn urgent_pieces(&self) -> &[u32] {
+        &self.urgent_order
+    }
+
+    /// Holds back `piece` from requests while the copy kept in the piece store from an earlier
+    /// session is checked; [`Scheduler::on_verified`] reports the result (`NotStored` if the
+    /// copy is bad, so the piece is downloaded again and nobody is blamed).
+    pub(crate) fn checking_stored(&mut self, piece: u32) {
+        if (piece as usize) < self.have.len() && !self.have(piece) {
+            self.verifying.entry(piece).or_default();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn is_critical(&self) -> bool {
         self.critical
