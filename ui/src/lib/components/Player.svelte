@@ -5,6 +5,7 @@
   import {
     AudioDecodeWatch,
     audioNotice,
+    conversionNotice,
     hasDecodeCounters,
     silenceThreshold,
     type AudioDecoding,
@@ -111,6 +112,8 @@
   /** The "Continuing from…" chip leaves after this long, or at the first play, pause, or seek. */
   const RESUME_CHIP_MS = 8000;
   const START_HINT = 'Press Space or the play button to start';
+  /** How long the "Converting…" notice stays once the video plays. */
+  const CONVERSION_NOTICE_MS = 10_000;
   /** A seek hold is released this long after `seeked` even if no frame was seen painted. */
   const SEEK_HOLD_MAX_MS = 1000;
 
@@ -169,11 +172,34 @@
   let convertedSrc = $state<string | null>(null);
   let converted: ConvertedPlayback | null = null;
   let converting = $state(false);
-  const audioMessage = $derived(
-    audioDismissed || !firstFrameSeen || converting
-      ? null
-      : audioNotice(audioInfo, audioDecoding, hasCounters),
+  let conversionFailed = $state(false);
+  // The "Converting…" notice leaves on its own a while after the video starts.
+  let conversionNoticed = $state(false);
+  const conversionMessage = $derived(
+    conversionNotice(
+      converting ? (conversionNoticed ? 'off' : 'converting') : conversionFailed ? 'failed' : 'off',
+      audioInfo,
+    ),
   );
+  const audioMessage = $derived(
+    audioDismissed
+      ? null
+      : (conversionMessage ??
+          (!firstFrameSeen || converting
+            ? null
+            : audioNotice(audioInfo, audioDecoding, hasCounters))),
+  );
+  $effect(() => {
+    if (!converting || !firstFrameSeen) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      conversionNoticed = true;
+    }, CONVERSION_NOTICE_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  });
 
   // Subtitles: the torrent's files and embedded tracks, files the user loaded, and the one
   // showing (see subtitles.ts). Each is added as a text track the first time it is chosen.
@@ -432,6 +458,8 @@
         }
       },
       onError: () => {
+        conversionFailed = true;
+        audioDismissed = false;
         stopConversion();
       },
     });
@@ -1025,6 +1053,8 @@
     }}
     onerror={() => {
       if (converted !== null) {
+        conversionFailed = true;
+        audioDismissed = false;
         stopConversion();
         return;
       }

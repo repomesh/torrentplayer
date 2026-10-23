@@ -26,6 +26,23 @@ interface DecodeCounters {
 /** What the decoder counters show: audio decoded, none while video played, or not enough yet. */
 export type AudioDecoding = 'decoding' | 'silent' | 'unknown';
 
+/** The conversion of audio the player cannot decode (see converted.ts). */
+export type Conversion = 'off' | 'converting' | 'failed';
+
+/** What the player says about a conversion, or null when there is none. */
+export function conversionNotice(conversion: Conversion, info: StreamAudio | null): string | null {
+  switch (conversion) {
+    case 'converting': {
+      const codec = info?.primary?.label;
+      return `Converting ${codec === undefined ? '' : `${codec} `}audio so it can play here. Seeking may take a moment longer.`;
+    }
+    case 'failed':
+      return 'The audio could not be converted, so this video plays without sound.';
+    case 'off':
+      return null;
+  }
+}
+
 /** Seconds of playback with video but no audio decoded before the audio counts as missing. */
 export const SILENT_AFTER_SECS = 3;
 /** The same when the probe already says the codec cannot be decoded: this only confirms it. */
