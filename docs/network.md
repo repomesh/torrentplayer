@@ -257,23 +257,50 @@ every tunneled DNS lookup failed). The check, every 5 seconds, reads the tunnel'
 timestamps (`tokio_wireguard::Interface::liveness`, added to the vendored copy) and uses
 WireGuard's protocol timers:
 
-| Rule                                                                                                                                                      | Why                                                                                                                                                                                                                                                                                                                      |
-| --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Without a current session (none yet, or the last handshake is 180 s old: REJECT_AFTER_TIME), a handshake must complete within the check's 5 s time limit. | Sessions expire after REJECT_AFTER_TIME; a handshake attempt is retried after REKEY_TIMEOUT (5 s). Reason: "the WireGuard server has not completed a recent handshake; check the endpoint and keys".                                                                                                                     |
-| Traffic sent into the tunnel must get an authenticated packet back (data or a keepalive) within 20 s (`NetworkOptions::wireguard_reply_timeout`).         | A WireGuard peer that receives data and has nothing to send answers with a keepalive after KEEPALIVE_TIMEOUT (10 s); two REKEY_TIMEOUTs (5 s each) cover a session renewal at that moment. Handshake messages do not count. Reason: "the WireGuard server is not answering tunnel traffic; check the endpoint and keys". |
-| A tunnel that has heard nothing (no data, keepalive, or handshake) for 10 s is probed with a DNS query for the root name servers to its first DNS server. | WireGuard is silent while idle, so an idle tunnel says nothing about the server; the probe is tiny, stays inside the tunnel, and must be answered by the resolver or, failing that, by the server's keepalive.                                                                                                           |
+| Rule                                                                                                                                                                                     | Why                                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Without a current session (none yet, or the last handshake is 180 s old: REJECT_AFTER_TIME), a handshake must complete within the check's 5 s time limit.                                | Sessions expire after REJECT_AFTER_TIME; a handshake attempt is retried after REKEY_TIMEOUT (5 s). Reason: "the WireGuard server has not completed a recent handshake; check the endpoint and keys".                                                                                                                     |
+| Traffic sent into the tunnel must get an authenticated packet back (data or a keepalive) within 20 s (`NetworkOptions::wireguard_reply_timeout`).                                        | A WireGuard peer that receives data and has nothing to send answers with a keepalive after KEEPALIVE_TIMEOUT (10 s); two REKEY_TIMEOUTs (5 s each) cover a session renewal at that moment. Handshake messages do not count. Reason: "the WireGuard server is not answering tunnel traffic; check the endpoint and keys". |
+| A tunnel that has heard nothing (no data, keepalive, or handshake) for 10 s is probed. While it stays idle, the gap between probes doubles (10, 20, 40 s) up to 80 s; traffic resets it. | WireGuard is silent while idle, so an idle tunnel says nothing about the server. The probe is one tiny packet inside the tunnel (see below) that the server must answer.                                                                                                                                                 |
+
+**The probe.** The server's WireGuard answers any data packet it decrypts within
+KEEPALIVE_TIMEOUT, with a keepalive if nothing else, wherever the packet is addressed (Linux,
+wireguard-go, and boringtun all do so before checking the inner packet's addresses). So the
+probe only has to be routed to the server by the configuration's AllowedIPs:
+
+1. With a DNS server inside AllowedIPs and a tunnel address in its IP family: a DNS query for
+   the root name servers, which the resolver answers from its cache, often before the keepalive.
+2. Otherwise (no `DNS =` line, a DNS server outside AllowedIPs in a split tunnel, or only an
+   IPv6 DNS server for an IPv4 tunnel): an empty UDP datagram to the discard port (9) with a
+   hop limit of 1, so the server never forwards it. It goes to a documentation address
+   (192.0.2.1 or 2001:db8::1, never routed on the internet) when AllowedIPs contains one, as
+   `0.0.0.0/0` and `::/0` do, or else to the first host of the first AllowedIPs range (in a split
+   tunnel often the server itself, which may answer at once). It carries nothing but the
+   tunnel's own address.
+
+Only one probe is in flight at a time, and only a configuration with no AllowedIPs range in the
+IP family of its tunnel addresses (which could carry no traffic at all) has nothing to probe.
+Both probes travel only inside the tunnel, like all application traffic.
 
 A failed rule takes a connected tunnel to `reconnecting` and then `killSwitchActive` with that
 reason, like any other failed check: traffic is blocked, the epoch changes so connections close,
-and searches and the public-IP check are refused. Probes continue while it is blocked, and the
-first authenticated answer from the server lets the next check pass and traffic resume. A
-tunnel that never completes a handshake never becomes `connected`.
+and searches and the public-IP check are refused. The kill switch blocks the application's own
+traffic, so probes continue while it is blocked (at most one per 20 s), and the first
+authenticated answer from the server lets the next check pass and traffic resume. A tunnel that
+never completes a handshake never becomes `connected`.
 
-There is no flapping on brief loss: the server must stay silent for the whole 20 s, through
-several probes (one every check from 10 s on), before traffic is paused, and a dead tunnel is
-not reported connected again until the server actually answers. A busy tunnel with a dead
-server is noticed within about 25 s, an idle one within about 35 s. Without a DNS server in the
-configuration there is no probe, so only the application's own traffic is judged.
+If the server leaves traffic unanswered for 6 minutes (`NetworkOptions::wireguard_restart_after`,
+twice REJECT_AFTER_TIME), the tunnel is closed and a new one started: a fresh handshake, new
+session keys, and (without `ListenPort`) a new source port, in case the server or a NAT on the
+way lost track of the old one. The new tunnel stays blocked until the server answers its probe, so a server that completes
+handshakes but answers nothing is not reported connected again. Each tunnel must itself go
+unanswered for 6 minutes first, so this adds at most one handshake every 6 minutes.
+
+There is no flapping on brief loss: the server must stay silent for the whole 20 s before
+traffic is paused, and a dead tunnel is not reported connected again until the server actually
+answers. A busy tunnel with a dead server is noticed within about 25 s; an idle one within about
+35 s of going idle, and within at most about 105 s once it has been idle for a few minutes (the
+first traffic after that is judged within 20 s again).
 
 The tunnel uses boringtun and smoltcp through a locally maintained copy of tokio-wireguard.
 It carries only TorrentPlayer's traffic and needs no administrator rights, TUN driver, system VPN app,

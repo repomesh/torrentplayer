@@ -88,12 +88,20 @@ pub struct NetworkOptions {
     /// as not responding and the kill switch engages. A tunnel that has heard nothing for half
     /// of this is probed. See [`WIREGUARD_REPLY_TIMEOUT`].
     pub wireguard_reply_timeout: Duration,
+    /// How long a WireGuard server may leave traffic unanswered before the tunnel is replaced
+    /// by a new one (a fresh handshake and source port). See [`WIREGUARD_RESTART_AFTER`].
+    pub wireguard_restart_after: Duration,
 }
 
 /// The default [`NetworkOptions::wireguard_reply_timeout`]: WireGuard's `KEEPALIVE_TIMEOUT`
 /// (10 s, within which a peer that received data answers, if only with a keepalive) plus two
 /// `REKEY_TIMEOUT`s (5 s each, for a handshake retried while the session is renewed).
 pub const WIREGUARD_REPLY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The default [`NetworkOptions::wireguard_restart_after`]: twice WireGuard's
+/// `REJECT_AFTER_TIME` (180 s), long after every session the server could still hold has
+/// expired. At most one handshake for a new tunnel every 6 minutes.
+pub const WIREGUARD_RESTART_AFTER: Duration = Duration::from_secs(360);
 
 impl Default for NetworkOptions {
     fn default() -> Self {
@@ -105,6 +113,7 @@ impl Default for NetworkOptions {
             ip_check_v4_url: IP_CHECK_V4_URL.to_owned(),
             ip_check_v6_url: Some(IP_CHECK_V6_URL.to_owned()),
             wireguard_reply_timeout: WIREGUARD_REPLY_TIMEOUT,
+            wireguard_restart_after: WIREGUARD_RESTART_AFTER,
         }
     }
 }
@@ -1196,15 +1205,16 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
             NetworkMode::Socks5(cfg) => Some(probe(&cfg, timeout).await),
             NetworkMode::WireGuard(cfg) => {
                 let check = async {
-                    let existing = net
-                        .state()
-                        .tunnel
-                        .clone()
-                        .filter(|tunnel| !tunnel.is_closed());
-                    let tunnel = if let Some(tunnel) = existing {
-                        tunnel
+                    let existing = net.state().tunnel.clone();
+                    let tunnel = if let Some(tunnel) =
+                        existing.as_ref().filter(|tunnel| !tunnel.is_closed())
+                    {
+                        tunnel.clone()
                     } else {
-                        let tunnel = Tunnel::start(&cfg).await?;
+                        // A tunnel closed because its server stopped answering is replaced by
+                        // one that must hear from the server before traffic resumes.
+                        let unproven = existing.as_ref().is_some_and(Tunnel::abandoned);
+                        let tunnel = Tunnel::start(&cfg, unproven).await?;
                         let mut st = net.state();
                         if st.generation != generation || st.conn == ConnectionState::Disconnected {
                             tunnel.close();
@@ -1214,7 +1224,11 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
                         tunnel
                     };
                     tunnel
-                        .healthy(timeout, net.options.wireguard_reply_timeout)
+                        .healthy(
+                            timeout,
+                            net.options.wireguard_reply_timeout,
+                            net.options.wireguard_restart_after,
+                        )
                         .await
                 };
                 // Mostly a handshake that did not complete in time: one reason for both, so a
