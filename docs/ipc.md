@@ -362,7 +362,8 @@ the container, and a size check that flags fake 4K. The formula is documented in
 `crates/torrentplayer-search/src/rank.rs`. Each result carries its parsed `quality`, a short `reason`
 (for example `1080p WEB-DL · 412 seeders · plays in built-in player`), its `quality.kind`
 (`video`, `notVideo` for audio, ebooks, software, and games, or `unknown`; with
-`quality.audio` and `quality.audioPlays` for the audio codec the title names; `health` and
+`quality.audio`, `quality.audioPlays`, and `quality.audioConverted` for the audio codec the title
+names (Dolby and DTS play, converted to stereo, when the build has the bundled FFmpeg); `health` and
 `suspicious` from the search service; the search page hides
 `notVideo` results by default and never hides `unknown` ones), and `bestPick`: at most
 one result, always first, that contains every query word, has seeders, is a video, and is not a

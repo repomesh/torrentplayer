@@ -80,7 +80,7 @@ Install the WebKitGTK packages from the README. CI uses Ubuntu 24.04.
 ### FFmpeg (audio conversion)
 
 Optional for development. Without it, videos with Dolby or DTS audio play without sound and
-show a notice. `scripts/build-ffmpeg.sh <target triple> src-tauri/binaries` builds the
+show a notice, and search marks and ranks such releases as having no sound. `scripts/build-ffmpeg.sh <target triple> src-tauri/binaries` builds the
 playback-only LGPL FFmpeg (on Linux, macOS, or Windows with MinGW; it cross-compiles for Windows
 on Linux with mingw-w64). `npm run tauri build -- --config src-tauri/tauri.sidecar.conf.json`
 (in `ui/`) then bundles it as CI does. Development builds also take its path from `TORRENTPLAYER_FFMPEG`.

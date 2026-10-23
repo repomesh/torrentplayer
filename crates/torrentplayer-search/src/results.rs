@@ -143,11 +143,14 @@ pub struct SearchResponse {
 /// Turns raw candidates into a validated, de-duplicated, sorted response.
 ///
 /// With `include_adult` false, results in adult categories are removed and counted.
+/// `converts_audio` says whether the app converts Dolby and DTS audio for the built-in player
+/// (see [`Quality::converts_audio`]), which decides how such results are scored and labeled.
 #[must_use]
 pub fn build_response(
     candidates: Vec<Candidate>,
     indexers: Vec<IndexerStatus>,
     include_adult: bool,
+    converts_audio: bool,
 ) -> SearchResponse {
     let mut response = SearchResponse {
         indexers: clean_statuses(indexers),
@@ -233,6 +236,7 @@ pub fn build_response(
     // Scored after merging, because a duplicate can raise the seeder count.
     for (r, id_kind) in response.results.iter_mut().zip(id_kinds) {
         r.quality = Quality::parse(&r.title, r.category.as_deref(), r.size_bytes);
+        r.quality.converts_audio = converts_audio;
         if r.quality.kind == ContentKind::Unknown
             && let Some(kind) = id_kind
         {
@@ -480,10 +484,15 @@ mod tests {
         let mut by_id = candidate("by id", Some(&"b".repeat(40)), Some(5));
         by_id.category = Some("Other".into());
         by_id.adult = true;
-        let r = build_response(vec![adult.clone(), numbered, by_id], Vec::new(), false);
+        let r = build_response(
+            vec![adult.clone(), numbered, by_id],
+            Vec::new(),
+            false,
+            false,
+        );
         assert!(r.results.is_empty());
         assert_eq!(r.excluded_adult, 3);
-        let r = build_response(vec![adult], Vec::new(), true);
+        let r = build_response(vec![adult], Vec::new(), true, false);
         assert_eq!(r.results.len(), 1);
         assert!(is_adult("Adult/Video") && !is_adult("Movies/HD") && !is_adult("5000"));
     }
@@ -496,7 +505,12 @@ mod tests {
         second.indexer = Some("B".into());
         let other = candidate("Other", Some(&"b".repeat(40)), Some(50));
         let unknown = candidate("Unknown seeders", Some(&"c".repeat(40)), None);
-        let r = build_response(vec![first, second, other, unknown], Vec::new(), false);
+        let r = build_response(
+            vec![first, second, other, unknown],
+            Vec::new(),
+            false,
+            false,
+        );
         assert_eq!(r.results.len(), 3, "the two copies of HASH are merged");
         assert_eq!(r.results[0].key, HASH);
         assert_eq!(r.results[0].info_hash.as_deref(), Some(HASH));
@@ -514,7 +528,12 @@ mod tests {
         neither.magnet = None;
         let mut bad_magnet = candidate("bad", None, Some(9));
         bad_magnet.magnet = Some("javascript:alert(1)".into());
-        let r = build_response(vec![no_magnet, neither, bad_magnet], Vec::new(), false);
+        let r = build_response(
+            vec![no_magnet, neither, bad_magnet],
+            Vec::new(),
+            false,
+            false,
+        );
         assert_eq!(r.dropped, 2);
         assert_eq!(r.results.len(), 1);
         let built = format!("magnet:?xt=urn:btih:{HASH}&dn=Sintel+2010");
@@ -535,7 +554,7 @@ mod tests {
         video.category_kind = Some(ContentKind::Video);
         let mut labelled = candidate("Lecture 1 720p x264", Some(&"c".repeat(40)), Some(5));
         labelled.category_kind = Some(ContentKind::NotVideo);
-        let r = build_response(vec![audio, video, labelled], Vec::new(), false);
+        let r = build_response(vec![audio, video, labelled], Vec::new(), false, false);
         let kind = |hash: &str| {
             r.results
                 .iter()
@@ -570,6 +589,7 @@ mod tests {
             vec![no_magnet, again, unsafe_link, with_hash],
             Vec::new(),
             false,
+            false,
         );
         assert_eq!(r.dropped, 1, "only http(s) download links count");
         assert_eq!(r.results.len(), 2);
@@ -599,13 +619,18 @@ mod tests {
         };
         let mut other = candidate("Lecture 1 720p mp4", Some(HASH), Some(40));
         other.indexer = Some("Other".into());
-        let r = build_response(vec![resolved.clone(), other.clone()], Vec::new(), false);
+        let r = build_response(
+            vec![resolved.clone(), other.clone()],
+            Vec::new(),
+            false,
+            false,
+        );
         assert_eq!(r.results.len(), 1);
         assert_eq!(r.results[0].key, format!("download:{link}"));
         assert_eq!(r.results[0].seeders, Some(40));
         assert!(r.results[0].link.starts_with("magnet:"));
         // The other way round, the magnet copy's key stays.
-        let r = build_response(vec![other, resolved], Vec::new(), false);
+        let r = build_response(vec![other, resolved], Vec::new(), false, false);
         assert_eq!(r.results.len(), 1);
         assert_eq!(r.results[0].key, HASH);
         assert_eq!(r.results[0].download.as_deref(), Some(link));
@@ -616,7 +641,7 @@ mod tests {
         let mut c = candidate("b32", None, Some(1));
         // Base32 of 20 zero bytes.
         c.magnet = Some(format!("magnet:?xt=urn:btih:{}", "A".repeat(32)));
-        let r = build_response(vec![c], Vec::new(), false);
+        let r = build_response(vec![c], Vec::new(), false, false);
         assert_eq!(r.results[0].key, "0".repeat(40));
     }
 
@@ -629,7 +654,7 @@ mod tests {
         );
         c.details = Some("javascript:alert(1)".into());
         c.category = Some("  Movies\u{7}  ".into());
-        let r = build_response(vec![c], Vec::new(), false);
+        let r = build_response(vec![c], Vec::new(), false, false);
         let result = &r.results[0];
         assert!(!result.title.chars().any(char::is_control));
         assert_eq!(result.title.chars().count(), MAX_TITLE_CHARS);
@@ -653,7 +678,7 @@ mod tests {
             let mut c = candidate("x", None, Some(1));
             c.magnet = Some(bad.into());
             assert_eq!(
-                build_response(vec![c], Vec::new(), false).dropped,
+                build_response(vec![c], Vec::new(), false, false).dropped,
                 1,
                 "{bad}"
             );
@@ -672,6 +697,7 @@ mod tests {
                 results: 0,
                 error: Some("e".repeat(1000)),
             }],
+            false,
             false,
         );
         assert_eq!(r.indexers[0].name, "[31mEvil");

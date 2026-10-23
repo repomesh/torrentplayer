@@ -114,7 +114,7 @@ mod tests {
                 ..Candidate::default()
             })
             .collect();
-        let mut response = build_response(candidates, Vec::new(), false);
+        let mut response = build_response(candidates, Vec::new(), false, false);
         rank(&mut response.results, "sintel");
         SearchProgress {
             response,

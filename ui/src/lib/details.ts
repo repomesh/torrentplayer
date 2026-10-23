@@ -105,12 +105,17 @@ export function playsVerdict(
 }
 
 /** The sound line: `AAC: plays with sound here`, or null when the title names no audio. */
-export function soundVerdict(quality: Pick<QualityDto, 'audio' | 'audioPlays'>): string | null {
+export function soundVerdict(
+  quality: Pick<QualityDto, 'audio' | 'audioPlays' | 'audioConverted'>,
+): string | null {
   if (quality.audio === null) {
     return null;
   }
   if (quality.audioPlays === null) {
     return `${quality.audio}: sound here unknown`;
+  }
+  if (quality.audioConverted) {
+    return `${quality.audio}: plays with sound here, converted to stereo`;
   }
   return quality.audioPlays
     ? `${quality.audio}: plays with sound here`

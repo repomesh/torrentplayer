@@ -51,6 +51,11 @@ kind: ContentKindDto,
  */
 audio: string | null, 
 /**
- * Whether the built-in player plays that audio; `null` if the title names none.
+ * Whether the built-in player plays that audio (decoded, or converted with the bundled
+ * FFmpeg); `null` if the title names none.
  */
-audioPlays: boolean | null, };
+audioPlays: boolean | null, 
+/**
+ * Whether it plays only because TorrentPlayer converts it (Dolby or DTS) to stereo AAC.
+ */
+audioConverted: boolean, };

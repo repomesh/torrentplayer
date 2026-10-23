@@ -46,6 +46,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - FFmpeg runs for durations and seek-bar thumbnails no longer follow the `http_proxy` environment
   variable, which sent the private stream address (with its access token) to that proxy. They
   now share the hardening of the audio conversion.
+- Search no longer labels Dolby (AC-3, E-AC-3, TrueHD) and DTS releases "no sound in built-in
+  player" or ranks them down when the bundled FFmpeg converts their audio to stereo; they now
+  say "audio: converted to stereo". Builds without FFmpeg keep the warning.
 
 ## [0.3.0] - 2026-10-21
 

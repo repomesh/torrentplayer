@@ -51,6 +51,7 @@ function result(title: string, changes: Partial<SearchResultDto> = {}): SearchRe
       kind: 'video',
       audio: null,
       audioPlays: null,
+      audioConverted: false,
     },
     reason: '',
     bestPick: false,

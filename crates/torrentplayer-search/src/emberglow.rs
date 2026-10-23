@@ -62,6 +62,7 @@ pub struct EmberglowProvider {
     base: Url,
     client: reqwest::Client,
     include_adult: bool,
+    converts_audio: bool,
     streaming: bool,
     shared: Arc<Shared>,
 }
@@ -129,6 +130,7 @@ impl EmberglowProvider {
             base,
             client,
             include_adult: false,
+            converts_audio: false,
             streaming: true,
             shared: Arc::new(Shared {
                 cache: QueryCache::default(),
@@ -143,6 +145,15 @@ impl EmberglowProvider {
     #[must_use]
     pub fn include_adult(mut self, include: bool) -> Self {
         self.include_adult = include;
+        self
+    }
+
+    /// Whether the app converts Dolby and DTS audio for the built-in player (default: no), so
+    /// results with such audio are not marked or ranked as playing without sound. See
+    /// [`crate::Quality::converts_audio`].
+    #[must_use]
+    pub fn converts_audio(mut self, converts: bool) -> Self {
+        self.converts_audio = converts;
         self
     }
 
@@ -306,12 +317,22 @@ impl EmberglowProvider {
     /// One request across every indexer, cached.
     async fn run(&self, query: &Query) -> Result<SearchResponse, SearchError> {
         let text = normalize(query.as_str());
-        let key = format!("all|{}|{:?}|{text}", self.include_adult, query.categories());
+        let key = format!(
+            "all|{}|{}|{:?}|{text}",
+            self.include_adult,
+            self.converts_audio,
+            query.categories()
+        );
         if let Some(hit) = self.shared.cache.get(&key, Instant::now()) {
             return Ok(hit);
         }
         let (candidates, statuses) = self.fetch(&text, query.categories(), &[]).await?;
-        let mut response = build_response(candidates, statuses, self.include_adult);
+        let mut response = build_response(
+            candidates,
+            statuses,
+            self.include_adult,
+            self.converts_audio,
+        );
         // Indexers rank by seeders only, which puts popular unrelated torrents first.
         rank(&mut response.results, query.as_str());
         self.shared.cache.put(key, response.clone(), Instant::now());
@@ -326,8 +347,9 @@ impl EmberglowProvider {
     ) -> Result<SearchResponse, SearchError> {
         let text = normalize(query.as_str());
         let key = format!(
-            "progressive|{}|{:?}|{text}",
+            "progressive|{}|{}|{:?}|{text}",
             self.include_adult,
+            self.converts_audio,
             query.categories()
         );
         if let Some(hit) = self.shared.cache.get(&key, Instant::now()) {
@@ -408,7 +430,7 @@ impl EmberglowProvider {
                     last_error = Some(error);
                 }
             }
-            response = merger.response(self.include_adult, query.as_str());
+            response = merger.response(self.include_adult, self.converts_audio, query.as_str());
             on_progress(SearchProgress {
                 response: response.clone(),
                 completed,
@@ -517,7 +539,12 @@ impl EmberglowProvider {
         on_progress: &mut (dyn FnMut(SearchProgress) + Send),
     ) -> Result<Option<(SearchResponse, bool)>, SearchError> {
         let mut parser = SseParser::default();
-        let mut search = StreamSearch::new(query.as_str(), &self.base, self.include_adult);
+        let mut search = StreamSearch::new(
+            query.as_str(),
+            &self.base,
+            self.include_adult,
+            self.converts_audio,
+        );
         let mut events = Vec::new();
         let ended = loop {
             let chunk = match tokio::time::timeout_at(deadline, response.chunk()).await {
@@ -647,6 +674,7 @@ struct StreamSearch<'q> {
     /// The service, whose download links are kept.
     base: &'q Url,
     include_adult: bool,
+    converts_audio: bool,
     merger: Merger,
     /// Indexers that have answered, by id (or by name, without one).
     answered: HashSet<String>,
@@ -656,11 +684,12 @@ struct StreamSearch<'q> {
 }
 
 impl<'q> StreamSearch<'q> {
-    fn new(query: &'q str, base: &'q Url, include_adult: bool) -> Self {
+    fn new(query: &'q str, base: &'q Url, include_adult: bool, converts_audio: bool) -> Self {
         Self {
             query,
             base,
             include_adult,
+            converts_audio,
             merger: Merger::default(),
             answered: HashSet::new(),
             response: SearchResponse::default(),
@@ -737,7 +766,9 @@ impl<'q> StreamSearch<'q> {
         );
         self.answered.insert(key);
         if added {
-            self.response = self.merger.response(self.include_adult, self.query);
+            self.response =
+                self.merger
+                    .response(self.include_adult, self.converts_audio, self.query);
         } else {
             // Only the statuses changed: no need to merge and rank again.
             self.response.indexers = self.merger.statuses();
@@ -765,7 +796,9 @@ impl<'q> StreamSearch<'q> {
         {
             return false;
         }
-        self.response = self.merger.response(self.include_adult, self.query);
+        self.response = self
+            .merger
+            .response(self.include_adult, self.converts_audio, self.query);
         true
     }
 
@@ -779,7 +812,9 @@ impl<'q> StreamSearch<'q> {
         if !raw.indexers.is_empty() {
             self.merger.set_statuses(statuses(raw.indexers));
         }
-        self.response = self.merger.response(self.include_adult, self.query);
+        self.response = self
+            .merger
+            .response(self.include_adult, self.converts_audio, self.query);
     }
 
     /// Marks listed indexers that never answered.
@@ -995,7 +1030,7 @@ fn parse_raw(body: &[u8], base: &Url) -> Result<(Vec<Candidate>, Vec<IndexerStat
 fn parse(body: &[u8], include_adult: bool) -> Result<SearchResponse, SearchError> {
     let base = Url::parse(DEFAULT_BASE_URL).map_err(|_| SearchError::BadResponse)?;
     let (candidates, indexers) = parse_raw(body, &base)?;
-    Ok(build_response(candidates, indexers, include_adult))
+    Ok(build_response(candidates, indexers, include_adult, false))
 }
 
 /// Parses the `/indexers` body. Ids are validated when the search is planned.
@@ -1547,7 +1582,7 @@ mod tests {
     #[test]
     fn skips_bad_events_once_the_stream_has_started() {
         let base = base();
-        let mut s = StreamSearch::new("sintel", &base, false);
+        let mut s = StreamSearch::new("sintel", &base, false, false);
         assert_eq!(
             s.handle(event("ping", "{}")),
             Handled::Nothing,
@@ -1595,7 +1630,7 @@ mod tests {
             many.join(",")
         );
         let base = base();
-        let mut s = StreamSearch::new("sintel", &base, false);
+        let mut s = StreamSearch::new("sintel", &base, false, false);
         assert_eq!(s.handle(event("indexer", &data)), Handled::Indexer);
         assert_eq!(s.merger.candidates(), MAX_STREAM_RESULTS);
         assert_eq!(s.response.results.len(), crate::fanout::MAX_RESULTS);
@@ -1638,7 +1673,7 @@ mod tests {
     #[test]
     fn a_late_magnet_upgrades_a_result_in_place() {
         let base = base();
-        let mut s = StreamSearch::new("sintel", &base, false);
+        let mut s = StreamSearch::new("sintel", &base, false, false);
         assert_eq!(
             s.handle(event("magnet", &magnet_data(LINK, Some(SINTEL_720)))),
             Handled::Nothing,
@@ -1690,7 +1725,7 @@ mod tests {
     #[test]
     fn a_late_magnet_merges_the_result_into_an_earlier_copy() {
         let base = base();
-        let mut s = StreamSearch::new("sintel", &base, false);
+        let mut s = StreamSearch::new("sintel", &base, false, false);
         s.handle(event("indexer", &indexer_data("a", &[low()])));
         s.handle(event(
             "indexer",
