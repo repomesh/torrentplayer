@@ -131,13 +131,14 @@ and makes these videos play now. libmpv stays the plan for Phase 2.
   it (local ones, by default) keep the notice.
 - **Codecs:** all four (AC-3, E-AC-3, `TrueHD`, DTS) are enabled; the maintainers accepted the
   patent question above on 2026-10-20. Audio is mixed down to stereo AAC at 192 kb/s.
-- **Command:** `-ss <pos> -copyts -i <url> -map 0:V:0? -map <track> -c:v copy -c:a aac -ac 2
--avoid_negative_ts make_non_negative -f mp4 -movflags
+- **Command:** `-ss <pos> -copyts -i <url> -map 0:V:0? -map <track> -map_chapters -1 -c:v copy
+-c:a aac -ac 2 -avoid_negative_ts make_non_negative -f mp4 -movflags
 frag_keyframe+empty_moov+default_base_moof+frag_discont -frag_duration 1000000 pipe:1`.
   `-copyts` and `frag_discont` keep the original timestamps, so each conversion lands at its
   place on the video's timeline in Media Source Extensions, with no offsets in the frontend. The
   track is FFmpeg's `0:i:<track_ID>` in MP4 and `0:a:<n>` in Matroska, where `<n>` counts
-  disabled tracks as FFmpeg does.
+  disabled tracks as FFmpeg does. `-map_chapters -1` keeps chapters out: the MP4 muxer would
+  write them as a text track, and a track other than video and AAC fails the conversion.
 - **Input:** FFmpeg reads from a loopback stream server of its own that serves only this file,
   with its own token, so the URL on its command line grants nothing else. Proxy variables are
   removed from its environment.

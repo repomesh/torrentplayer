@@ -279,7 +279,8 @@ impl Conversion {
 
 /// FFmpeg's arguments: copy the first video stream (not cover art) if there is one, convert one
 /// audio track to stereo AAC, and write fragmented MP4 that keeps the original timestamps, so
-/// the player can place each conversion on the video's timeline.
+/// the player can place each conversion on the video's timeline. Nothing else is written: no
+/// subtitles, attachments, or chapters.
 fn arguments(input_url: &str, track: Option<String>, start: f64) -> Vec<String> {
     let audio = track.unwrap_or_else(|| "0:a:0".to_owned());
     let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-nostats", "-loglevel", "info"]
@@ -302,6 +303,10 @@ fn arguments(input_url: &str, track: Option<String>, start: f64) -> Vec<String> 
             "0:V:0?",
             "-map",
             &audio,
+            // FFmpeg copies chapters by default, which the MP4 muxer writes as a text track that
+            // Media Source Extensions can't play.
+            "-map_chapters",
+            "-1",
             "-c:v",
             "copy",
             "-c:a",
@@ -583,6 +588,22 @@ mod tests {
         let from_start = arguments("u", None, 0.0).join(" ");
         assert!(!from_start.contains("-ss"));
         assert!(from_start.contains("-map 0:a:0"));
+    }
+
+    #[test]
+    fn arguments_write_only_the_video_and_one_audio_track() {
+        // Like Sintel: video, AC-3 audio, ten subtitle tracks, and chapters. FFmpeg copied the
+        // chapters as a third (text) track, and the output could not be played.
+        for track in ["0:a:0", "0:a:2", "0:i:3"] {
+            let args = arguments("u", Some(track.to_owned()), 0.0);
+            let maps: Vec<_> = args
+                .windows(2)
+                .filter(|w| w[0] == "-map")
+                .map(|w| w[1].as_str())
+                .collect();
+            assert_eq!(maps, ["0:V:0?", track]);
+            assert!(args.join(" ").contains("-map_chapters -1"));
+        }
     }
 
     #[test]
