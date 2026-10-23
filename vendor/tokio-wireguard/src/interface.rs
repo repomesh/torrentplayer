@@ -261,6 +261,8 @@ impl Interface {
         tokio::spawn(async move {
             tunnel.initiate().await;
             tokio::pin!(poll);
+            // Added for TorrentPlayer: datagrams received in a row (see the selection below).
+            let mut recv_streak = 0u32;
             loop {
                 #[derive(Debug)]
                 enum Select {
@@ -278,6 +280,11 @@ impl Interface {
                     let recv = tunnel.socket().poll_recv_ready(cx);
                     let send = tunnel.socket().poll_send_ready(cx);
                     let can_send = device.can_send();
+                    // Modified for TorrentPlayer: received packets wait in a bounded queue
+                    // for the stack, and a socket that stays readable yields to the stack
+                    // after a burst, so neither a flood nor a busy peer can starve the rest.
+                    let can_recv = matches!((&recv, &send), (Poll::Ready(..), Poll::Ready(..)))
+                        && device.received_backlog() < RECV_BACKLOG;
 
                     if let (true, Poll::Ready(..)) = (can_send, &send) {
                         Poll::Ready(Select::Send)
@@ -285,13 +292,16 @@ impl Interface {
                         (rx.poll_recv(cx), close)
                     {
                         Poll::Ready(Select::Message(message))
-                    } else if let (Poll::Ready(..), Poll::Ready(..)) = (&recv, &send) {
+                    } else if let Poll::Ready(..) = timers.poll_tick(cx) {
+                        // Modified for TorrentPlayer: timers come before received datagrams
+                        // (they tick at most every `timer_interval`). After them, a socket
+                        // that kept receiving left handshakes, rekeys, and keepalives unsent.
+                        Poll::Ready(Select::Timers)
+                    } else if can_recv && recv_streak < RECV_BURST {
                         // Receive acknowledgements before polling a stack that may already
                         // have an immediate deadline. Otherwise a busy TCP socket can keep
                         // selecting Poll indefinitely while its ACKs and DNS replies wait.
                         Poll::Ready(Select::Recv)
-                    } else if let Poll::Ready(..) = timers.poll_tick(cx) {
-                        Poll::Ready(Select::Timers)
                     } else if notified.as_mut().poll(cx).is_ready() {
                         Poll::Ready(Select::Poll)
                     } else if let Poll::Ready(()) = poll.as_mut().poll(cx) {
@@ -300,12 +310,18 @@ impl Interface {
                         Poll::Ready(Select::Send)
                     } else if let (false, Close::Ready) = (can_send, close) {
                         Poll::Ready(Select::Close)
+                    } else if can_recv {
+                        Poll::Ready(Select::Recv)
                     } else {
                         Poll::Pending
                     }
                 })
                 .await;
 
+                recv_streak = match selected {
+                    Select::Recv => recv_streak.saturating_add(1),
+                    _ => 0,
+                };
                 match selected {
                     Select::Poll => {
                         let wait = sockets.with(|s| {
@@ -524,6 +540,11 @@ impl ToInterface for crate::config::Config {
         Interface::new(self)
     }
 }
+
+/// Added for TorrentPlayer: received packets waiting for the stack, at most.
+const RECV_BACKLOG: usize = 256;
+/// Added for TorrentPlayer: datagrams received in a row before the stack gets a turn.
+const RECV_BURST: u32 = 64;
 
 impl Default for Options {
     fn default() -> Self {

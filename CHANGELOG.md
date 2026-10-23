@@ -52,6 +52,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and sees the handshake can make) no longer redirects the tunnel's traffic to its sender; the
   tunnel follows the server only on authenticated handshake and data messages. Handshake initiations
   are rate-limited before the key agreement, so a flood of them costs little CPU.
+- A WireGuard tunnel keeps sending its keepalives and key renewals while a lot of traffic (or junk)
+  arrives; before, a steady stream of incoming datagrams held them back, which could expire the
+  session and block traffic as "has not completed a recent handshake". Packets waiting inside the
+  tunnel are also capped instead of piling up in memory.
 
 ## [0.3.0] - 2026-10-21
 

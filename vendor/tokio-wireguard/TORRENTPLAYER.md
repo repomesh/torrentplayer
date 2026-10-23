@@ -42,3 +42,15 @@ before `parse_handshake_anon`'s key agreement, as in boringtun's own device; sin
 `decapsulate` checks it again, the limit is 128 so that initiations still get 64 per second.
 torrentplayer-net's `a_forged_cookie_reply_does_not_move_the_tunnel_to_its_sender` test forges
 a cookie reply (boringtun is a test-only dependency there for this) and fails without the fix.
+
+Interface loop fairness and bounded queues (`src/interface.rs` and `src/interface/device.rs`,
+marked "Added/Modified for TorrentPlayer"): the loop selected a readable UDP socket before the
+WireGuard timers and the stack poll, and the device queues were unbounded. While datagrams kept
+arriving (a busy peer, or a flood of junk), no keepalive, handshake, or rekey went out, so a
+session could expire and the tunnel be reported as not handshaking, and received packets could
+pile up without limit. Timers now come before received datagrams, at most 64 datagrams are
+received in a row before the stack polls, received packets wait in a queue of at most 256, and
+each device queue holds at most 1024 packets (more are dropped, as a full interface would).
+torrentplayer-net's `a_flood_of_incoming_datagrams_does_not_stall_the_tunnels_timers` test
+floods the client's port for 4 seconds and requires its 1-second keepalives to continue; none
+were sent before.

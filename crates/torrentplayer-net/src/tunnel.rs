@@ -1139,6 +1139,8 @@ mod tests {
         /// Transport data packets other than keepalives (32 bytes): probes, when the
         /// application sends nothing.
         data: std::sync::atomic::AtomicUsize,
+        /// Keepalives (transport packets of 32 bytes).
+        keepalives: std::sync::atomic::AtomicUsize,
         /// When each tunnel (a new sender index) sent its first handshake initiation.
         tunnels: Mutex<Vec<(u32, tokio::time::Instant)>>,
         /// The latest handshake initiation, and the address it came from.
@@ -1198,6 +1200,9 @@ mod tests {
                             }
                             4 if n > 32 => {
                                 seen.data.fetch_add(1, Ordering::SeqCst);
+                            }
+                            4 => {
+                                seen.keepalives.fetch_add(1, Ordering::SeqCst);
                             }
                             _ => {}
                         }
@@ -1852,6 +1857,63 @@ mod tests {
                 "tunnel traffic went to the forger"
             );
             assert!(traffic.data() > before);
+            tunnel.close();
+            server.close();
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_flood_of_incoming_datagrams_does_not_stall_the_tunnels_timers() {
+        // The interface loop chose a readable socket over its WireGuard timers, so while
+        // datagrams kept arriving no keepalive, handshake, or rekey was sent.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            let (server, mut config) = pair();
+            let mode = Arc::new(std::sync::atomic::AtomicU8::new(PASS_ALL));
+            let target: SocketAddr = config.peers[0].endpoint.parse().unwrap();
+            let (endpoint, traffic) = relay(target, Arc::clone(&mode)).await;
+            config.peers[0].endpoint = endpoint.to_string();
+            let tunnel = Tunnel::start(&config, false).await.unwrap();
+            tunnel
+                .healthy(
+                    Duration::from_secs(2),
+                    crate::WIREGUARD_REPLY_TIMEOUT,
+                    crate::WIREGUARD_RESTART_AFTER,
+                )
+                .await
+                .unwrap();
+            let (_, client) = traffic.init.lock().unwrap().clone().unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let flood = std::thread::spawn({
+                let stop = Arc::clone(&stop);
+                move || {
+                    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                    let junk = [4u8; 96];
+                    while !stop.load(Ordering::Relaxed) {
+                        let _ = socket.send_to(&junk, client);
+                    }
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let before = traffic.keepalives.load(Ordering::SeqCst);
+            let started = tokio::time::Instant::now();
+            // Persistent keepalive is 1 s in the test configuration.
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            let keepalives = traffic.keepalives.load(Ordering::SeqCst) - before;
+            let liveness =
+                tokio::time::timeout(Duration::from_secs(1), tunnel.0.interface.liveness()).await;
+            stop.store(true, Ordering::Relaxed);
+            flood.join().unwrap();
+            assert!(
+                keepalives >= 2,
+                "{keepalives} keepalives in {:?}",
+                started.elapsed()
+            );
+            assert!(
+                liveness.is_ok(),
+                "the interface did not answer during the flood"
+            );
             tunnel.close();
             server.close();
         })
