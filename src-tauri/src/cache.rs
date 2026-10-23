@@ -450,7 +450,6 @@ mod tests {
             torrent_name: None,
             size_bytes: None,
             paused: false,
-            skipped: false,
             played: false,
         };
         let queue = Queue {

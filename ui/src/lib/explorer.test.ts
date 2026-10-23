@@ -49,7 +49,6 @@ function queued(hash: string | null, id: string, source = 'magnet:x'): QueueItem
     title: `Video ${id}`,
     torrentName: hash === null ? null : `Torrent ${hash}`,
     paused: false,
-    skipped: false,
     played: false,
     sizeBytes: 1,
   };

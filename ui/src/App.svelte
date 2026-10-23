@@ -88,7 +88,6 @@
     sanitizeQueue,
     setCurrent,
     setPaused,
-    setSkipped,
     upcomingCount,
     type MainFile,
     type Queue,
@@ -913,7 +912,6 @@
           torrentName: null,
           sizeBytes: result.sizeBytes,
           paused: false,
-          skipped: false,
           played: false,
         },
       ],
@@ -932,7 +930,6 @@
       torrentName: clipTitle(torrent.name),
       sizeBytes: file.length,
       paused: false,
-      skipped: false,
       played: false,
     }));
   }
@@ -1439,9 +1436,6 @@
               {watchProgress}
               onTogglePause={(ids: readonly string[], paused: boolean) => {
                 queue = setPaused(queue, ids, paused);
-              }}
-              onToggleSkip={(ids: readonly string[], skipped: boolean) => {
-                queue = setSkipped(queue, ids, skipped);
               }}
               filesOf={(key: string) => torrentOf(key)?.files ?? null}
               {playingFile}

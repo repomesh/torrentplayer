@@ -3,4 +3,4 @@
 /**
  * What a queued item is doing.
  */
-export type ItemState = "queued" | "starting" | "downloading" | "connecting" | "paused" | "skipped" | "complete" | "watching" | "failed";
+export type ItemState = "queued" | "starting" | "downloading" | "connecting" | "paused" | "complete" | "watching" | "failed";

@@ -11,8 +11,8 @@
    *
    * Queued videos download in the background: each row shows its speed, peers, progress, and
    * time left, and can be paused (a torrent row pauses all of its queued videos). Nothing is
-   * paused, skipped, or removed automatically: a pause stops downloading and uploading until
-   * the user resumes it. Only the video playing can hold downloads back ("Waiting for
+   * paused or removed automatically: a pause stops downloading and uploading until the user
+   * resumes it, and unticking removes the video (with Undo). Only the video playing can hold downloads back ("Waiting for
    * playback"), which never changes the user's pauses.
    */
   import { tick } from 'svelte';
@@ -75,11 +75,6 @@
     watchProgress?: ReadonlyMap<string, LibraryItem>;
     /** Pauses or resumes background downloading of items. */
     onTogglePause?: ((ids: readonly string[], paused: boolean) => void) | undefined;
-    /**
-     * Skips (unticks) or restores items: skipped items stay listed but are not played next or
-     * downloaded. Without it, unticking removes the item.
-     */
-    onToggleSkip?: ((ids: readonly string[], skipped: boolean) => void) | undefined;
   }
 
   let {
@@ -102,7 +97,6 @@
     downloads = new Map(),
     watchProgress = new Map(),
     onTogglePause,
-    onToggleSkip,
   }: Props = $props();
 
   type Node =
@@ -236,9 +230,6 @@
     if (item === null) {
       return null;
     }
-    if (item.skipped) {
-      return 'Skipped';
-    }
     const index = queue.items.indexOf(item);
     if (index === cursor + 1) {
       if (nextStatus !== null) {
@@ -269,8 +260,8 @@
   }
 
   /**
-   * An item's download as shown: pausing, skipping, and undoing either show at once, before the
-   * backend's next report (about a second later). The user's pause shows first, as there.
+   * An item's download as shown: pausing and resuming show at once, before the backend's next
+   * report (about a second later). The user's pause shows first, as there.
    */
   function withPause(item: QueueItem, d: ItemDownload | undefined): ItemDownload | undefined {
     if (d === undefined || d.state === 'watching') {
@@ -281,12 +272,7 @@
         ? d
         : { ...d, state: 'paused', downloadBps: 0, uploadBps: 0, etaSecs: null };
     }
-    if (item.skipped) {
-      return d.state === 'skipped' || d.state === 'complete'
-        ? d
-        : { ...d, state: 'skipped', downloadBps: 0, etaSecs: null };
-    }
-    return d.state === 'paused' || d.state === 'skipped' ? { ...d, state: 'queued' } : d;
+    return d.state === 'paused' ? { ...d, state: 'queued' } : d;
   }
 
   /** Whether every queued video of a torrent is paused. */
@@ -334,15 +320,13 @@
       return;
     }
     const { row, group } = node;
-    if (row.item && onToggleSkip) {
-      // Unticking keeps the item, skipped; ticking brings it back.
-      onToggleSkip([row.item.id], !row.item.skipped);
-      announcement = `${rowTitle(row)} ${row.item.skipped ? 'included again' : 'skipped'}`;
-    } else if (row.file) {
-      onToggleFile(group.key, row.file, row.item === null);
-      announcement = `${rowTitle(row)} ${row.item === null ? 'queued' : 'removed from the queue'}`;
-    } else if (row.item) {
+    // Unticking removes the item (with Undo); a torrent's file stays listed, to tick again.
+    if (row.item) {
       onRemove(row.item.id);
+      announcement = `${rowTitle(row)} removed from the queue`;
+    } else if (row.file) {
+      onToggleFile(group.key, row.file, true);
+      announcement = `${rowTitle(row)} queued`;
     }
   }
 
@@ -507,7 +491,6 @@
   {@const status = download ? describeDownload(download) : null}
   {@const progress = download ? progressOf(download) : null}
   {@const tone = download ? toneOf(download) : 'waiting'}
-  {@const skipping = row.item !== null && onToggleSkip !== undefined}
   <span
     class="line"
     class:with-pause={row.item !== null && onTogglePause !== undefined}
@@ -517,22 +500,14 @@
       type="checkbox"
       class="tick"
       tabindex="-1"
-      checked={row.item !== null && !row.item.skipped}
+      checked={row.item !== null}
       disabled={row.file === null && row.item === null}
       aria-label={row.item === null
         ? `Queue ${rowTitle(row)}`
-        : !skipping
-          ? `Remove ${rowTitle(row)} from the queue`
-          : row.item.skipped
-            ? `Include ${rowTitle(row)} again`
-            : `Skip ${rowTitle(row)}`}
+        : `Remove ${rowTitle(row)} from the queue`}
       title={row.item === null
         ? 'Add to the queue'
-        : !skipping
-          ? 'In the queue (untick to remove)'
-          : row.item.skipped
-            ? 'Skipped: not played next or downloaded (tick to include it again)'
-            : 'In the queue (untick to skip it; × removes it)'}
+        : 'In the queue (untick to remove it; Undo puts it back)'}
       onclick={(event: MouseEvent) => {
         event.stopPropagation();
       }}
@@ -780,7 +755,6 @@
                   class:playing={isPlaying(group, node.row)}
                   class:unqueued={node.row.item === null}
                   class:played={rowLabel(group, node.row) === 'Played'}
-                  class:skipped={node.row.item?.skipped === true}
                   role="treeitem"
                   aria-selected={focusId === node.id}
                   aria-current={isPlaying(group, node.row) ? 'true' : undefined}
@@ -805,7 +779,6 @@
             class="leaf plain"
             class:playing={isPlaying(group, node.row)}
             class:played={rowLabel(group, node.row) === 'Played'}
-            class:skipped={node.row.item?.skipped === true}
             class:dragging={dragKey === group.key}
             class:drop-before={dragKey !== null && dropIndex === g}
             class:drop-after={dragKey !== null && dropIndex === g + 1 && g === groups.length - 1}
@@ -935,11 +908,6 @@
 
   .line.with-pause:not(.with-remove) {
     grid-template-columns: auto minmax(0, 1fr) auto auto;
-  }
-
-  /* Skipped: kept in the list, dimmed. */
-  .leaf.skipped .main {
-    opacity: 0.5;
   }
 
   .remove:hover:not(:disabled) {

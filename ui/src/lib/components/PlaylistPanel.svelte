@@ -42,8 +42,6 @@
     watchProgress?: ReadonlyMap<string, LibraryItem>;
     /** Pauses or resumes background downloading of items. */
     onTogglePause?: (ids: readonly string[], paused: boolean) => void;
-    /** Skips (unticks) or restores items. */
-    onToggleSkip?: (ids: readonly string[], skipped: boolean) => void;
   }
 
   let {
@@ -70,7 +68,6 @@
     downloads = null,
     watchProgress = new Map(),
     onTogglePause,
-    onToggleSkip,
   }: Props = $props();
 
   const linkLine = $derived(downloads ? describeLink(downloads.link) : null);
@@ -280,7 +277,6 @@
           downloads={byItem}
           {watchProgress}
           {onTogglePause}
-          {onToggleSkip}
         />
       {/if}
     </div>

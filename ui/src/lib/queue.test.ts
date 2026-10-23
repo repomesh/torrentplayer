@@ -33,7 +33,6 @@ import {
   sanitizeQueue,
   setCurrent,
   setPaused,
-  setSkipped,
   upcomingCount,
   type Queue,
   type QueueItem,
@@ -55,7 +54,6 @@ function item(
     torrentName: 'Course',
     sizeBytes: 1000,
     paused: false,
-    skipped: false,
     played: false,
   };
 }
@@ -143,7 +141,7 @@ describe('the cursor', () => {
     expect(markPlayed(q, 'missing')).toBe(q);
   });
 
-  it('moves only the cursor: items jumped over are not skipped', () => {
+  it('moves only the cursor: items jumped over keep their flags', () => {
     let q = setCurrent(queueOf('a', 'b', 'c', 'd'), 'a');
     q = setCurrent(q, 'd');
     expect(q.current).toBe('d');
@@ -153,12 +151,12 @@ describe('the cursor', () => {
     expect(setCurrent(q, 'd')).toBe(q);
   });
 
-  it('keeps the user’s skip when a skipped item is played or reaches its end', () => {
-    let q = setSkipped(queueOf('a', 'b'), ['b'], true);
+  it('keeps the user’s pause when a paused item is played or reaches its end', () => {
+    let q = setPaused(queueOf('a', 'b'), ['b'], true);
     q = setCurrent(q, 'b');
-    expect(q.items[1]?.skipped).toBe(true);
+    expect(q.items[1]?.paused).toBe(true);
     q = markPlayed(q, 'b');
-    expect(q.items[1]).toMatchObject({ played: true, skipped: true });
+    expect(q.items[1]).toMatchObject({ played: true, paused: true });
   });
 
   it('marks a video played when it ends, and plays nothing next on its own', () => {
@@ -171,14 +169,14 @@ describe('the cursor', () => {
     expect(playbackEnded(q, null)).toBe(q);
   });
 
-  it('restores a saved cursor without skipping anything before it', () => {
+  it('restores a saved cursor without changing anything before it', () => {
     const saved = { ...queueOf('a', 'b', 'c'), current: 'c' };
     const back = sanitizeQueue(JSON.parse(JSON.stringify(saved)));
     expect(back.current).toBe('c');
-    expect(back.items.map((i) => [i.skipped, i.paused, i.played])).toEqual([
-      [false, false, false],
-      [false, false, false],
-      [false, false, false],
+    expect(back.items.map((i) => [i.paused, i.played])).toEqual([
+      [false, false],
+      [false, false],
+      [false, false],
     ]);
   });
 });
@@ -197,24 +195,24 @@ describe('reordering', () => {
   });
 });
 
-describe('skipping', () => {
-  it('keeps skipped items but passes over them for next', () => {
-    const q = queueFrom([item('a', 1), item('b', 2), item('c', 3)], 'a');
-    const skipped = setSkipped(q, ['b'], true);
-    expect(skipped.items.map((i) => i.id)).toEqual(['a', 'b', 'c']);
-    expect(nextItem(skipped)?.id).toBe('c');
-    expect(upcomingCount(skipped)).toBe(1);
-    expect(setSkipped(skipped, ['b'], true)).toBe(skipped);
-    expect(nextItem(setSkipped(skipped, ['b'], false))?.id).toBe('b');
-    expect(nextItem(setSkipped(q, ['b', 'c'], true))).toBeNull();
-  });
-
-  it('reads the flag back, defaulting for older queues', () => {
-    const saved = setSkipped(queueFrom([item('a', 1), item('b', 2)]), ['b'], true);
+describe('items skipped by older versions', () => {
+  it('read back as paused, kept in the queue, and without the old flag', () => {
+    const saved = {
+      items: [
+        { ...item('a', 1), skipped: true },
+        { ...item('b', 2), skipped: false },
+        item('c', 3),
+      ],
+      current: 'a',
+    };
     const back = sanitizeQueue(JSON.parse(JSON.stringify(saved)));
-    expect(back.items.map((i) => i.skipped)).toEqual([false, true]);
-    const old = { items: [{ ...item('a'), skipped: undefined, played: undefined }], current: null };
-    expect(sanitizeQueue(JSON.parse(JSON.stringify(old))).items[0]?.skipped).toBe(false);
+    expect(ids(back)).toEqual(['a', 'b', 'c']);
+    expect(back.items.map((i) => i.paused)).toEqual([true, false, false]);
+    expect(back.items.every((i) => !('skipped' in i))).toBe(true);
+    // Nothing is passed over any more: the next item is simply the one after the cursor.
+    expect(nextItem(back)?.id).toBe('b');
+    expect(upcomingCount(back)).toBe(2);
+    const old = { items: [{ ...item('a'), played: undefined }], current: null };
     expect(sanitizeQueue(JSON.parse(JSON.stringify(old))).items[0]?.played).toBe(false);
   });
 });
@@ -488,7 +486,7 @@ describe('one file of one torrent is queued once (issue #55)', () => {
       items: [
         { ...link('a', null), played: true },
         item('x', 5),
-        { ...item('b', 0), skipped: true },
+        { ...item('b', 0), paused: true },
       ],
       current: 'b',
     };
@@ -499,7 +497,7 @@ describe('one file of one torrent is queued once (issue #55)', () => {
     );
     expect(queue.items.map((i) => i.id)).toEqual(['a', 'x']);
     expect(queue.items[0]).toMatchObject({ infoHash: HASH, fileIndex: 0, played: true });
-    expect(queue.items[0]?.skipped).toBe(false);
+    expect(queue.items[0]?.paused).toBe(false);
     expect(queue.current).toBe('a');
     expect(merged).toEqual(new Map([['b', 'a']]));
     // Nothing to do: the same queue comes back.

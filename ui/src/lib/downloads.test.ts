@@ -77,8 +77,6 @@ describe('download status', () => {
     expect(describeDownload(d({ state: 'complete', uploading: true }))).toBe(
       'Downloaded · seeding',
     );
-    expect(describeDownload(d({ state: 'skipped' }))).toBe('37% downloaded');
-    expect(describeDownload(d({ state: 'skipped', downloaded: 0 }))).toBeNull();
     expect(describeDownload(d({ state: 'failed', error: 'No peers.' }))).toBe(
       'No peers. Trying again soon.',
     );
@@ -109,9 +107,8 @@ describe('download status', () => {
     expect(progressOf(d())).toBeCloseTo(0.37);
     expect(progressOf(d({ length: null }))).toBeNull();
     expect(canPause(undefined)).toBe(true);
-    // Pausing stops sharing too, so finished and skipped items can be paused.
+    // Pausing stops sharing too, so finished items can be paused.
     expect(canPause(d({ state: 'complete' }))).toBe(true);
-    expect(canPause(d({ state: 'skipped' }))).toBe(true);
     expect(canPause(d({ state: 'watching' }))).toBe(false);
     expect(canPause(d({ state: 'paused' }))).toBe(true);
   });

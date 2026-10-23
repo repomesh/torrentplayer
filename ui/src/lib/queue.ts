@@ -98,12 +98,12 @@ export function isPlayed(queue: Queue, id: string): boolean {
 
 /** Number of items after the cursor, still to play. */
 export function upcomingCount(queue: Queue): number {
-  return queue.items.slice(currentIndex(queue) + 1).filter((i) => !i.skipped).length;
+  return queue.items.length - (currentIndex(queue) + 1);
 }
 
-/** The item to play after the current one (skipped items are passed over), or null at the end. */
+/** The item to play after the current one, or null at the end. */
 export function nextItem(queue: Queue): QueueItem | null {
-  return queue.items.slice(currentIndex(queue) + 1).find((i) => !i.skipped) ?? null;
+  return queue.items[currentIndex(queue) + 1] ?? null;
 }
 
 /**
@@ -355,7 +355,7 @@ export function moveBy(queue: Queue, id: string, delta: number): Queue {
 
 /**
  * Puts the cursor on an item (it is playing now), or clears it with `null`. Only the cursor
- * moves: no item's flags change (only the user skips, pauses, or removes items).
+ * moves: no item's flags change (only the user pauses or removes items).
  */
 export function setCurrent(queue: Queue, id: string | null): Queue {
   if (id !== null && !queue.items.some((i) => i.id === id)) {
@@ -400,24 +400,7 @@ export function setPaused(queue: Queue, ids: readonly string[], paused: boolean)
   };
 }
 
-/**
- * Skips (unticks) or restores the items in `ids`: skipped items stay in the queue but are not
- * played next or downloaded in the background. Returns the same queue if nothing changed.
- */
-export function setSkipped(queue: Queue, ids: readonly string[], skipped: boolean): Queue {
-  const wanted = new Set(ids);
-  if (!queue.items.some((i) => wanted.has(i.id) && i.skipped !== skipped)) {
-    return queue;
-  }
-  return {
-    ...queue,
-    items: queue.items.map((i) =>
-      wanted.has(i.id) && i.skipped !== skipped ? { ...i, skipped } : i,
-    ),
-  };
-}
-
-/** Removes only items that actually reached the end; passed-over skipped items stay. */
+/** Removes only items that actually reached the end; items passed over stay. */
 export function clearPlayed(queue: Queue): Queue {
   return queue.items
     .filter((item) => item.played)
@@ -427,7 +410,7 @@ export function clearPlayed(queue: Queue): Queue {
 /**
  * Merges items that play the same file of the same torrent (see {@link sameEntry}) into the
  * first of them, which keeps its place and takes the other's file index, info hash, and
- * progress (played if either was; skipped or paused only if both were). The cursor follows a
+ * progress (played if either was; paused only if both were). The cursor follows a
  * merged item. Returns the queue (the same object if nothing merged) and, for each removed
  * item, the id of the item it was merged into.
  */
@@ -449,7 +432,6 @@ export function mergeDuplicates(
       fileIndex: twin.fileIndex ?? item.fileIndex,
       infoHash: twin.infoHash ?? item.infoHash,
       played: twin.played || item.played,
-      skipped: twin.skipped && item.skipped,
       paused: twin.paused && item.paused,
     };
     merged.set(item.id, twin.id);
@@ -493,13 +475,18 @@ export function sanitizeQueue(value: unknown): Queue {
     return emptyQueue();
   }
   const raw = Array.isArray(value.items) ? (value.items as unknown[]) : [];
-  // Items saved before pausing existed have no flag.
-  const valid = raw.filter(isQueueItem).map((i) => ({
-    ...i,
-    paused: (i.paused as boolean | undefined) ?? false,
-    skipped: (i.skipped as boolean | undefined) ?? false,
-    played: (i.played as boolean | undefined) ?? false,
-  }));
+  // Items saved before pausing existed have no flag. `skipped` (0.3.0) kept an item without
+  // downloading it: it reads as paused.
+  const valid = raw.filter(isQueueItem).map((i) => {
+    const { skipped, ...item } = i as QueueItem & { skipped?: boolean };
+    // Read as saved: either flag may be missing.
+    const saved = item as Partial<Record<'paused' | 'played', boolean>>;
+    return {
+      ...item,
+      paused: saved.paused === true || skipped === true,
+      played: saved.played === true,
+    };
+  });
   const saved = 'current' in value && typeof value.current === 'string' ? value.current : null;
   // Older versions could queue one file twice (a search result's main video, then the same
   // file by its index; or one link with and one without the hash).

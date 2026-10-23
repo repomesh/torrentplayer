@@ -59,13 +59,11 @@ pub struct QueueItem {
     pub torrent_name: Option<String>,
     /// Size in bytes, if known.
     pub size_bytes: Option<u64>,
-    /// Not downloaded in the background until resumed (playing it still works).
+    /// Paused by the user: not downloaded, and its torrent not uploaded once all of the
+    /// torrent's items are paused, until resumed (playing it still works). Items saved as
+    /// `skipped` (removed in 0.3.1) load as paused.
     #[serde(default)]
     pub paused: bool,
-    /// Kept in the queue but skipped: not played automatically and not downloaded in the
-    /// background (unticked in the queue). Playing it directly still works.
-    #[serde(default)]
-    pub skipped: bool,
     /// The video reached its end during playback. Kept separately from the cursor so jumping
     /// ahead does not make every item before it look watched.
     #[serde(default)]
@@ -330,7 +328,13 @@ impl QueueStore {
         let mut queue = Queue::default();
         let mut ids = HashSet::new();
         let mut dropped = 0_usize;
-        for value in raw {
+        for mut value in raw {
+            // `skipped` (0.3.0) kept an item without downloading it: it loads as paused.
+            if let Some(fields) = value.as_object_mut()
+                && fields.remove("skipped") == Some(Value::Bool(true))
+            {
+                fields.insert("paused".to_owned(), Value::Bool(true));
+            }
             match serde_json::from_value::<QueueItem>(value) {
                 Ok(item)
                     if queue.items.len() < MAX_QUEUE_ITEMS
@@ -452,7 +456,6 @@ mod tests {
             torrent_name: Some("Sintel".into()),
             size_bytes: Some(1_234_567_890),
             paused: false,
-            skipped: false,
             played: false,
         }
     }
@@ -507,6 +510,25 @@ mod tests {
         let loaded = store.load().queue;
         assert!(!loaded.items[1].paused);
         assert!(!loaded.items[0].played);
+    }
+
+    #[test]
+    fn skipped_items_from_older_versions_load_as_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::new(dir.path());
+        store.save(&queue(&["a", "b", "c"], None)).unwrap();
+        let mut old: Value =
+            serde_json::from_str(&fs::read_to_string(store.path()).unwrap()).unwrap();
+        old["items"][0]["skipped"] = true.into();
+        old["items"][1]["skipped"] = false.into();
+        fs::write(store.path(), old.to_string()).unwrap();
+        let loaded = store.load();
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+        let paused: Vec<bool> = loaded.queue.items.iter().map(|i| i.paused).collect();
+        assert_eq!(paused, [true, false, false], "kept, not removed");
+        store.save(&loaded.queue).unwrap();
+        let saved = fs::read_to_string(store.path()).unwrap();
+        assert!(!saved.contains("skipped"), "dropped on save");
     }
 
     #[test]

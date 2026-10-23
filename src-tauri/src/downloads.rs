@@ -126,8 +126,6 @@ pub(crate) enum ItemState {
     /// Paused by the user: it does not download, and its torrent does not upload once all of
     /// the torrent's items are paused.
     Paused,
-    /// Unticked in the queue: kept, but not played next or downloaded.
-    Skipped,
     /// Fully downloaded.
     Complete,
     /// Being watched.
@@ -291,8 +289,6 @@ fn idle_snapshot(queue: &Queue) -> DownloadsSnapshot {
             .map(|item| ItemDownload {
                 state: if item.paused {
                     ItemState::Paused
-                } else if item.skipped {
-                    ItemState::Skipped
                 } else {
                     ItemState::Queued
                 },
@@ -400,7 +396,7 @@ enum Role {
     Held,
     /// It has queued items to download in the background.
     Downloading,
-    /// Nothing to download (finished, skipped, or waiting for a download slot): it shares.
+    /// Nothing to download (finished, or waiting for a download slot): it shares.
     Sharing,
 }
 
@@ -593,7 +589,6 @@ impl Runtime {
             .enumerate()
             .filter(|(_, item)| {
                 !item.paused
-                    && !item.skipped
                     && !watching(item)
                     && !readiness
                         .get(item.id.as_str())
@@ -604,7 +599,7 @@ impl Runtime {
                 group: group_of(item),
                 position,
                 up_next: position == up_next,
-                skipped: current.is_some_and(|c| position <= c),
+                behind: current.is_some_and(|c| position <= c),
             })
             .collect();
         let max_active = usize::try_from(settings.bandwidth.max_downloads)
@@ -761,8 +756,6 @@ impl Runtime {
                     ItemState::Paused
                 } else if complete {
                     ItemState::Complete
-                } else if item.skipped {
-                    ItemState::Skipped
                 } else if run.is_some_and(|r| r.id.is_none() && r.failed.is_some()) {
                     ItemState::Failed
                 } else if !is_active || (plan.pause_background && id.is_some()) {
@@ -901,7 +894,6 @@ mod tests {
             torrent_name: None,
             size_bytes: None,
             paused,
-            skipped: false,
             played: false,
         }
     }
@@ -992,16 +984,5 @@ mod tests {
         };
         let held = paused_groups(&queue);
         assert_eq!(held, HashSet::from(["aaaa".to_owned()]));
-    }
-
-    #[test]
-    fn the_users_pause_shows_before_skipping() {
-        let mut skipped = item("a", None, true);
-        skipped.skipped = true;
-        let queue = Queue {
-            items: vec![skipped],
-            ..Queue::default()
-        };
-        assert_eq!(idle_snapshot(&queue).items[0].state, ItemState::Paused);
     }
 }

@@ -15,7 +15,7 @@
 //!   Once the buffer is comfortable, nothing is limited, which also measures the link's real
 //!   capacity.
 //! - **Order.** The item after the current one ranks first, so it plays at once; then the rest
-//!   of the queue after the current item; items before it (skipped or played) last. Within
+//!   of the queue after the current item; items before it (played or passed over) last. Within
 //!   that, queue order: only the user reorders the queue.
 //! - **No churn.** With a maximum, an item that started keeps downloading for [`MIN_RUN`]
 //!   unless playback needs the bandwidth, so speeds are measured over a meaningful time.
@@ -181,8 +181,8 @@ pub struct Candidate {
     pub position: usize,
     /// The item after the one being watched: always first.
     pub up_next: bool,
-    /// Before the current item in the queue (skipped or played): last.
-    pub skipped: bool,
+    /// Before the current item in the queue (played or passed over): last.
+    pub behind: bool,
 }
 
 /// How playback is doing, which decides how much the background may take.
@@ -370,7 +370,7 @@ fn next_pressure(previous: Pressure, foreground: Option<Foreground>) -> Pressure
 /// before it; within each, in queue order.
 fn rank(candidates: &[Candidate]) -> Vec<&Candidate> {
     let mut ranked: Vec<&Candidate> = candidates.iter().collect();
-    ranked.sort_by_key(|c| (!c.up_next, c.skipped, c.position));
+    ranked.sort_by_key(|c| (!c.up_next, c.behind, c.position));
     ranked
 }
 
@@ -388,7 +388,7 @@ mod tests {
             group: group.into(),
             position,
             up_next: false,
-            skipped: false,
+            behind: false,
         }
     }
 
@@ -434,16 +434,16 @@ mod tests {
     }
 
     #[test]
-    fn in_order_puts_up_next_first_and_skipped_items_last() {
+    fn in_order_puts_up_next_first_and_items_behind_last() {
         let mut c = vec![
-            candidate("skipped", "s", 0),
+            candidate("behind", "s", 0),
             candidate("a", "x", 2),
             candidate("b", "y", 3),
             candidate("next", "z", 4),
         ];
-        c[0].skipped = true;
+        c[0].behind = true;
         c[3].up_next = true;
-        assert_eq!(ids(&rank(&c)), ["next", "a", "b", "skipped"]);
+        assert_eq!(ids(&rank(&c)), ["next", "a", "b", "behind"]);
     }
 
     #[test]

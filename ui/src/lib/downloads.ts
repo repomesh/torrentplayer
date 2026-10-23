@@ -100,12 +100,6 @@ export function describeDownload(d: ItemDownload): string | null {
         parts.push(pct);
       }
       break;
-    case 'skipped':
-      // The row already says Skipped; say only what is kept.
-      if (pct !== null && d.downloaded > 0) {
-        parts.push(`${pct} downloaded`);
-      }
-      break;
     case 'paused':
       // Only the user pauses; nothing resumes it but the user.
       parts.push('Paused');
@@ -155,7 +149,7 @@ export function isMoving(d: ItemDownload): boolean {
 
 /**
  * Whether the pause button applies: anything but the video being watched. Pausing stops both
- * downloading and sharing, so it applies to finished and skipped items too.
+ * downloading and sharing, so it applies to finished items too.
  */
 export function canPause(d: ItemDownload | undefined): boolean {
   return d?.state !== 'watching';

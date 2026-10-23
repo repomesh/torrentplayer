@@ -33,14 +33,11 @@ torrentName: string | null,
  */
 sizeBytes: number | null, 
 /**
- * Not downloaded in the background until resumed (playing it still works).
+ * Paused by the user: not downloaded, and its torrent not uploaded once all of the
+ * torrent's items are paused, until resumed (playing it still works). Items saved as
+ * `skipped` (removed in 0.3.1) load as paused.
  */
 paused: boolean, 
-/**
- * Kept in the queue but skipped: not played automatically and not downloaded in the
- * background (unticked in the queue). Playing it directly still works.
- */
-skipped: boolean, 
 /**
  * The video reached its end during playback. Kept separately from the cursor so jumping
  * ahead does not make every item before it look watched.

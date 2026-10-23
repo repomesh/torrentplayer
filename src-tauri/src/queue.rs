@@ -260,7 +260,6 @@ mod tests {
                 torrent_name: None,
                 size_bytes: None,
                 paused: true,
-                skipped: true,
                 played: false,
             }],
             current: Some("a".into()),
