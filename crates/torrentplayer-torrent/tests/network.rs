@@ -371,6 +371,135 @@ async fn turning_protection_on_replaces_the_librqbit_session() {
     net.shutdown();
 }
 
+/// A peer that answers the BitTorrent handshake and then sends only keep-alives, so fetching
+/// metadata from it never ends. Counts the connections made to it and those closed since.
+async fn stalling_peer() -> (SocketAddr, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let opened = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(AtomicUsize::new(0));
+    let (o, c) = (Arc::clone(&opened), Arc::clone(&closed));
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            o.fetch_add(1, Ordering::SeqCst);
+            let closed = Arc::clone(&c);
+            tokio::spawn(async move {
+                let mut handshake = [0u8; 68];
+                if stream.read_exact(&mut handshake).await.is_ok() {
+                    // Same protocol and info hash, the extension protocol on, our own peer id.
+                    handshake[25] |= 0x10;
+                    handshake[48..].copy_from_slice(b"-ST0001-stalling0000");
+                    let mut buf = [0u8; 4096];
+                    if stream.write_all(&handshake).await.is_ok() {
+                        loop {
+                            tokio::select! {
+                                read = stream.read(&mut buf) => {
+                                    if matches!(read, Ok(0) | Err(_)) {
+                                        break;
+                                    }
+                                }
+                                () = tokio::time::sleep(Duration::from_millis(500)) => {
+                                    if stream.write_all(&[0, 0, 0, 0]).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                closed.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+    });
+    (addr, opened, closed)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn turning_protection_on_ends_a_metadata_fetch_in_flight() {
+    // Through librqbit for the whole torrent, and through librqbit for metadata only.
+    for choice in [EngineChoice::Rqbit, EngineChoice::Auto] {
+        let (peer, opened, closed) = stalling_peer().await;
+        let proxy = TestProxy::start(Some(("torrentplayer-test", "hunter2")))
+            .await
+            .unwrap();
+        let net = Network::start(NetworkConfig::default(), options())
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let engine = Arc::new(
+            StreamEngine::start_with_network(
+                StreamEngineConfig {
+                    download_dir: dir.path().to_path_buf(),
+                    choice,
+                    public_discovery: false,
+                    download_limit_bps: None,
+                    upload_limit_bps: None,
+                    peer_limit: 40,
+                    dht_state_dir: None,
+                },
+                Some(net.clone()),
+            )
+            .await
+            .unwrap(),
+        );
+        let magnet = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=lecture";
+        let adding = tokio::spawn({
+            let engine = Arc::clone(&engine);
+            async move {
+                engine
+                    .add_with_peers(TorrentSource::parse_link(magnet).unwrap(), vec![peer])
+                    .await
+            }
+        });
+        // librqbit is asking the peer for the metadata, directly.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while opened.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("librqbit never connected to the peer");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(
+            !adding.is_finished(),
+            "{choice:?}: the peer never sends the metadata"
+        );
+
+        // The switch ends the fetch before the mode changes, and closes its connection.
+        let started = std::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            engine.apply_network(through(&proxy)),
+        )
+        .await
+        .expect("the switch waited for the metadata fetch")
+        .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(5), "{choice:?}");
+        let result = tokio::time::timeout(Duration::from_secs(1), adding)
+            .await
+            .expect("the add was still running after the switch")
+            .unwrap();
+        assert!(
+            matches!(result, Err(EngineError::Unsupported(_))),
+            "{choice:?}: {result:?}"
+        );
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while closed.load(Ordering::SeqCst) < opened.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the connection to the peer stayed open");
+
+        // Nothing tries again, directly or otherwise.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(opened.load(Ordering::SeqCst), 1, "{choice:?}");
+        assert!(proxy.connections().is_empty(), "{choice:?}");
+        engine.shutdown().await;
+        net.shutdown();
+    }
+}
+
 /// Whether anything accepts a TCP connection on `127.0.0.1:port`.
 async fn accepts_on_loopback(port: u16) -> bool {
     tokio::time::timeout(

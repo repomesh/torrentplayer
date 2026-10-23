@@ -21,6 +21,8 @@ use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, ConnectionOptions, DhtSessionConfig,
     ListenerOptions, ManagedTorrent, Session, SessionOptions, TorrentStatsState,
 };
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use torrentplayer_net::{ModeKind, Network};
 use torrentplayer_prioritize::{FileSpan, PieceGeometry};
 use torrentplayer_stream::{MediaReader, MediaSource};
@@ -116,6 +118,10 @@ pub struct Resolved {
 /// Why a protected session refuses `.torrent` files and links (see `Engine::session_source`).
 const PROTECTED_TORRENT_FILE: &str = "While a VPN or proxy mode is on, .torrent files open in \
      TorrentPlayer's engine only. Set the torrent engine to Automatic.";
+
+/// Why an operation ended early: its session was stopped, usually for a network mode change.
+const SESSION_STOPPED: &str = "The network settings changed while this torrent was opening. \
+     Try again.";
 
 /// Why a magnet link cannot be resolved in a protected mode: no peers were found through the
 /// DHT and UDP trackers of the mode, and the link lists no HTTP tracker. The hint names what
@@ -275,6 +281,13 @@ struct Inner {
     config: EngineConfig,
     /// Whether the session was started for a protected network mode.
     protected: bool,
+    /// Cancelled by [`Engine::shutdown`]: librqbit operations in flight end at once.
+    /// librqbit's own `Session::stop` does not end them, as they run in the caller's task (a
+    /// magnet link's metadata fetch connects to peers for up to `metadata_timeout`).
+    stopping: CancellationToken,
+    /// Held shared by every librqbit operation, and exclusively by [`Engine::shutdown`], which
+    /// so waits until the operations in flight have ended.
+    operations: RwLock<()>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -320,8 +333,28 @@ impl Engine {
                 http,
                 config,
                 protected,
+                stopping: CancellationToken::new(),
+                operations: RwLock::new(()),
             }),
         })
+    }
+
+    /// Runs a librqbit operation, unless the session is stopping. One in flight when
+    /// [`Engine::shutdown`] starts is dropped at once, closing its connections, and the session
+    /// stops only after that. Operations must not nest: shutdown waits between them.
+    async fn operation<T>(
+        &self,
+        op: impl Future<Output = Result<T, EngineError>>,
+    ) -> Result<T, EngineError> {
+        let _running = self.inner.operations.read().await;
+        if self.inner.stopping.is_cancelled() {
+            return Err(EngineError::Unsupported(SESSION_STOPPED));
+        }
+        tokio::select! {
+            biased;
+            () = self.inner.stopping.cancelled() => Err(EngineError::Unsupported(SESSION_STOPPED)),
+            result = op => result,
+        }
     }
 
     /// A librqbit session for `config`. With `persist_dht`, the DHT's routing tables and port
@@ -475,6 +508,14 @@ impl Engine {
         source: TorrentSource,
         peers: Vec<SocketAddr>,
     ) -> Result<TorrentInfo, EngineError> {
+        self.operation(self.add_now(source, peers)).await
+    }
+
+    async fn add_now(
+        &self,
+        source: TorrentSource,
+        peers: Vec<SocketAddr>,
+    ) -> Result<TorrentInfo, EngineError> {
         let session = &self.inner.session;
         let first = self.session_source(source, !peers.is_empty()).await?;
 
@@ -527,15 +568,18 @@ impl Engine {
         source: TorrentSource,
         peers: Vec<SocketAddr>,
     ) -> Result<Option<Resolved>, EngineError> {
-        let first = self.session_source(source, !peers.is_empty()).await?;
-        let AddTorrentResponse::ListOnly(listed) = self.list_only(first, peers).await? else {
-            return Ok(None);
-        };
-        validate_metadata(&listed.info)?;
-        Ok(Some(Resolved {
-            torrent_bytes: listed.torrent_bytes,
-            seen_peers: listed.seen_peers,
-        }))
+        self.operation(async {
+            let first = self.session_source(source, !peers.is_empty()).await?;
+            let AddTorrentResponse::ListOnly(listed) = self.list_only(first, peers).await? else {
+                return Ok(None);
+            };
+            validate_metadata(&listed.info)?;
+            Ok(Some(Resolved {
+                torrent_bytes: listed.torrent_bytes,
+                seen_peers: listed.seen_peers,
+            }))
+        })
+        .await
     }
 
     /// Fetches a torrent's metadata (from peers, for a magnet link) without adding it.
@@ -650,24 +694,27 @@ impl Engine {
     ///
     /// Returns an error if the torrent or file is unknown or librqbit fails.
     pub async fn select_file(&self, id: TorrentId, file: usize) -> Result<(), EngineError> {
-        let handle = self.handle(id)?;
-        if !self.info(id)?.files.iter().any(|f| f.index == file) {
-            return Err(EngineError::UnknownFile);
-        }
-        handle.wait_until_initialized().await.map_err(engine_err)?;
-        let mut selected: HashSet<usize> = handle
-            .only_files()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        if selected.insert(file) {
-            self.inner
-                .session
-                .update_only_files(&handle, &selected)
-                .await
-                .map_err(engine_err)?;
-        }
-        Ok(())
+        self.operation(async {
+            let handle = self.handle(id)?;
+            if !self.info(id)?.files.iter().any(|f| f.index == file) {
+                return Err(EngineError::UnknownFile);
+            }
+            handle.wait_until_initialized().await.map_err(engine_err)?;
+            let mut selected: HashSet<usize> = handle
+                .only_files()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            if selected.insert(file) {
+                self.inner
+                    .session
+                    .update_only_files(&handle, &selected)
+                    .await
+                    .map_err(engine_err)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Removes a file from the set being downloaded. Others are left alone; what is downloaded
@@ -677,21 +724,24 @@ impl Engine {
     ///
     /// Returns an error if the torrent is unknown or librqbit fails.
     pub async fn deselect_file(&self, id: TorrentId, file: usize) -> Result<(), EngineError> {
-        let handle = self.handle(id)?;
-        handle.wait_until_initialized().await.map_err(engine_err)?;
-        let mut selected: HashSet<usize> = handle
-            .only_files()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        if selected.remove(&file) {
-            self.inner
-                .session
-                .update_only_files(&handle, &selected)
-                .await
-                .map_err(engine_err)?;
-        }
-        Ok(())
+        self.operation(async {
+            let handle = self.handle(id)?;
+            handle.wait_until_initialized().await.map_err(engine_err)?;
+            let mut selected: HashSet<usize> = handle
+                .only_files()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            if selected.remove(&file) {
+                self.inner
+                    .session
+                    .update_only_files(&handle, &selected)
+                    .await
+                    .map_err(engine_err)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Changes the session's rate limits (bytes per second; `None` removes one), shared by
@@ -707,16 +757,19 @@ impl Engine {
     ///
     /// Returns an error if the torrent is unknown or librqbit fails.
     pub async fn set_paused(&self, id: TorrentId, paused: bool) -> Result<(), EngineError> {
-        let handle = self.handle(id)?;
-        if handle.is_paused() == paused {
-            return Ok(());
-        }
-        if paused {
-            self.inner.session.pause(&handle).await
-        } else {
-            self.inner.session.unpause(&handle).await
-        }
-        .map_err(engine_err)
+        self.operation(async {
+            let handle = self.handle(id)?;
+            if handle.is_paused() == paused {
+                return Ok(());
+            }
+            if paused {
+                self.inner.session.pause(&handle).await
+            } else {
+                self.inner.session.unpause(&handle).await
+            }
+            .map_err(engine_err)
+        })
+        .await
     }
 
     /// Opens a seekable stream over one file. While open, the engine prioritizes the pieces
@@ -732,7 +785,8 @@ impl Engine {
     ) -> Result<impl MediaReader + use<>, EngineError> {
         // librqbit's `FileStream` is not nameable outside the crate, hence `impl Trait`.
         let handle = self.handle(id)?;
-        handle.stream(file).await.map_err(engine_err)
+        self.operation(async { handle.stream(file).await.map_err(engine_err) })
+            .await
     }
 
     /// Which pieces of a torrent are downloaded and verified, indexed by piece.
@@ -789,15 +843,22 @@ impl Engine {
     ///
     /// Returns an error if the torrent is unknown or librqbit fails.
     pub async fn remove(&self, id: TorrentId, delete_files: bool) -> Result<(), EngineError> {
-        self.inner
-            .session
-            .delete(TorrentIdOrHash::Id(id), delete_files)
-            .await
-            .map_err(engine_err)
+        self.operation(async {
+            self.inner
+                .session
+                .delete(TorrentIdOrHash::Id(id), delete_files)
+                .await
+                .map_err(engine_err)
+        })
+        .await
     }
 
-    /// Stops every torrent and closes connections.
+    /// Stops every torrent and closes connections. Operations in flight (such as fetching a
+    /// magnet link's metadata from peers) end first, with an error; this returns once they
+    /// have, so no connection of theirs outlives it. Later operations fail at once.
     pub async fn shutdown(&self) {
+        self.inner.stopping.cancel();
+        let _stopped = self.inner.operations.write().await;
         self.inner.session.stop().await;
     }
 

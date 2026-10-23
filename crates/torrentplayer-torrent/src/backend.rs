@@ -552,7 +552,7 @@ impl StreamEngine {
     }
 
     /// Stops librqbit and forgets its torrents, whose ids would otherwise point into the next
-    /// session.
+    /// session. Returns once its operations in flight have ended (see `Engine::shutdown`).
     async fn stop_rqbit(&self, slot: &mut Option<Engine>) {
         let Some(engine) = slot.take() else {
             return;
@@ -570,9 +570,10 @@ impl StreamEngine {
 
     /// Switches the network mode (see [`torrentplayer_net::Network::apply`]). librqbit's DHT, listening
     /// socket, and proxy are fixed when its session starts, so when protection turns on or off,
-    /// librqbit is stopped first (its torrents are dropped) and the next magnet link starts a new
-    /// session; no librqbit traffic is sent under the wrong mode. torrentplayer-swarm follows the change
-    /// by itself.
+    /// librqbit is stopped first (its torrents are dropped, and what it was doing for a caller,
+    /// such as fetching a magnet link's metadata, ends with an error before the mode changes)
+    /// and the next magnet link starts a new session; no librqbit traffic is sent under the
+    /// wrong mode. torrentplayer-swarm follows the change by itself.
     ///
     /// # Errors
     ///

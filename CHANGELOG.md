@@ -52,6 +52,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   engine that opens it. Files with a piece length of 0 or above 64 MiB, no data, or file
   lengths too large to add up are now refused as not a valid `.torrent` file, with the reason,
   before either engine reads them.
+- Switching between Direct and WireGuard or SOCKS5 now stops librqbit's work in progress, such
+  as fetching a magnet link's details from peers, before the new mode takes effect. Before, a
+  fetch already running kept connecting to peers directly after a switch to WireGuard or
+  SOCKS5, outside the tunnel or proxy and the kill switch, for up to two minutes. The torrent
+  being opened fails with a message to try again.
 
 ## [0.3.0] - 2026-10-21
 
