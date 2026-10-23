@@ -45,7 +45,9 @@ pub struct AnnounceRequest {
     pub peer_id: [u8; 20],
     /// Bytes still missing.
     pub left: u64,
-    /// The port announced (TorrentPlayer accepts no connections; trackers want one anyway).
+    /// The port announced: the listening port while incoming connections are accepted, otherwise
+    /// a placeholder (trackers reject port 0), as for HTTP trackers (see
+    /// [`SwarmConfig::announce_port`](crate::SwarmConfig::announce_port)).
     pub port: u16,
     /// Whether this is the first announce (`started`).
     pub started: bool,

@@ -303,6 +303,11 @@ async fn read_all(torrent: &Torrent) -> Vec<u8> {
 
 /// An HTTP tracker that records announce request lines and hands out no peers.
 async fn http_tracker() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    http_tracker_every(60).await
+}
+
+/// [`http_tracker`], asking for an announce every `interval` seconds.
+async fn http_tracker_every(interval: u32) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -325,13 +330,13 @@ async fn http_tracker() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
                     .unwrap_or_default()
                     .to_owned();
                 seen.lock().unwrap().push(line);
-                let body = b"d8:intervali60e5:peers0:e";
+                let body = format!("d8:intervali{interval}e5:peers0:e").into_bytes();
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(head.as_bytes()).await;
-                let _ = stream.write_all(body).await;
+                let _ = stream.write_all(&body).await;
             });
         }
     });
@@ -578,4 +583,54 @@ async fn trackers_on_the_users_own_network_are_contacted_only_when_allowed() {
         );
         swarm.shutdown();
     }
+}
+
+/// Waits until the tracker has seen `at_least` announces.
+async fn wait_for_announces(announces: &Mutex<Vec<String>>, at_least: usize, what: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while announces.lock().unwrap().len() < at_least {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out: {what}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_torrent_stops_announcing_and_announces_again_on_resume() {
+    let (tracker, announces) = http_tracker_every(1).await;
+    let (bytes, _data, _seed_dir) = torrent(vec![format!(
+        "http://127.0.0.1:{}/announce",
+        tracker.port()
+    )])
+    .await;
+    let meta = Metainfo::from_bytes(&bytes).unwrap();
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    let (swarm, _dir) = swarm(&net, 40).await;
+    let torrent = swarm.add(meta, Vec::new()).unwrap();
+
+    // Running, it announces again at the tracker's interval (a second here).
+    wait_for_announces(&announces, 2, "announced twice").await;
+
+    torrent.set_paused(true);
+    // A request already sent may still land.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let paused_at = announces.lock().unwrap().len();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(
+        announces.lock().unwrap().len(),
+        paused_at,
+        "no announce while paused"
+    );
+
+    // Resuming announces at once, as a new start.
+    torrent.set_paused(false);
+    wait_for_announces(&announces, paused_at + 1, "announced after resuming").await;
+    let first = announces.lock().unwrap()[paused_at].clone();
+    assert!(first.contains("event=started"), "{first}");
+
+    swarm.shutdown();
+    net.shutdown();
 }

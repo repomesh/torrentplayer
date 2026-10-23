@@ -610,8 +610,9 @@ impl Torrent {
     }
 
     /// Pauses or resumes the torrent. While paused nothing is requested (outstanding requests
-    /// are cancelled) and no new peers are dialed; connections stay open, so resuming is
-    /// immediate. Readers and the playhead wait until it resumes.
+    /// are cancelled), no new peers are dialed, and trackers are not announced to (resuming
+    /// announces again at once); connections stay open, so resuming is immediate. Readers and
+    /// the playhead wait until it resumes.
     pub fn set_paused(&self, paused: bool) {
         if self.shared.paused.swap(paused, Ordering::Relaxed) == paused {
             return;
@@ -1405,6 +1406,18 @@ impl Shared {
         read
     }
 
+    /// Folds the bytes downloaded and uploaded so far into the smoothed rates.
+    fn update_rates(&self, now: Instant) {
+        self.smoothed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .update(now, self.downloaded.load(Ordering::Relaxed));
+        self.upload_smoothed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .update(now, self.uploaded.load(Ordering::Relaxed));
+    }
+
     /// Tells every peer that `piece` is now verified.
     pub(crate) fn announce_have(&self, piece: u32) {
         let keys: Vec<PeerKey> = self
@@ -1643,6 +1656,16 @@ async fn next_policy(rx: &mut Option<watch::Receiver<Policy>>, last: Option<Poli
     }
 }
 
+/// Starts announcing to `trackers` under `policy` (see [`Trackers::start`]), unless the torrent
+/// is paused. Dropping the stream stops the announces.
+fn announce(
+    trackers: Option<&Trackers>,
+    policy: Option<Policy>,
+    paused: bool,
+) -> Option<BoxStream<'static, SocketAddr>> {
+    trackers.filter(|_| !paused)?.start(policy)
+}
+
 /// The per-torrent driver: re-plans, refills queues, handles timeouts, and connects peers.
 async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
     // Every TICK, or IDLE_TICK while there is nothing to download.
@@ -1650,7 +1673,8 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
     let mut ticks: u32 = 0;
     let mut policy_rx = shared.cfg.network.as_ref().map(Network::subscribe);
     let mut policy = policy_rx.as_mut().map(|rx| *rx.borrow_and_update());
-    let mut announces = trackers.as_ref().and_then(|t| t.start(policy));
+    let mut paused = shared.paused.load(Ordering::Relaxed);
+    let mut announces = announce(trackers.as_ref(), policy, paused);
     loop {
         let mut ticked = false;
         tokio::select! {
@@ -1673,7 +1697,7 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
                     let resumed = now.traffic_allowed
                         && policy.is_some_and(|p| !p.traffic_allowed || p.epoch != now.epoch);
                     // Restart (or stop) announcing so tracker traffic follows the new mode.
-                    announces = trackers.as_ref().and_then(|t| t.start(Some(now)));
+                    announces = announce(trackers.as_ref(), Some(now), paused);
                     if resumed {
                         shared.requeue_known();
                     }
@@ -1682,17 +1706,15 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             }
         }
 
+        // A paused torrent neither downloads nor uploads, so it stops announcing; resuming
+        // announces it again (`started`) at once.
+        if shared.paused.load(Ordering::Relaxed) != paused {
+            paused = !paused;
+            announces = announce(trackers.as_ref(), policy, paused);
+        }
+
         let now = Instant::now();
-        shared
-            .smoothed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .update(now, shared.downloaded.load(Ordering::Relaxed));
-        shared
-            .upload_smoothed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .update(now, shared.uploaded.load(Ordering::Relaxed));
+        shared.update_rates(now);
         let seek = shared.seek_pending.swap(false, Ordering::Relaxed);
         let refresh = shared.refresh_background.swap(false, Ordering::Relaxed)
             || ticks.is_multiple_of(BACKGROUND_REFRESH_TICKS);
