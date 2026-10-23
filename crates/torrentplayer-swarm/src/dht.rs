@@ -129,6 +129,8 @@ impl DhtNode {
             routing_table,
             routing_table_v6,
             cancellation_token: Some(token.clone()),
+            // Read-only (BEP 43) until a lookup finds the engine listening: see `discover`.
+            read_only: true,
             ..DhtConfig::default()
         };
         // The node keeps the id its saved tables were built around.
@@ -369,6 +371,8 @@ const SATISFIED_EVERY: Duration = Duration::from_secs(5 * 60);
 /// The wait between lookups of a torrent with nothing to download that announces itself:
 /// DHT nodes keep an announced peer for about 30 minutes.
 const REANNOUNCE_EVERY: Duration = Duration::from_secs(15 * 60);
+/// The wait after a lookup that found no address, while the torrent has something to download.
+const EMPTY_RETRY: Duration = Duration::from_secs(2);
 /// How often a waiting torrent's demand is checked, so a resumed or newly played torrent
 /// looks up within this time rather than after the wait it had before.
 const DEMAND_POLL: Duration = Duration::from_secs(5);
@@ -378,13 +382,23 @@ const SEEN_LIMIT: usize = 8192;
 /// How long after a lookup ended the next one is due, or `None` until the demand changes:
 /// never while paused, nor while there is nothing to download unless the torrent announces
 /// itself; every [`WANTING_EVERY`] while it wants peers, doubled for each of `misses` (the
-/// lookups since one last found new peers); every [`SATISFIED_EVERY`] otherwise.
-fn next_lookup(demand: Demand, announcing: bool, misses: u32) -> Option<Duration> {
+/// lookups since one last found new peers); every [`SATISFIED_EVERY`] otherwise. A torrent with
+/// something to download whose last `empty` lookups found no address at all (usually a node
+/// still bootstrapping, whose first contacts did not answer) tries again after
+/// [`EMPTY_RETRY`], doubled for each.
+fn next_lookup(demand: Demand, announcing: bool, misses: u32, empty: u32) -> Option<Duration> {
     if demand.paused {
         return None;
     }
     if demand.idle {
         return announcing.then_some(REANNOUNCE_EVERY);
+    }
+    if empty > 0 {
+        return Some(
+            EMPTY_RETRY
+                .saturating_mul(1 << (empty - 1).min(8))
+                .min(SATISFIED_EVERY),
+        );
     }
     if !demand.wanting() {
         return Some(SATISFIED_EVERY);
@@ -457,6 +471,9 @@ pub(crate) async fn discover(
             let status = network.status();
             announce_port(demand.listen_port, status.mode, &status.incoming)
         });
+        // Not announcing means nobody can connect to us: say so (BEP 43), so other nodes keep
+        // us out of their routing tables and do not query us.
+        dht.set_read_only(announce.is_none());
         let started = Instant::now();
         let lookup = Lookup {
             dht: &dht,
@@ -478,7 +495,7 @@ pub(crate) async fn discover(
             finished,
             "DHT lookup"
         );
-        pace.lookup_ended(finished, announce.is_some(), new);
+        pace.lookup_ended(finished, announce.is_some(), found, new);
     }
 }
 
@@ -488,6 +505,8 @@ struct Pace {
     last: Option<(Instant, bool)>,
     /// Lookups since one found [`NEW_PEERS`] new addresses.
     misses: u32,
+    /// Lookups in a row that found no address.
+    empty: u32,
     was_wanting: bool,
 }
 
@@ -496,6 +515,7 @@ impl Default for Pace {
         Self {
             last: None,
             misses: 0,
+            empty: 0,
             was_wanting: true,
         }
     }
@@ -527,7 +547,7 @@ impl Pace {
             self.was_wanting = wanting;
             let due = match self.last {
                 None => !demand.paused,
-                Some((ended, announced)) => next_lookup(demand, announced, self.misses)
+                Some((ended, announced)) => next_lookup(demand, announced, self.misses, self.empty)
                     .is_some_and(|wait| ended.elapsed() >= wait),
             };
             if due {
@@ -545,10 +565,11 @@ impl Pace {
 
     /// Records a lookup that ended by itself (`finished`), or was stopped by a mode change or
     /// a stopped node, after which the next node looks up at once.
-    fn lookup_ended(&mut self, finished: bool, announced: bool, new: usize) {
+    fn lookup_ended(&mut self, finished: bool, announced: bool, found: usize, new: usize) {
         if finished {
             self.last = Some((Instant::now(), announced));
             self.misses = if new >= NEW_PEERS { 0 } else { self.misses + 1 };
+            self.empty = if found == 0 { self.empty + 1 } else { 0 };
         } else {
             self.last = None;
         }
@@ -751,40 +772,52 @@ mod tests {
     #[test]
     fn looks_up_often_only_while_peers_are_wanted() {
         let few = demand(3);
-        assert_eq!(next_lookup(few, false, 0), Some(WANTING_EVERY));
-        assert_eq!(next_lookup(few, false, 1), Some(WANTING_EVERY * 2));
-        assert_eq!(next_lookup(few, false, 2), Some(WANTING_EVERY * 4));
+        assert_eq!(next_lookup(few, false, 0, 0), Some(WANTING_EVERY));
+        assert_eq!(next_lookup(few, false, 1, 0), Some(WANTING_EVERY * 2));
+        assert_eq!(next_lookup(few, false, 2, 0), Some(WANTING_EVERY * 4));
         assert_eq!(
-            next_lookup(few, false, 30),
+            next_lookup(few, false, 30, 0),
             Some(SATISFIED_EVERY),
             "lookups that find nothing new back off to the satisfied pace"
         );
         assert_eq!(
-            next_lookup(demand(20), false, 0),
+            next_lookup(demand(20), false, 0, 0),
             Some(SATISFIED_EVERY),
             "half the peer limit is enough"
         );
-        assert_eq!(next_lookup(demand(19), false, 0), Some(WANTING_EVERY));
+        assert_eq!(next_lookup(demand(19), false, 0, 0), Some(WANTING_EVERY));
 
         let paused = Demand {
             paused: true,
             ..few
         };
-        assert_eq!(next_lookup(paused, false, 0), None, "never while paused");
-        assert_eq!(next_lookup(paused, true, 0), None, "not even to announce");
+        assert_eq!(next_lookup(paused, false, 0, 0), None, "never while paused");
+        assert_eq!(
+            next_lookup(paused, true, 0, 0),
+            None,
+            "not even to announce"
+        );
 
         let idle = Demand { idle: true, ..few };
         assert_eq!(
-            next_lookup(idle, false, 0),
+            next_lookup(idle, false, 0, 0),
             None,
             "nothing to download: no lookups"
         );
         assert_eq!(
-            next_lookup(idle, true, 0),
+            next_lookup(idle, true, 0, 0),
             Some(REANNOUNCE_EVERY),
             "an announcing torrent stays announced"
         );
         assert!(REANNOUNCE_EVERY < Duration::from_secs(30 * 60));
+
+        // Lookups that found nothing at all are retried soon, then less and less often.
+        assert_eq!(next_lookup(few, false, 1, 1), Some(EMPTY_RETRY));
+        assert_eq!(next_lookup(few, false, 2, 2), Some(EMPTY_RETRY * 2));
+        assert_eq!(next_lookup(demand(30), false, 3, 3), Some(EMPTY_RETRY * 4));
+        assert_eq!(next_lookup(few, false, 40, 40), Some(SATISFIED_EVERY));
+        assert_eq!(next_lookup(paused, false, 1, 1), None);
+        assert_eq!(next_lookup(idle, false, 1, 1), None);
     }
 
     #[test]
@@ -857,13 +890,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_lookup_announces_the_listening_port_to_close_nodes() {
+    async fn a_lookup_announces_the_listening_port_to_close_nodes_unless_read_only() {
         // A responder whose id is the info hash itself (as close as a node can be), giving a
-        // token with every reply and recording the announcements it gets.
+        // token with every reply and recording the queries it gets: method, read-only flag
+        // (BEP 43), and for announcements the port and `implied_port`.
         const ID: &[u8; 20] = b"ABCDEFGHIJKLMNOPQRST";
         let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let contact = socket.local_addr().unwrap();
-        let (tx, mut announced) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut queries) = tokio::sync::mpsc::unbounded_channel();
         let responder = tokio::spawn(async move {
             let mut buf = [0; 1500];
             while let Ok((len, from)) = socket.recv_from(&mut buf).await {
@@ -876,11 +910,13 @@ mod tests {
                         .and_then(|a| a.get(key))
                         .and_then(crate::bencode::Value::as_int)
                 };
-                if request.get(b"q").and_then(crate::bencode::Value::as_bytes)
-                    == Some(&b"announce_peer"[..])
-                {
-                    let _ = tx.send((field(b"port"), field(b"implied_port")));
-                }
+                let method = request
+                    .get(b"q")
+                    .and_then(crate::bencode::Value::as_bytes)
+                    .unwrap_or_default()
+                    .to_vec();
+                let read_only = request.get(b"ro").and_then(crate::bencode::Value::as_int);
+                let _ = tx.send((method, read_only, field(b"port"), field(b"implied_port")));
                 let Some(transaction) = request.get(b"t").and_then(crate::bencode::Value::as_bytes)
                 else {
                     continue;
@@ -900,15 +936,46 @@ mod tests {
         });
         let node = local_node(vec![contact.to_string()]).await;
         knows_a_node(&node).await;
+        let mut drain = || {
+            let mut seen = Vec::new();
+            while let Ok(query) = queries.try_recv() {
+                seen.push(query);
+            }
+            seen
+        };
+
+        // Unreachable: no announcement, and every query says it is read-only.
+        drain();
+        node.set_read_only(true);
+        let mut lookup = node.get_peers_once(Id20::new(*ID), None);
+        while lookup.next().await.is_some() {}
+        let seen = drain();
+        assert!(
+            seen.iter().any(|(method, ..)| method == b"get_peers"),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .all(|(method, read_only, ..)| method != b"announce_peer" && *read_only == Some(1)),
+            "{seen:?}"
+        );
+
+        // Listening: announced with the listening port, and not read-only.
+        node.set_read_only(false);
         let mut lookup = node.get_peers_once(Id20::new(*ID), Some(51413));
         while lookup.next().await.is_some() {}
-        let announcement = tokio::time::timeout(Duration::from_secs(5), announced.recv())
-            .await
-            .expect("the close node gets an announcement");
-        assert_eq!(
-            announcement,
-            Some((Some(51413), Some(0))),
-            "the given port, not the DHT's own"
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let seen = drain();
+        assert!(
+            seen.iter().all(|(_, read_only, ..)| read_only.is_none()),
+            "{seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|(method, _, port, implied)| method == b"announce_peer"
+                    && *port == Some(51413)
+                    && *implied == Some(0)),
+            "the given port, not the DHT's own: {seen:?}"
         );
         node.cancellation_token().cancel();
         responder.abort();

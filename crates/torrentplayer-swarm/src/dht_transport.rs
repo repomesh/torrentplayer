@@ -18,6 +18,9 @@ pub(crate) struct ScopedDht {
     network: Network,
     local: SocketAddr,
     epoch: u64,
+    /// Where an IPv6 datagram is received while IPv4 is awaited into the caller's buffer;
+    /// kept so that each datagram does not allocate one.
+    v6_buffer: tokio::sync::Mutex<Vec<u8>>,
 }
 
 impl ScopedDht {
@@ -49,6 +52,7 @@ impl ScopedDht {
             network,
             local,
             epoch: policy.epoch,
+            v6_buffer: tokio::sync::Mutex::new(Vec::new()),
         }))
     }
 
@@ -99,9 +103,10 @@ impl DhtTransport for ScopedDht {
         bytes: &'a mut [u8],
     ) -> BoxFuture<'a, io::Result<(usize, SocketAddr)>> {
         Box::pin(async move {
-            let mut v6_bytes = vec![0; bytes.len()];
             loop {
                 let received = if let (Some(v4), Some(v6)) = (&self.v4, &self.v6) {
+                    let mut v6_bytes = self.v6_buffer.lock().await;
+                    v6_bytes.resize(bytes.len(), 0);
                     tokio::select! {
                         result = v4.recv_from(bytes) => result?,
                         result = v6.recv_from(&mut v6_bytes) => {
@@ -243,6 +248,7 @@ mod tests {
             v6: Some(v6),
             network: network.clone(),
             epoch: network.policy().epoch,
+            v6_buffer: tokio::sync::Mutex::new(Vec::new()),
         };
         transport.send_to(b"v6", destination).await.unwrap();
         let mut bytes = [0; 32];

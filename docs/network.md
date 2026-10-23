@@ -73,7 +73,10 @@ the torrent downloads with fewer live peers than half its peer limit (doubling, 
 enough, and never while it is paused or has nothing to download, except every 15 minutes to
 renew its announcement while it announces itself (see
 [Incoming peer connections](#incoming-peer-connections)). A paused torrent that resumes, or one
-that starts playing, looks up within 5 seconds.
+that starts playing, looks up within 5 seconds. A lookup that found no address at all (usually
+a node still bootstrapping, whose first contacts did not answer) is retried after 2 seconds,
+doubling. Unless it announces itself, the node marks its queries read-only (BEP 43), so other
+nodes do not add it to their routing tables and send it no queries it cannot receive.
 
 In SOCKS5 mode, turning off "Send tracker requests through the proxy" turns trackers off
 entirely for that mode; trackers are never contacted directly.
@@ -122,7 +125,8 @@ epochs as outgoing connections.
   mode: never in SOCKS5 mode, and in WireGuard mode only while the tunnel's listener is open.
   DHT nodes record the address they see, the VPN server's in WireGuard mode, so as with
   trackers the announcement brings peers only if the provider forwards the port. With incoming
-  peers off, TorrentPlayer announces nothing to the DHT.
+  peers off, TorrentPlayer announces nothing to the DHT, and its DHT queries say it is
+  read-only (BEP 43).
   librqbit listens itself only when it is the engine for every torrent (`advanced.engine` =
   `rqbit`) and only in direct mode, TCP only, on `[::]` (dual stack); its listener cannot be
   moved into a tunnel, so it never listens in a protected mode. With the automatic

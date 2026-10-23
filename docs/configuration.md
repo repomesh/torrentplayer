@@ -248,7 +248,8 @@ forward the port on your router or turn on UPnP), and only inside the tunnel in 
 forwards it. A SOCKS5 proxy cannot accept incoming connections, so TorrentPlayer does not
 listen at all in that mode. Settings shows whether it is listening. While it listens,
 TorrentPlayer's engine also announces the port in the DHT (never in SOCKS5 mode); while
-incoming peers are off, it announces nothing there. See
+incoming peers are off, it announces nothing there and tells other DHT nodes it cannot be
+reached (read-only, BEP 43). See
 [Incoming peer connections](network.md#incoming-peer-connections).
 
 **VPN recommendation:** in Direct mode, Settings → Network & VPN, a **VPN recommended** button

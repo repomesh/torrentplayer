@@ -550,3 +550,38 @@ peers one lookup every 5 minutes (about 3 per second), and one that wants peers 
 to 5 minutes. Start-up times above include other 0.3.1 changes to the engine; the first-peer
 and metadata times depend on the DHT alone. The Sintel magnet's start-up is noisy because its
 swarm is small (about 10 live peers).
+
+**DHT A/B, one change at a time.** Each change was switched by a temporary environment variable
+in one build, and the two behaviours alternated (A, B, A, B, ...) on the public DHT, so drift in
+the swarm or the time of day hits both alike. A small program added the torrent to
+torrentplayer-swarm (DHT only: no trackers, no web seeds, 0.5 MiB/s, its largest file selected)
+and sampled its statistics; "first" is the first live peer in ms, "live" and "seen" the peers at
+10 s and 60 s. Values are listed per run, A first.
+
+| Change (A → B)                                                               | Torrent             | First live peer, ms                                         | Live at 10 s / 60 s                       | Seen at 60 s                  | MiB in 60 s                         |
+| ---------------------------------------------------------------------------- | ------------------- | ----------------------------------------------------------- | ----------------------------------------- | ----------------------------- | ----------------------------------- |
+| Endless lookup → paced single lookups                                        | Sintel              | 2451, 1838, 3653 → 1830, 1836, 2456                         | 10/31, 12/23, 14/20 → 12/26, 11/24, 8/23  | 418, 388, 375 → 387, 394, 361 | 26.4, 26.6, 26.3 → 27.7, 27.3, 26.8 |
+| Endless lookup → paced single lookups                                        | Ubuntu ISO          | 1831, 1642, 39379 → 1221, 1427, 1643                        | 35/40, 27/38, 0/40 → 32/40, 31/40, 28/39  | 379, 293, 337 → 352, 358, 327 | 22.8, 27.8, 8.2 → 26.0, 28.2, 25.5  |
+| Read-write → read-only (BEP 43), 9 runs each, median                         | Sintel              | 3049 → 3273 (one A run 20388)                               | seen at 10 s: 279 → 256                   | –                             | –                                   |
+| Read-write → read-only (BEP 43), 9 runs each, median                         | Ubuntu ISO          | 1032 → 1021 (one A run 17719)                               | seen at 10 s: 385 → 402                   | –                             | –                                   |
+| Reply timeout 10 s → 5 s (rejected)                                          | Sintel              | 1218, 3675, 2649 → 3061, 4069, 3659                         | 15/30, 11/27, 12/22 → 11/28, 13/25, 9/20  | 397, 474, 374 → 410, 375, 321 | 25.7, 26.3, 27.3 → 26.6, 26.3, 27.2 |
+| Reply timeout 10 s → 5 s (rejected)                                          | Ubuntu ISO          | 1228, 1020, 1427 → 815, 2031, 1630                          | 29/40, 28/40, 26/40 → 31/38, 30/40, 34/40 | 388, 416, 439 → 401, 391, 415 | 26.5, 26.2, 27.8 → 27.2, 26.0, 27.8 |
+| Roots: any known node → answered nodes only (rejected), 10 runs each, median | Sintel / Ubuntu ISO | 3266 → 3157 (one B run found no peer in 15 s) / 1120 → 1428 | –                                         | –                             | –                                   |
+
+The vendored DHT's double query, measured with a standalone node (the endless lookup in both
+arms, Ubuntu ISO info hash, three alternating rounds): the first peer of a cold lookup took
+1258, 1830, 2917 ms sending each query twice and 1404, 1446, 1308 ms sending it once; 2 s after
+the start the lookup had found 3, 101, 1 peers against 353, 361, 223; it sent 1339, 1222, 1606
+queries in 55 s against 617, 801, 844, and found 323, 393, 366 unique peers against 384, 419, 360.
+
+Trackerless Sintel magnet through WireGuard (seven alternating runs each, swarm engine):
+handing the metadata fetch the first 20 DHT peers fetched the metadata in 1 run of 7 (the
+others failed with "input address stream exhausted" or found no peer); up to 200 (118–200 in
+these runs) fetched it in 6 of 7, in 2.6–12.3 s.
+
+Incoming peers with UPnP in Direct mode on the development machine (Ubuntu ISO, three
+alternating runs, incoming off → on): the first live peer at 2048, 1229, 2451 → 1014, 1630,
+1028 ms, live peers at 60 s 40, 39, 39 → 40, 40, 38, seen 359, 334, 369 → 342, 367, 352, and
+0.41, 0.41, 0.42 → 0.47, 0.44, 0.40 MiB/s. UPnP discovery found no gateway ("discovered 0
+endpoints") in every run, and no peer connected in (no inbound connection at 50 s), so the
+announcement could not help there; the differences are noise.
