@@ -567,9 +567,12 @@ the magnet link, as [`prefetch_torrents`](#prefetch_torrents) does), which start
 
 Opens an indexer's page (a result's `detailsUrl`) in the system browser. Only http(s) links
 with a host name, no user name or password, at most 2 KiB, and not on this computer or the local
-network (`localhost`, `.local`, loopback, private, and link-local addresses) are opened; the
-link is handed to the system's own handler as one argument (`rundll32 url.dll` on Windows,
-`open` on macOS, `xdg-open` on Linux), never through a shell, and is not logged.
+network (`localhost`, `.local`, and every address `torrentplayer_net::is_public_ip` rejects:
+loopback, private, link-local, `100.64.0.0/10`, IPv4-mapped IPv6, and other reserved ranges) are
+opened; the link is handed to the system's own handler as one argument (`rundll32 url.dll` on
+Windows, `open` on macOS, `xdg-open` on Linux), never through a shell, and is not logged. The
+browser does not use TorrentPlayer's network mode, so in the SOCKS5 and WireGuard modes the
+result details say the page opens outside the proxy or tunnel.
 
 |            |                                                   |
 | ---------- | ------------------------------------------------- |

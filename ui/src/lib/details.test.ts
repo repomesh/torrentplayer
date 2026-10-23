@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import type { FileSummary } from './bindings/FileSummary';
 import {
   LISTED_VIDEOS,
+  browserNote,
   formatDay,
   formatPieceSize,
   healthLabel,
@@ -121,5 +122,18 @@ describe('toggled', () => {
     expect([...one]).toEqual(['a']);
     expect([...toggled(one, 'b')]).toEqual(['a', 'b']);
     expect([...toggled(one, 'a')]).toEqual([]);
+  });
+});
+
+describe('links that open in the browser', () => {
+  it('say they leave the tunnel or proxy only in a protected mode', () => {
+    expect(browserNote('wireGuard')).toBe(
+      "Opens in your browser, outside TorrentPlayer's WireGuard tunnel.",
+    );
+    expect(browserNote('socks5')).toBe(
+      "Opens in your browser, outside TorrentPlayer's SOCKS5 proxy.",
+    );
+    expect(browserNote('direct')).toBeNull();
+    expect(browserNote(null)).toBeNull();
   });
 });

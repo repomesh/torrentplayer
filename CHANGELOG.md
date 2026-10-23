@@ -80,6 +80,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Indexer links from search results no longer open when they point at this computer or a
   private network through an IPv4-mapped IPv6 address, an IPv6 link-local address
   (`fe80::/10`), or the shared `100.64.0.0/10` range; they are checked like peer addresses.
+- In the SOCKS5 and WireGuard modes, a search result's "Open the indexer's page" link now says
+  that the page opens in your browser, outside TorrentPlayer's proxy or tunnel.
 
 ## [0.3.0] - 2026-10-21
 

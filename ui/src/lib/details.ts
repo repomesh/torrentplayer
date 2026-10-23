@@ -3,6 +3,7 @@
 /** Helpers for a search result's details view. Everything here is plain text. */
 
 import type { FileSummary } from './bindings/FileSummary';
+import type { NetworkModeKind } from './bindings/NetworkModeKind';
 import type { QualityDto } from './bindings/QualityDto';
 import type { TorrentDetailsDto } from './bindings/TorrentDetailsDto';
 import { fileName, isPlayable, sortFiles } from './files';
@@ -120,6 +121,22 @@ export function soundVerdict(
   return quality.audioPlays
     ? `${quality.audio}: plays with sound here`
     : `${quality.audio}: no sound in the built-in player`;
+}
+
+/**
+ * The note beside a link that opens in the system browser, in a mode that protects TorrentPlayer's
+ * own traffic: the browser does not go through that tunnel or proxy. Null in Direct mode (or while
+ * the mode is unknown), where nothing changes.
+ */
+export function browserNote(mode: NetworkModeKind | null): string | null {
+  switch (mode) {
+    case 'wireGuard':
+      return "Opens in your browser, outside TorrentPlayer's WireGuard tunnel.";
+    case 'socks5':
+      return "Opens in your browser, outside TorrentPlayer's SOCKS5 proxy.";
+    default:
+      return null;
+  }
 }
 
 /** The search service's swarm verdict in words, or null if unknown. */
