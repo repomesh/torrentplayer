@@ -63,6 +63,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A connection to a host name started in Direct mode can no longer go out directly after you switch
   to a protected mode (or a hold applies) while its name is being resolved; the route is re-checked
   before each address is dialled.
+- In SOCKS5 mode, one failed proxy check no longer closes every connection: a connected proxy must
+  fail two checks in a row (about a second apart) before the kill switch engages, and failed
+  connections to the proxy trigger an extra check at most once per check interval. Providers with
+  connection caps no longer cause a drop-and-reconnect loop; a proxy that is really down still
+  blocks traffic within seconds.
 
 ## [0.3.0] - 2026-10-21
 

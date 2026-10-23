@@ -308,6 +308,8 @@ pub(crate) struct Inner {
     bridge_addr: SocketAddr,
     pub(crate) bridge_token: Secret,
     cancel: CancellationToken,
+    /// When a failed dial last woke the health check (see `wake_after_failed_dial`).
+    last_dial_wake: Mutex<Option<std::time::Instant>>,
     /// Test seam: how long host name lookups through the system resolver take.
     #[cfg(test)]
     pub(crate) resolve_delay: Mutex<Duration>,
@@ -341,6 +343,8 @@ pub(crate) struct State {
     events: VecDeque<NetEvent>,
     /// Incoming peer connections.
     pub(crate) incoming: IncomingState,
+    /// A connected SOCKS5 proxy failed one check, under this generation (see `on_check`).
+    proxy_failed_once: Option<u64>,
 }
 
 impl State {
@@ -466,6 +470,22 @@ impl Inner {
         self.incoming_wake.notify_one();
     }
 
+    /// Wakes the health check after a failed connection to the proxy, at most once per
+    /// [`NetworkOptions::health_interval`]: every failed dial used to, so a burst of them (a
+    /// provider's connection cap) kept the proxy busy with checks. Returns whether it woke it.
+    pub(crate) fn wake_after_failed_dial(&self) -> bool {
+        let mut last = self
+            .last_dial_wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if last.is_some_and(|at| at.elapsed() < self.options.health_interval) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+        self.wake.notify_one();
+        true
+    }
+
     /// Tells [`Network::status_changes`] watchers that the status changed.
     pub(crate) fn status_changed(&self) {
         self.status_seq
@@ -490,6 +510,7 @@ impl Inner {
         }
         st.last_check = Some(SystemTime::now());
         let via = describe(&st.config.mode);
+        let failed_once = st.proxy_failed_once.take() == Some(generation);
         match result {
             Ok(()) => {
                 match &st.conn {
@@ -508,6 +529,19 @@ impl Inner {
                 st.conn = ConnectionState::Connected;
                 self.publish(&st);
                 interval
+            }
+            Err(_)
+                if st.conn == ConnectionState::Connected
+                    && matches!(st.config.mode, NetworkMode::Socks5(_))
+                    && !failed_once =>
+            {
+                // A connected proxy must fail twice in a row before its connections are
+                // closed: one refused or slow check (a provider's connection cap, a busy
+                // proxy) would otherwise drop every connection, and reconnecting them can
+                // hit the cap again. Nothing goes around the proxy meanwhile; its own
+                // connections just fail. WireGuard has its own grace (the reply timeout).
+                st.proxy_failed_once = Some(generation);
+                self.options.retry_interval
             }
             Err(error) => {
                 let reason = error.to_string();
@@ -570,6 +604,7 @@ impl Network {
             connected_since: None,
             events: VecDeque::new(),
             incoming: IncomingState::default(),
+            proxy_failed_once: None,
         };
         let message = format!("Network mode: {}", describe(&st.config.mode));
         st.log(EventLevel::Info, message);
@@ -590,6 +625,7 @@ impl Network {
             bridge_addr,
             bridge_token: token,
             cancel: cancel.clone(),
+            last_dial_wake: Mutex::default(),
             #[cfg(test)]
             resolve_delay: Mutex::default(),
         });
@@ -1028,7 +1064,7 @@ impl Network {
             Ok(s) => s,
             Err(error) => {
                 // Probably the proxy went down: check now rather than at the next interval.
-                self.inner.wake.notify_one();
+                self.inner.wake_after_failed_dial();
                 return Err(NetError::ProxyUnreachable(error));
             }
         };
