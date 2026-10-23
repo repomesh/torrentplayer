@@ -665,7 +665,7 @@ pub(crate) async fn stop_stream(
 pub(crate) fn link_use(
     downloads: State<'_, crate::downloads::DownloadsState>,
 ) -> crate::downloads::LinkUse {
-    crate::downloads::queue_downloads(downloads).link
+    downloads.link()
 }
 
 /// Plain single-line text for the library. Torrent metadata is untrusted and can be much longer

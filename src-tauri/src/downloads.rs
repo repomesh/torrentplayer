@@ -104,6 +104,16 @@ impl DownloadsState {
         &self.inner.cache_gate
     }
 
+    /// The connection totals from the latest snapshot, without copying the items.
+    pub(crate) fn link(&self) -> LinkUse {
+        self.inner
+            .snapshot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .link
+            .clone()
+    }
+
     fn publish(&self, snapshot: DownloadsSnapshot) {
         *self
             .inner
