@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "src-tauri"]
-exclude = ["vendor/librqbit-dht", "vendor/tokio-wireguard"]
+exclude = ["vendor/librqbit-dht", "vendor/librqbit-tracker-comms", "vendor/tokio-wireguard"]
 
 [workspace.package]
 version = "0.3.1"
@@ -125,3 +125,7 @@ strip = "symbols"
 # librqbit's DHT node, vendored for scoped transports and Windows datagram-error handling (see
 # vendor/librqbit-dht/TORRENTPLAYER.md). Used by librqbit and torrentplayer-swarm alike.
 librqbit-dht = { path = "vendor/librqbit-dht" }
+# librqbit's tracker client, vendored so its UDP socket opens on first use rather than with
+# every session (see vendor/librqbit-tracker-comms/TORRENTPLAYER.md). Used by librqbit and
+# torrentplayer-swarm alike.
+librqbit-tracker-comms = { path = "vendor/librqbit-tracker-comms" }
