@@ -39,7 +39,10 @@ makes the policy exhaustively testable.
   directly onto librqbit's seekable file stream with no HTTP overhead.
 - **Loopback HTTP range server:** bound to `127.0.0.1` on a random port, requires a random
   per-session token, and supports HTTP `Range` requests. Used by the fallback `<video>` player
-  and as an alternative libmpv feed.
+  and as an alternative libmpv feed. Connections that have not presented the token are kept
+  apart from the player's (at most 8, closed after 10 seconds or once refused); of the 16
+  connections the player may hold, one that has read and written nothing for 30 seconds (a
+  player paused with a full buffer) is closed only when another connection needs its place.
 
 Both will be measured and the choice recorded in an ADR.
 

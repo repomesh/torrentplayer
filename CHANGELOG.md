@@ -55,6 +55,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the pieces could fail again and again.
 - Peers banned for bad data are now refused when they connect to the listening port again, from
   any port, and are no longer dialed at another port of the same address.
+- Another program on the computer can no longer lock the player out of the loopback stream
+  server by opening connections and sending nothing: connections that have not presented the
+  stream token are kept apart, at most 8 at a time (the oldest is closed for a new one), and are
+  closed after 10 seconds or once refused. A player that stopped reading a response no longer
+  holds its connection forever: after 30 seconds without progress it is closed when another
+  request needs the place. When all 16 places are busy, a request is now answered
+  `503 Service Unavailable` instead of having its connection dropped.
 - A torrent added to TorrentPlayer's engine no longer serves pieces to peers that connect in the
   moment before the app applies the upload setting: uploading is now off until it is turned on.
 
