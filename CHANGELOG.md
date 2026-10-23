@@ -208,12 +208,27 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   files there can come from torrents. FFmpeg is looked for as if no folder were set.
 - A WireGuard tunnel that slept (a laptop suspended) for more than six minutes now tries a new
   handshake when the computer wakes up, instead of closing every connection to start over.
+- A peer that failed a piece's hash check and then re-sent it slowly no longer holds up
+  playback: a much faster peer takes over the piece the player is waiting for, and smart ban
+  still names whoever sent bad data.
+- Adding a torrent a third time no longer wipes its piece cache under a stream still reading
+  from the first instance.
+- Data a peer sends after choking us, for blocks we had asked it for, is used instead of
+  discarded as waste.
+- A peer sending data nobody asked for no longer looks faster than it is, so it does not get
+  more requests and the shown download speed is not inflated.
+- Magnet links and torrent files can no longer make TorrentPlayer announce to HTTP trackers on
+  your own network or on `localhost`, directly or through the tunnel or proxy, including through
+  tracker redirects. UDP trackers are not covered yet.
 - Updated `ctutils` (used by the Linux credential store's cryptography) to 0.4.5 for
   [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385), non-constant-time
   comparisons.
 
 ### Known limitations
 
+- Tracker addresses on your own network are refused for HTTP trackers only: UDP trackers at a
+  local address, and librqbit's own tracker requests with the `rqbit` engine in Direct mode,
+  can still reach them.
 - With the `rqbit` engine choice in the WireGuard and SOCKS5 modes, TorrentPlayer announces to a
   torrent's HTTP trackers for librqbit once, when it opens, and not again (librqbit itself now
   contacts no trackers in those modes, so their names are never looked up outside the tunnel or
