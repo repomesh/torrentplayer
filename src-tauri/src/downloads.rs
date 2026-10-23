@@ -27,18 +27,21 @@ use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::Notify;
 use torrentplayer_library::{Queue, QueueItem};
 use torrentplayer_torrent::bandwidth::{self, Candidate, Foreground, Planner, Pressure};
-use torrentplayer_torrent::{FileReadiness, TorrentId, TorrentSource, TorrentStats};
+use torrentplayer_torrent::{BackendKind, FileReadiness, TorrentId, TorrentSource, TorrentStats};
 use ts_rs::TS;
 
 use crate::core::{AppState, Core};
 use crate::error::IpcError;
 
-/// Sent (without a payload) when a playback ends and its torrent keeps sharing in the background
-/// (the user has not paused it), once per playback.
+/// Sent (without a payload) the first time in a run that any torrent uploads to other peers.
+/// Queued torrents share from the start, so this is when the user starts seeding.
 pub(crate) const SEEDING_STARTED: &str = "seeding-started";
 
 /// How often the downloader re-plans.
 const TICK: Duration = Duration::from_secs(1);
+/// The downloader re-applies every torrent's pause and upload switch this often, in case
+/// something else changed them (a stream start resumes its torrent).
+const REAPPLY: Duration = Duration::from_secs(10);
 /// Cache policy checks are deliberately much less frequent than download planning: they walk
 /// the download folder and also run immediately after playback reaches the end.
 const CACHE_CHECK: Duration = Duration::from_secs(60);
@@ -334,6 +337,12 @@ struct Runtime {
     /// Last cache walk and whether finishing playback requested one immediately.
     last_cache_cleanup: Option<Instant>,
     cleanup_requested: bool,
+    /// The files open in streams on the previous tick, by (torrent, file).
+    streamed: HashSet<(TorrentId, usize)>,
+    /// When the cached pause and upload switches were last forgotten (see [`REAPPLY`]).
+    reapplied_at: Option<Instant>,
+    /// [`SEEDING_STARTED`] was sent in this run.
+    upload_announced: bool,
 }
 
 #[derive(Default)]
@@ -341,8 +350,9 @@ struct TorrentRun {
     id: Option<TorrentId>,
     adding: Option<tokio::task::JoinHandle<Result<TorrentId, String>>>,
     failed: Option<(Instant, String)>,
-    /// What the downloader last set.
-    paused: bool,
+    /// What the downloader last set; `None` until it is set, so a new run (a torrent queued
+    /// again, or its group renamed when its hash became known) always applies it.
+    paused: Option<bool>,
     limit: Option<u64>,
     /// A playback of this torrent was active on the previous tick.
     was_watching: bool,
@@ -398,6 +408,80 @@ enum Role {
     Downloading,
     /// Nothing to download (finished, or waiting for a download slot): it shares.
     Sharing,
+}
+
+/// What `id` (in `group`) is this tick: `watched` is the torrent being watched, `queued` the
+/// groups with queued items, `held` the groups whose items the user all paused, and `needed`
+/// whether any of its queued items downloads now.
+fn role_of(
+    id: TorrentId,
+    group: &str,
+    watched: Option<TorrentId>,
+    queued: &HashSet<String>,
+    held: &HashSet<String>,
+    needed: bool,
+) -> Role {
+    if watched == Some(id) {
+        Role::Watched
+    } else if !queued.contains(group) || held.contains(group) {
+        Role::Held
+    } else if needed {
+        Role::Downloading
+    } else {
+        Role::Sharing
+    }
+}
+
+/// Torrents to pause with upload off because nothing queues them any more: runs whose group
+/// left the queue, are not being added, and whose torrent no stream has open and no queued run
+/// still uses (a link item's group becomes its hash once known; Undo queues it again).
+fn released(
+    torrents: &HashMap<String, TorrentRun>,
+    queued: &HashSet<String>,
+    open: &HashSet<TorrentId>,
+) -> Vec<TorrentId> {
+    let in_use: HashSet<TorrentId> = torrents
+        .iter()
+        .filter(|(group, _)| queued.contains(*group))
+        .filter_map(|(_, run)| run.id)
+        .collect();
+    let mut ids: Vec<TorrentId> = torrents
+        .iter()
+        .filter(|(group, run)| !queued.contains(*group) && run.adding.is_none())
+        .filter_map(|(_, run)| run.id)
+        .filter(|id| !open.contains(id) && !in_use.contains(id))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Files whose stream closed since the last tick and that nothing else wants: no stream has
+/// them open and no queued item downloads them (`selected`). Playback selected them itself, so
+/// the downloader deselects them, or a paused or removed item would keep downloading.
+fn closed_files(
+    before: &HashSet<(TorrentId, usize)>,
+    open: &HashSet<(TorrentId, usize)>,
+    selected: &HashMap<String, (TorrentId, usize)>,
+) -> Vec<(TorrentId, usize)> {
+    let wanted: HashSet<&(TorrentId, usize)> = selected.values().collect();
+    let mut files: Vec<(TorrentId, usize)> = before
+        .difference(open)
+        .filter(|file| !wanted.contains(file))
+        .copied()
+        .collect();
+    files.sort_unstable();
+    files
+}
+
+/// Whether a torrent shares with other peers: torrentplayer-swarm uploads unless its upload
+/// switch is off, even while paused for playback; librqbit (no upload switch) only while it
+/// runs.
+fn shares(backend: BackendKind, paused: bool, upload: bool) -> bool {
+    match backend {
+        BackendKind::Swarm => upload,
+        BackendKind::Rqbit => !paused,
+    }
 }
 
 /// The rules for one torrent. The video being watched always runs and shares. A held torrent
@@ -469,27 +553,44 @@ impl Runtime {
             }
         }
         let groups: HashSet<String> = queue.items.iter().map(group_of).collect();
-        let open_torrents: HashSet<TorrentId> = core
+        let open_files: HashSet<(TorrentId, usize)> = core
             .streams
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
-            .map(|stream| stream.torrent)
+            .map(|stream| (stream.torrent, stream.file))
             .collect();
-        let removed: Vec<TorrentId> = self
-            .torrents
-            .iter()
-            .filter(|(group, run)| {
-                !groups.contains(*group)
-                    && run.adding.is_none()
-                    && run.id.is_none_or(|id| !open_torrents.contains(&id))
-            })
-            .filter_map(|(_, run)| run.id)
-            .collect();
-        for id in removed {
+        let open_torrents: HashSet<TorrentId> = open_files.iter().map(|(t, _)| *t).collect();
+        for id in released(&self.torrents, &groups, &open_torrents) {
             let _ = engine.set_upload_enabled(id, false);
             let _ = engine.set_paused(id, true).await;
         }
+
+        // Starting a stream resumes its torrent and selects its file, outside the downloader:
+        // when streams open or close, and every [`REAPPLY`] anyway, the cached switches are
+        // forgotten so this tick applies them again. A closed stream's file is deselected
+        // unless a queued item downloads it.
+        let changed: HashSet<TorrentId> = self
+            .streamed
+            .symmetric_difference(&open_files)
+            .map(|(t, _)| *t)
+            .collect();
+        for (torrent, file) in closed_files(&self.streamed, &open_files, &self.selected) {
+            let _ = engine.stop_downloading_file(torrent, file).await;
+        }
+        let reapply = self
+            .reapplied_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= REAPPLY);
+        if reapply {
+            self.reapplied_at = Some(now);
+        }
+        for run in self.torrents.values_mut() {
+            if reapply || run.id.is_some_and(|id| changed.contains(&id)) {
+                run.paused = None;
+                run.upload_enabled = None;
+            }
+        }
+        self.streamed = open_files;
         self.torrents.retain(|g, run| {
             groups.contains(g)
                 || run.adding.is_some()
@@ -508,6 +609,12 @@ impl Runtime {
         }
         let total_bps: u64 = measured.values().map(|m| m.stats.download_bps).sum();
         let total_upload_bps: u64 = measured.values().map(|m| m.stats.upload_bps).sum();
+        if total_upload_bps > 0 && !self.upload_announced {
+            self.upload_announced = true;
+            if let Err(error) = app.emit(SEEDING_STARTED, ()) {
+                tracing::warn!(%error, "could not send the seeding-started event");
+            }
+        }
 
         // The video being watched (the newest stream). A stream parked at its reported end is
         // no longer foreground; seeking it back makes it foreground again on the next tick.
@@ -680,15 +787,7 @@ impl Runtime {
             }
             let foreground = watched_torrent == Some(id);
             let needed = wanted.get(&id).copied().unwrap_or(false);
-            let role = if foreground {
-                Role::Watched
-            } else if !groups.contains(group) || paused_groups.contains(group) {
-                Role::Held
-            } else if needed {
-                Role::Downloading
-            } else {
-                Role::Sharing
-            };
+            let role = role_of(id, group, watched_torrent, &groups, &paused_groups, needed);
             let Control {
                 paused: pause,
                 upload: upload_enabled,
@@ -709,9 +808,6 @@ impl Runtime {
                     tracing::warn!(%error, "could not mark a download as finished");
                 }
                 self.cleanup_requested = true;
-                if upload_enabled && let Err(error) = app.emit(SEEDING_STARTED, ()) {
-                    tracing::warn!(%error, "could not send the seeding-started event");
-                }
             }
             if run.upload_enabled != Some(upload_enabled)
                 && engine.set_upload_enabled(id, upload_enabled).is_ok()
@@ -723,10 +819,13 @@ impl Runtime {
             } else {
                 plan.limits.get(group).copied()
             };
-            if pause != run.paused && engine.set_paused(id, pause).await.is_ok() {
-                run.paused = pause;
+            if run.paused != Some(pause) && engine.set_paused(id, pause).await.is_ok() {
+                run.paused = Some(pause);
             }
-            if !run.paused && run.upload_enabled == Some(true) {
+            if let (Some(paused), Some(upload), Ok(backend)) =
+                (run.paused, run.upload_enabled, engine.backend(id))
+                && shares(backend, paused, upload)
+            {
                 uploading.insert(id);
             }
             if limit != run.limit {
@@ -749,6 +848,8 @@ impl Runtime {
                 let is_active = active.contains(item.id.as_str());
                 let is_watching = watching(item);
                 let complete = r.is_some_and(FileReadiness::complete);
+                // Other files of the torrent being watched are never held back for it.
+                let background = id.is_some() && id != watched_torrent;
                 // The user's own pause shows before anything the downloader decided.
                 let state = if is_watching {
                     ItemState::Watching
@@ -758,7 +859,7 @@ impl Runtime {
                     ItemState::Complete
                 } else if run.is_some_and(|r| r.id.is_none() && r.failed.is_some()) {
                     ItemState::Failed
-                } else if !is_active || (plan.pause_background && id.is_some()) {
+                } else if !is_active || (plan.pause_background && background) {
                     ItemState::Queued
                 } else if id.is_none() {
                     ItemState::Starting
@@ -791,7 +892,7 @@ impl Runtime {
                     length: r.map(|r| r.len),
                     eta_secs,
                     startable: r.is_some_and(|r| r.startable),
-                    limited: is_active && plan.limits.contains_key(&group_of(item)),
+                    limited: is_active && background && plan.limits.contains_key(&group_of(item)),
                     uploading: id.is_some_and(|id| uploading.contains(&id)),
                     wait_reason: match state {
                         ItemState::Queued if !is_active => Some(WaitReason::Limit),
@@ -985,5 +1086,76 @@ mod tests {
         };
         let held = paused_groups(&queue);
         assert_eq!(held, HashSet::from(["aaaa".to_owned()]));
+    }
+
+    fn run(id: TorrentId) -> TorrentRun {
+        TorrentRun {
+            id: Some(id),
+            ..TorrentRun::default()
+        }
+    }
+
+    fn set(groups: &[&str]) -> HashSet<String> {
+        groups.iter().map(|g| (*g).to_owned()).collect()
+    }
+
+    #[test]
+    fn roles_follow_the_users_choices() {
+        let queued = set(&["a", "b", "mixed"]);
+        let held = set(&["b"]);
+        let role = |id, group: &str, needed| role_of(id, group, Some(9), &queued, &held, needed);
+        // Removed from the queue, or every item paused: held.
+        assert_eq!(role(1, "gone", false), Role::Held);
+        assert_eq!(role(2, "b", true), Role::Held);
+        // Some items paused, others not: it runs (`paused_groups` leaves the group out).
+        assert_eq!(role(3, "mixed", false), Role::Sharing);
+        assert_eq!(role(4, "a", true), Role::Downloading);
+        assert_eq!(role(5, "a", false), Role::Sharing);
+        // The video being watched wins over everything.
+        assert_eq!(role(9, "b", false), Role::Watched);
+        assert_eq!(role(9, "gone", false), Role::Watched);
+    }
+
+    #[test]
+    fn released_torrents_skip_ones_still_queued_or_streamed() {
+        let mut torrents = HashMap::new();
+        // A link item whose hash became known: the old group's torrent is the new group's.
+        torrents.insert("link:https://example.org/a.torrent".to_owned(), run(1));
+        torrents.insert("aaaa".to_owned(), run(1));
+        torrents.insert("removed".to_owned(), run(2));
+        torrents.insert("streamed".to_owned(), run(3));
+        torrents.insert("unadded".to_owned(), TorrentRun::default());
+        let queued = set(&["aaaa"]);
+        let open = HashSet::from([3]);
+        assert_eq!(released(&torrents, &queued, &open), [2]);
+    }
+
+    #[test]
+    fn a_new_run_applies_its_pause_on_the_first_tick() {
+        // A torrent the removed path paused, queued again: nothing is cached, so the
+        // downloader sends the resume rather than assuming the torrent already runs.
+        let fresh = run(1);
+        assert_eq!(fresh.paused, None);
+        assert_eq!(fresh.upload_enabled, None);
+        assert_ne!(fresh.paused, Some(control(Role::Sharing, false).paused));
+    }
+
+    #[test]
+    fn closed_streams_deselect_files_nothing_else_wants() {
+        let before = HashSet::from([(1, 0), (1, 1), (2, 0)]);
+        let open = HashSet::from([(2, 0)]);
+        let selected = HashMap::from([("item".to_owned(), (1, 1))]);
+        // (1, 1) is still downloaded for a queued item; (2, 0) is still open.
+        assert_eq!(closed_files(&before, &open, &selected), [(1, 0)]);
+    }
+
+    #[test]
+    fn sharing_follows_each_engine() {
+        // torrentplayer-swarm keeps uploading while paused for playback, not when held.
+        assert!(shares(BackendKind::Swarm, true, true));
+        assert!(!shares(BackendKind::Swarm, true, false));
+        // librqbit has no upload switch: it shares while it runs.
+        assert!(shares(BackendKind::Rqbit, false, false));
+        assert!(!shares(BackendKind::Rqbit, true, true));
     }
 }

@@ -2,7 +2,7 @@
 
 /**
  * The note that recommends a VPN in Direct mode: in Settings → Network & VPN, beside the status bar's
- * network indicator, and once per run when seeding starts. Dismissing it anywhere hides it
+ * network indicator, and once per run when a torrent starts uploading. Dismissing it anywhere hides it
  * everywhere (`network.vpnHintDismissed`); every place follows the saved settings.
  */
 
@@ -57,7 +57,7 @@ export function followVpnHint(onNetwork: (network: NetworkSettings) => void): ()
   );
 }
 
-/** Calls `onStart` when a playback ends and its torrent keeps sharing in the background. */
+/** Calls `onStart` the first time in a run that a torrent uploads to other peers. */
 export function followSeedingStarted(onStart: () => void): () => void {
   return follow<null>(SEEDING_STARTED_EVENT, () => {
     onStart();
