@@ -372,7 +372,10 @@ impl BenchEngine {
                     .collect();
                 peers.sort_unstable();
                 peers.dedup();
-                *torrent = Some(swarm.add(meta, peers)?);
+                let added = swarm.add(meta, peers)?;
+                // Uploads start off; the app turns them on for playback, so the bench does too.
+                added.set_upload_enabled(true);
+                *torrent = Some(added);
                 Ok((name, files))
             }
         }
