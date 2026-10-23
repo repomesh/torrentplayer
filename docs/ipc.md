@@ -144,7 +144,7 @@ and the final 10 seconds are not offered.
 
 Reports the player's position, on every seek and about once a second. Seeks re-prioritize
 immediately. Playback history is persisted on the first report, after a seek, at completion,
-every five seconds during ordinary playback, on stream stop, and at shutdown. Database failures
+every 30 seconds during ordinary playback, on stream stop, and at shutdown. Database failures
 are logged but never interrupt playback. Without `durationSecs` (the player cannot tell, for
 example a Matroska file with no
 duration in its header), the duration from the container header or `ffprobe` is used, once

@@ -88,6 +88,11 @@ pub(crate) struct ActiveStream {
     pub(crate) conversion_request: crate::latest::Latest,
 }
 
+/// How often ordinary playback is checkpointed to the library. Each save is a synced SQLite
+/// write; seeks, completion, stream stop, and shutdown save at once, so a crash loses at most
+/// this much of plain playback.
+const PROGRESS_SAVE_INTERVAL: Duration = Duration::from_secs(30);
+
 /// The latest playback position and when it was last persisted.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct ProgressTracker {
@@ -98,7 +103,7 @@ pub(crate) struct ProgressTracker {
 
 impl ProgressTracker {
     /// Updates the latest report and says whether it should be persisted now. The first report,
-    /// seeks, completion, and each five seconds of ordinary playback are saved.
+    /// seeks, completion, and each [`PROGRESS_SAVE_INTERVAL`] of ordinary playback are saved.
     pub(crate) fn update(&mut self, position_secs: f64, duration_secs: Option<f64>) -> bool {
         let now = Instant::now();
         let first = self.position_secs.is_none();
@@ -114,7 +119,7 @@ impl ProgressTracker {
             .is_some_and(|duration| position_secs >= duration - 1.0);
         let due = self
             .saved_at
-            .is_none_or(|saved| now.duration_since(saved) >= Duration::from_secs(5));
+            .is_none_or(|saved| now.duration_since(saved) >= PROGRESS_SAVE_INTERVAL);
         let save = first || seek || completed || due;
         if save {
             self.saved_at = Some(now);

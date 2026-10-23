@@ -150,7 +150,7 @@ time. Every view stays reachable from the rail.
 - **Library and resume** (`torrentplayer-library`, `ui/src/lib/library.ts`) identify a playable file by
   `(info hash, file index)` and store its safe replay link, display metadata, last position,
   duration, and completion state in `library.sqlite3`. Ordinary playback is checkpointed every
-  five seconds; the first report, seeks, completion, stream stop, and app shutdown force a save.
+  30 seconds; the first report, seeks, completion, stream stop, and app shutdown force a save.
   Checkpoints carry a process-local revision so blocking writes cannot move the saved playhead
   backward if they finish out of order. An unavailable database disables history for that run,
   never playback. The `library-changed` event updates the Library and queue without polling.
