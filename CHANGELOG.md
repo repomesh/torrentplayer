@@ -82,6 +82,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (`fe80::/10`), or the shared `100.64.0.0/10` range; they are checked like peer addresses.
 - In the SOCKS5 and WireGuard modes, a search result's "Open the indexer's page" link now says
   that the page opens in your browser, outside TorrentPlayer's proxy or tunnel.
+- Documentation caught up with 0.3: the comparison page no longer says the engine does not upload
+  or that Dolby and DTS audio is only warned about, and names the LGPL and MPL-2.0 parts that
+  ship with the app; the security policy lists 0.3.x as supported; the streaming page is no
+  longer marked as planned; the build guide says which Ubuntu versions CI and releases use and
+  that libmpv is not needed.
 
 ## [0.3.0] - 2026-10-21
 

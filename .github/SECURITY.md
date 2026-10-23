@@ -6,11 +6,13 @@ switch). We take security reports seriously and appreciate responsible disclosur
 
 ## Supported versions
 
-TorrentPlayer has not had a release yet. Once it does, security fixes will be made for the latest
-minor release only.
+Security fixes are made for the latest minor release (and `main`). Please check that the issue is
+still present in the latest release before reporting.
 
 | Version | Supported |
 | ------- | --------- |
+| 0.3.x   | ✅        |
+| < 0.3   | ❌        |
 | `main`  | ✅        |
 
 ## Reporting a vulnerability
@@ -25,7 +27,7 @@ If you cannot use GitHub, email the security contact listed in [MAINTAINERS.md](
 Please include as much of the following as you can:
 
 - The type of issue (for example path traversal, IPC permission bypass, traffic leak outside the
-  tunnel, memory safety issue in the libmpv wrapper).
+  tunnel, a crash or escape through the bundled FFmpeg).
 - The affected component and version or commit.
 - Step-by-step reproduction instructions, and a proof of concept if you have one.
 - The impact, as you understand it.

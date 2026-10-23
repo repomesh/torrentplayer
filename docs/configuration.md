@@ -266,7 +266,8 @@ librqbit fetches only the metadata, then hands the torrent and the peers it foun
 `rqbit` is the compatibility choice that uses librqbit for the download too. The environment variables below override `engine` and
 `logLevel`, and the Settings page says so when they do.
 
-FFmpeg is optional and not bundled yet. With `ffprobe` and `ffmpeg` in `ffmpegDir` (or its
+The FFmpeg bundled with release builds only converts Dolby and DTS audio. For the rest, FFmpeg is
+optional and your own: with `ffprobe` and `ffmpeg` in `ffmpegDir` (or its
 `bin` folder), or on `PATH` when it is `null`, TorrentPlayer finds the duration of videos whose
 header gives none, so read-ahead and the buffer estimate work for them, and shows seek-bar
 previews. The Settings page shows what was found and its version. The folder is chosen only with **Choose

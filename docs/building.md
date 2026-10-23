@@ -75,7 +75,9 @@ Tauri needs a Common Controls v6 application manifest to start, including in tes
 
 ### Linux
 
-Install the WebKitGTK packages from the README. CI uses Ubuntu 24.04.
+Install the WebKitGTK packages from the README. CI checks and tests on Ubuntu 24.04; the Linux
+builds and releases (AppImage, `.deb`) are made on Ubuntu 22.04, the oldest supported version, so
+they run on older glibc versions.
 
 ### FFmpeg (audio conversion)
 
@@ -91,7 +93,10 @@ start a development build with `TORRENTPLAYER_DEV_AUTOPLAY='<file.torrent>|0||<a
 
 ### libmpv
 
-libmpv is required from Phase 2. Instructions will be added here.
+Not needed: the built-in player uses the system web engine. libmpv is planned for a later full
+player (see [Player integration](player.md)); build instructions will be added when it lands.
+
+### FFmpeg for durations and thumbnails
 
 FFmpeg is optional at run time (see `advanced.ffmpegDir` in [Configuration](configuration.md)).
 The tests in `crates/torrentplayer-media/tests/ffmpeg.rs` run `ffprobe` and `ffmpeg` against the
