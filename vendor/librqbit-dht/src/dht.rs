@@ -47,6 +47,13 @@ fn now() -> Instant {
     Instant::now()
 }
 
+/// Added for TorrentPlayer. How many routing-table nodes start a single lookup (as many as
+/// upstream's re-query asks), how long it waits for that many when it has fewer, and how long
+/// for any at all while the node bootstraps.
+const ROOTS: usize = 8;
+const ROOTS_GRACE: Duration = Duration::from_secs(1);
+const BOOTSTRAP_WAIT: Duration = Duration::from_secs(30);
+
 #[derive(Debug, Serialize)]
 pub struct DhtStats {
     #[serde(serialize_with = "crate::utils::serialize_id20")]
@@ -204,7 +211,13 @@ pub struct RequestPeersStream {
 }
 
 impl RequestPeersStream {
-    fn new(dht: Arc<DhtState>, info_hash: Id20, announce_port: Option<u16>) -> Self {
+    fn new(
+        dht: Arc<DhtState>,
+        info_hash: Id20,
+        announce_port: Option<u16>,
+        // Added for TorrentPlayer: one lookup that ends (see `DhtState::get_peers_once`).
+        once: bool,
+    ) -> Self {
         let (peer_tx, peer_rx) = unbounded_channel();
         let make = |is_v4: bool, dht: Arc<DhtState>, peer_tx: UnboundedSender<SocketAddr>| {
             let (node_tx, node_rx) = unbounded_channel();
@@ -225,7 +238,11 @@ impl RequestPeersStream {
                     announce_port,
                 },
             });
-            rp.request_peers_forever(node_rx, is_v4)
+            if once {
+                rp.request_peers_once(node_rx, is_v4)
+            } else {
+                rp.request_peers_forever(node_rx, is_v4)
+            }
         };
 
         let v4 = make(true, dht.clone(), peer_tx.clone());
@@ -390,6 +407,69 @@ impl RecursiveRequest<RecursiveRequestCallbacksGetPeers> {
         )
     }
 
+    /// Added for TorrentPlayer. One lookup in one address family: the closest nodes of the
+    /// routing table are asked, then the nodes they return, until no query is left. The task
+    /// ends then (and the stream once both families have ended), so the application decides
+    /// when to look up again instead of every [`REQUERY_INTERVAL`].
+    fn request_peers_once(
+        self: &Arc<Self>,
+        mut node_rx: tokio::sync::mpsc::UnboundedReceiver<(Option<Id20>, SocketAddr, usize)>,
+        is_v4: bool,
+    ) -> tokio::task::JoinHandle<()> {
+        let this = self.clone();
+        spawn(
+            debug_span!(parent: None, "get_peers_once", is_v4, info_hash = format!("{:?}", self.info_hash)),
+            "get_peers_once",
+            async move {
+                if !this.wait_for_roots(is_v4).await {
+                    return Ok(());
+                }
+                this.get_peers_root(is_v4)?;
+                let mut futs = FuturesUnordered::new();
+                loop {
+                    // A query queues the nodes it learns before it finishes, so once none is
+                    // in flight and none is queued, the lookup is over.
+                    while let Ok((id, addr, depth)) = node_rx.try_recv() {
+                        futs.push(
+                            this.request_one(id, addr, depth)
+                                .map_err(|e| debug!("error: {e:#}"))
+                                .instrument(debug_span!("addr", addr = addr.to_string())),
+                        );
+                    }
+                    if futs.next().await.is_none() {
+                        return Ok::<(), crate::Error>(());
+                    }
+                }
+            },
+        )
+    }
+
+    /// Added for TorrentPlayer. Waits until this family's routing table can start a lookup:
+    /// at once with [`ROOTS`] nodes, after [`ROOTS_GRACE`] with fewer (a node that is still
+    /// bootstrapping learns more every round trip). `false` if the table stays empty: once the
+    /// other family has nodes after the grace, or after [`BOOTSTRAP_WAIT`] if neither has.
+    async fn wait_for_roots(&self, is_v4: bool) -> bool {
+        let (own, other) = if is_v4 {
+            (&self.dht.routing_table_v4, &self.dht.routing_table_v6)
+        } else {
+            (&self.dht.routing_table_v6, &self.dht.routing_table_v4)
+        };
+        let start = now();
+        loop {
+            let known = own.read().len();
+            let waited = now() - start;
+            if known >= ROOTS || (known > 0 && waited >= ROOTS_GRACE) {
+                return true;
+            }
+            if known == 0
+                && ((waited >= ROOTS_GRACE && other.read().len() > 0) || waited >= BOOTSTRAP_WAIT)
+            {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     fn get_peers_root(&self, is_v4: bool) -> crate::Result<usize> {
         let mut count = 0;
         let table = if is_v4 {
@@ -437,7 +517,10 @@ impl<C: RecursiveRequestCallbacks> RecursiveRequest<C> {
             self.callbacks.on_request_end(self, id, addr, &response);
         }
 
-        let response = match self.dht.request(self.request.clone(), addr).await {
+        // Modified for TorrentPlayer: the response above is used. Upstream sent the same query
+        // a second time here and used only that reply, so every hop of every lookup cost two
+        // round trips and twice the datagrams, and the first reply's peers were dropped.
+        let response = match response {
             Ok(ResponseOrError::Response(r)) => r,
             Ok(ResponseOrError::Error(e)) => {
                 debug!("error response: {e:?}");
@@ -1419,7 +1502,19 @@ impl DhtState {
         info_hash: Id20,
         announce_port: Option<u16>,
     ) -> RequestPeersStream {
-        RequestPeersStream::new(self.clone(), info_hash, announce_port)
+        RequestPeersStream::new(self.clone(), info_hash, announce_port, false)
+    }
+
+    /// Added for TorrentPlayer. Like [`DhtState::get_peers`], but a single lookup: the stream
+    /// ends once no query is left (at once if the routing tables stay empty), and nothing is
+    /// queried again. With `announce_port`, the node announces itself (BEP 5 `announce_peer`,
+    /// with that port) to the nodes close to `info_hash` that answered with a token.
+    pub fn get_peers_once(
+        self: &Arc<Self>,
+        info_hash: Id20,
+        announce_port: Option<u16>,
+    ) -> RequestPeersStream {
+        RequestPeersStream::new(self.clone(), info_hash, announce_port, true)
     }
 
     pub fn listen_addr(&self) -> SocketAddr {

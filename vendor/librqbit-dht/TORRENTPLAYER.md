@@ -14,4 +14,22 @@ is unchanged. TorrentPlayer uses this seam for bound-interface, WireGuard, and S
 Worker exit cancels the node token so a closed UDP association can be restarted instead of
 leaving an apparently live node cached by the application.
 
+One query per hop (`src/dht.rs`, `RecursiveRequest::request_one`, marked "Modified for
+TorrentPlayer"): upstream sent every `get_peers` and `find_node` query twice in a row, waited for
+both replies, and used only the second (the first only marked the node as responsive and
+triggered announces). Every hop of every lookup cost two round trips and twice the datagrams,
+and a node that answered only the first time contributed nothing. The first reply is now used.
+Measured on a public swarm: the first peer of a lookup from a populated routing table arrives in
+about half the time (0.27 s instead of 0.51 s).
+
+Single lookups (`src/dht.rs`, `DhtState::get_peers_once`, `RecursiveRequest::request_peers_once`
+and `wait_for_roots`, marked "Added for TorrentPlayer"): `get_peers` runs forever and asks again
+every 60 seconds, which cost about 1,100 datagrams a minute for every torrent, paused and complete
+ones included. `get_peers_once` runs one lookup per address family and ends the stream once no
+query is in flight or queued, so torrentplayer-swarm decides when to look up again. It starts
+with the 8 closest nodes of the routing table, waits up to a second for that many while the node
+bootstraps, and gives up on an address family whose table stays empty. Announcing
+(`announce_port`) works as in `get_peers`, with the given port (`implied_port` 0).
+`get_peers` is unchanged for librqbit.
+
 Drop this copy once upstream supports scoped transports and tolerates these errors.
