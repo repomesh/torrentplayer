@@ -102,6 +102,7 @@
   import type { SettingsSection } from './lib/settings';
   import { preloadTarget, shouldPreloadNext } from './lib/upnext';
   import { TorrentLoads, torrentLoadKeys } from './lib/torrent-loads';
+  import { Toasts, type Toast } from './lib/toasts';
 
   /** The video open in the player (it may be hidden while the user browses). */
   interface NowPlaying {
@@ -121,7 +122,6 @@
   const PLAYLIST_KEY = 'torrentplayer.playlistOpen';
   /** How often the next queued video's preload conditions are checked while playing. */
   const NEXT_CHECK_MS = 2000;
-  const TOAST_MS = 4500;
 
   let history = $state.raw(initialHistory(HOME));
   const view = $derived(history.current);
@@ -161,8 +161,10 @@
   // Stream starts change download priorities, so only that short stage is serialized.
   let streamStart: Promise<void> = Promise.resolve();
   let playlistOpen = $state(readPlaylistOpen());
-  let toast = $state<{ message: string; error: boolean; undo: (() => void) | null } | null>(null);
-  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  let toasts = $state.raw<readonly Toast[]>([]);
+  const toaster = new Toasts((list) => {
+    toasts = list;
+  });
   let announcement = $state('');
   // The VPN note, once per run, when the first torrent starts uploading in Direct mode.
   // It disappears as soon as it no longer applies (dismissed anywhere, or another mode chosen).
@@ -1165,11 +1167,31 @@
   // --- Toasts, keys, and the window --------------------------------------------------
 
   function showToast(message: string, options: { error?: boolean; undo?: () => void } = {}): void {
-    clearTimeout(toastTimer);
-    toast = { message, error: options.error ?? false, undo: options.undo ?? null };
-    toastTimer = setTimeout(() => {
-      toast = null;
-    }, TOAST_MS);
+    toaster.show(message, options);
+  }
+
+  /**
+   * Keeps the toasts visible in fullscreen: they move into the fullscreen element while there
+   * is one, and back afterwards.
+   */
+  function followFullscreen(node: HTMLElement): () => void {
+    const home = node.parentElement;
+    const anchor = document.createComment('toasts');
+    node.before(anchor);
+    const move = (): void => {
+      const host = document.fullscreenElement;
+      if (host !== null) {
+        host.append(node);
+      } else if (node.parentElement !== home) {
+        anchor.after(node);
+      }
+    };
+    move();
+    document.addEventListener('fullscreenchange', move);
+    return () => {
+      document.removeEventListener('fullscreenchange', move);
+      anchor.remove();
+    };
   }
 
   function readPlaylistOpen(): boolean {
@@ -1329,7 +1351,7 @@
       .catch(() => undefined);
 
     return () => {
-      clearTimeout(toastTimer);
+      toaster.clear();
       clearTimeout(nextPreloadTimer);
       stopLibrary();
       stopVpnHint();
@@ -1600,25 +1622,67 @@
       </div>
     {/if}
 
-    {#if toast}
-      <div class="toast" class:error={toast.error} role={toast.error ? 'alert' : 'status'}>
-        <span>{toast.message}</span>
-        {#if toast.undo}
-          {@const undo = toast.undo}
-          <button
-            type="button"
-            class="link"
-            onclick={() => {
-              undo();
-              toast = null;
-            }}>Undo</button
-          >
-        {/if}
+    <!-- Always rendered, so screen readers know the live regions before a toast arrives. -->
+    <div class="toasts" class:raised={view.name === 'player'} {@attach followFullscreen}>
+      <div class="stack" role="alert">
+        {#each toasts.filter((t) => t.error) as t (t.id)}
+          <!-- eslint-disable-next-line @typescript-eslint/no-confusing-void-expression -- a local snippet is typed as returning void -->
+          {@render toastView(t)}
+        {/each}
       </div>
-    {/if}
+      <div class="stack" role="status">
+        {#each toasts.filter((t) => !t.error) as t (t.id)}
+          <!-- eslint-disable-next-line @typescript-eslint/no-confusing-void-expression -- a local snippet is typed as returning void -->
+          {@render toastView(t)}
+        {/each}
+      </div>
+    </div>
   </main>
 </div>
 <p class="sr-only" aria-live="polite">{announcement}</p>
+
+{#snippet toastView(t: Toast)}
+  <div
+    class="toast"
+    class:error={t.error}
+    role="group"
+    aria-label="Notification"
+    onmouseenter={() => {
+      toaster.hold(t.id);
+    }}
+    onmouseleave={() => {
+      toaster.release(t.id);
+    }}
+    onfocusin={() => {
+      toaster.hold(t.id);
+    }}
+    onfocusout={() => {
+      toaster.release(t.id);
+    }}
+  >
+    <span title={t.message}>{t.message}</span>
+    {#if t.undo}
+      <button
+        type="button"
+        class="link"
+        onclick={() => {
+          toaster.undo(t.id);
+        }}>Undo</button
+      >
+    {/if}
+    <button
+      type="button"
+      class="close"
+      aria-label="Close"
+      title="Close"
+      onclick={() => {
+        toaster.dismiss(t.id);
+      }}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17" /></svg>
+    </button>
+  </div>
+{/snippet}
 
 <style>
   .app {
@@ -1671,23 +1735,75 @@
     font-size: 0.72rem;
   }
 
-  .toast {
+  .toasts {
     position: absolute;
     z-index: 10;
     bottom: 2.75rem;
     left: 50%;
     display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    width: min(32rem, calc(100% - 2rem));
+    pointer-events: none;
+    transform: translateX(-50%);
+  }
+
+  /* Over the video, above its controls (also in fullscreen). */
+  .toasts.raised {
+    bottom: 6rem;
+  }
+
+  .stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+  }
+
+  .toast {
+    display: flex;
     align-items: center;
     gap: 0.75rem;
-    max-width: min(32rem, calc(100% - 2rem));
-    padding: 0.55rem 0.9rem;
+    max-width: 100%;
+    padding: 0.4rem 0.4rem 0.4rem 0.9rem;
+    pointer-events: auto;
     border: 1px solid rgb(255 255 255 / 8%);
     border-radius: 0.6rem;
     background: rgb(22 22 28 / 96%);
     box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 40%);
     color: var(--text);
     font-size: 0.875rem;
-    transform: translateX(-50%);
+  }
+
+  .toast .close {
+    display: inline-flex;
+    padding: 0.25rem;
+    border: none;
+    border-radius: 0.35rem;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+
+  .toast .close:hover {
+    color: var(--text);
+    background: rgb(255 255 255 / 6%);
+  }
+
+  .toast .close:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .toast .close svg {
+    width: 0.85rem;
+    height: 0.85rem;
+    fill: none;
+    stroke: currentcolor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
   }
 
   .seeding-hint {
