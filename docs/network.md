@@ -433,7 +433,9 @@ The Settings page (`torrentplayer-settings`) stores what the user chooses; the a
   unsupported. A successful TCP health check does not prove that the proxy supports UDP.
 - Direct mode cannot tell whether a VPN app is connected; the public-IP check (status bar, or
   "Check connection") shows the address peers see.
-- librqbit resolves tracker host names locally in SOCKS5 mode.
+- With the `rqbit` engine choice in the SOCKS5 and WireGuard modes, TorrentPlayer announces to a
+  torrent's trackers for librqbit once, when it opens; it is not announced again, so a long
+  session finds no new tracker peers.
 - Switching protection on or off stops librqbit's torrents (only those using the `rqbit`
   engine choice); they must be added again. torrentplayer-swarm torrents, magnet links included,
   continue.

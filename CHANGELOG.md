@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-23
+
 ### Added
 
 - `cargo bench-suite <list file>` benchmarks your own media files, torrents, and magnet links
@@ -177,6 +179,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `503 Service Unavailable` instead of having its connection dropped.
 - A torrent added to TorrentPlayer's engine no longer serves pieces to peers that connect in the
   moment before the app applies the upload setting: uploading is now off until it is turned on.
+- Updated `ctutils` (used by the Linux credential store's cryptography) to 0.4.5 for
+  [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385), non-constant-time
+  comparisons.
+
+### Known limitations
+
+- With the `rqbit` engine choice in the WireGuard and SOCKS5 modes, TorrentPlayer announces to a
+  torrent's HTTP trackers for librqbit once, when it opens, and not again (librqbit itself now
+  contacts no trackers in those modes, so their names are never looked up outside the tunnel or
+  proxy). A long session therefore finds no new tracker peers. The automatic engine is not
+  affected: torrentplayer-swarm keeps announcing.
+- The settings file is now version 5 (`network.hold` replaces `network.vpnAdapterModeRemoved`).
+  Going back to 0.3.0 reads it as far as possible and keeps a copy as `settings.newer.json`; a
+  pending "VPN adapter mode removed" notice is not shown there.
 
 ## [0.3.0] - 2026-10-21
 
@@ -509,7 +525,8 @@ The first public preview: stream any torrent, video or audio, and skip to any mo
   never unmuted. It now mutes only when the autoplay policy refuses sound, then shows a "click
   to unmute" button. Interruptions are retried with the sound unchanged.
 
-[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/torrentplayer/torrentplayer/releases/tag/v0.1.0

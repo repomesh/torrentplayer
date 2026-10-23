@@ -223,7 +223,7 @@ the playback library is a user-only local SQLite database and is never sent anyw
 
 ## Get TorrentPlayer
 
-TorrentPlayer is an early preview. The latest version is **0.3.0**; see the
+TorrentPlayer is an early preview. The latest version is **0.3.1**; see the
 [changelog](CHANGELOG.md) for what changed. You can:
 
 - **Download a release** from the [Releases](https://github.com/torrentplayer/torrentplayer/releases)
