@@ -235,8 +235,16 @@ impl Tunnel {
             peers,
             buffers,
             socket,
+            rate_limiter,
             ..
         } = self;
+
+        // Modified for TorrentPlayer: the rate limiter the peers share counts handshake messages
+        // until its owner resets the count (boringtun's own device does so every second; this
+        // resets at most once a second). Unreset, every handshake after the 64th of the
+        // interface's lifetime was refused as a flood and answered with a cookie, so each rekey
+        // stalled for at least REKEY_TIMEOUT, or failed if the server ignores cookies.
+        rate_limiter.reset_count();
 
         for peer in peers.iter_mut() {
             let endpoint = match (peer.active, peer.config.endpoint) {
