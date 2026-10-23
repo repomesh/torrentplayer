@@ -676,8 +676,14 @@ async fn endpoint_addresses(endpoint: &str) -> Result<Vec<SocketAddr>, NetError>
 /// each pending connection, so its backlog is 16 rather than 128. A connection whose peer
 /// stops acknowledging for 2 minutes is aborted (keep-alives every 30 s cover idle ones),
 /// since smoltcp otherwise keeps it, and the relay holding it, open forever.
+///
+/// An idle stack (no socket timer due) is polled once a second rather than ten times: every
+/// received packet, socket read or write, new socket, connect, and close polls it at once,
+/// and smoltcp's own timers set the next poll while any are pending. The WireGuard timers keep
+/// boringtun's recommended 100 ms tick.
 fn interface_options() -> tokio_wireguard::interface::Options {
     let mut options = tokio_wireguard::interface::Options::default();
+    options.poll_interval = Duration::from_secs(1);
     options.tcp.backlog = 16;
     options.tcp.timeout = Some(Duration::from_secs(120));
     options.tcp.keep_alive = Some(Duration::from_secs(30));
