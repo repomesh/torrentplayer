@@ -139,7 +139,7 @@ impl Tunnel {
         let transport = matches!(packet, Packet::PacketData(..));
         // Added for TorrentPlayer: like WireGuard, roam to the source of authenticated
         // handshake and data messages only, never of a cookie reply.
-        let roams = !matches!(packet, Packet::PacketCookieReply(..));
+        let mut roams = !matches!(packet, Packet::PacketCookieReply(..));
 
         let peer = match packet {
             Packet::HandshakeInit(packet) => {
@@ -165,13 +165,20 @@ impl Tunnel {
             {
                 TunnResult::Err(..) => return None,
                 TunnResult::Done => None,
-                TunnResult::WriteToNetwork(mut datagram) => loop {
-                    socket.send_to(datagram, source).await.ok();
-                    match peer.tunnel.decapsulate(None, &[], &mut buffers.0) {
-                        TunnResult::WriteToNetwork(d) => datagram = d,
-                        _ => break None,
+                TunnResult::WriteToNetwork(mut datagram) => {
+                    // Added for TorrentPlayer: a cookie reply (type 3) answers a message the
+                    // rate limiter did not let through, so it was not authenticated: no roaming.
+                    if datagram.first() == Some(&3) {
+                        roams = false;
                     }
-                },
+                    loop {
+                        socket.send_to(datagram, source).await.ok();
+                        match peer.tunnel.decapsulate(None, &[], &mut buffers.0) {
+                            TunnResult::WriteToNetwork(d) => datagram = d,
+                            _ => break None,
+                        }
+                    }
+                }
                 TunnResult::WriteToTunnelV4(p, a) if peer.is_allowed_ip(a) => Some(p),
                 TunnResult::WriteToTunnelV6(p, a) if peer.is_allowed_ip(a) => Some(p),
                 _ => None,

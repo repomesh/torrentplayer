@@ -63,6 +63,7 @@ impl TcpStream {
 
             let socket = IO::new(
                 interface.clone(),
+                // Modified for TorrentPlayer: the socket gets the timeout and keep-alive options.
                 TcpListener::new_socket(&interface),
                 Some(allocation),
             );

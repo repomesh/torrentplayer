@@ -42,8 +42,16 @@ struct Session {
     abandoned: AtomicU8,
     /// Which of the endpoint's addresses it uses, and how many there were.
     endpoint: (usize, usize),
-    /// When it last had a session (or started, before its first).
-    keyed_at: Mutex<Instant>,
+    /// When it last had a session, and when the health check last ran.
+    keyed_at: Mutex<Keyed>,
+}
+
+/// When a tunnel last had a session (or started, before its first), and when the health check
+/// last looked.
+#[derive(Debug)]
+struct Keyed {
+    at: Instant,
+    checked: Instant,
 }
 
 /// Why the health check closed a tunnel, so that a new one replaces it.
@@ -239,7 +247,10 @@ impl Tunnel {
             unproven,
             abandoned: AtomicU8::new(Abandoned::No as u8),
             endpoint: (index, addresses.len()),
-            keyed_at: Mutex::new(Instant::now()),
+            keyed_at: Mutex::new(Keyed {
+                at: Instant::now(),
+                checked: Instant::now(),
+            }),
         })))
     }
 
@@ -306,15 +317,19 @@ impl Tunnel {
             .handshake_age
             .is_some_and(|age| age < REJECT_AFTER_TIME);
         let without_session = {
-            let mut last = self
+            let mut keyed = self
                 .0
                 .keyed_at
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
-            if session {
-                *last = Instant::now();
+            // A check this late follows a sleep (checks run every few seconds), and the session
+            // expired while nothing could renew it: the tunnel gets its handshake attempts
+            // below before it counts as without a session.
+            if session || keyed.checked.elapsed() >= REJECT_AFTER_TIME {
+                keyed.at = Instant::now();
             }
-            last.elapsed()
+            keyed.checked = Instant::now();
+            keyed.at.elapsed()
         };
         let unanswered = liveness.unanswered.unwrap_or_default();
         let answering =

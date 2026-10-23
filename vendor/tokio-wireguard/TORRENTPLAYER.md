@@ -36,7 +36,9 @@ Endpoint roaming and handshake rate limiting (`src/interface/tunnel.rs`, `Tunnel
 `Tunnel::new`, marked "Added/Modified for TorrentPlayer"): the peer's endpoint moved to the
 source of any message `decapsulate` accepted, including cookie replies, which anyone who knows
 the server's public key and sees an initiation can forge, and the cookie replies the interface
-itself sends under load. Like WireGuard, it now roams only on handshake and data messages. A
+itself sends under load. Like WireGuard, it now roams only on handshake and data messages, and
+not when `decapsulate` answers one with a cookie reply (a message the rate limiter refused, so
+not authenticated: a forged handshake response sent under load). A
 handshake initiation also passes the shared rate limiter (MAC1, and under load the cookie MAC2)
 before `parse_handshake_anon`'s key agreement, as in boringtun's own device; since
 `decapsulate` checks it again, the limit is 128 so that initiations still get 64 per second.
