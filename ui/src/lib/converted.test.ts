@@ -126,6 +126,7 @@ class TestSource extends EventTarget {
 
 describe('ConvertedPlayback lifecycle', () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -156,8 +157,130 @@ describe('ConvertedPlayback lifecycle', () => {
         ),
       ),
     );
-    return { playback, convert, onError, source: TestSource.latest };
+    return { playback, convert, onError, video, source: TestSource.latest };
   }
+
+  it('retries a temporary conversion failure and preserves audio', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError } = setup();
+    convert.mockRejectedValueOnce(new Error('FFmpeg did not start writing in time'));
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('bounds retries when conversion keeps failing', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError } = setup();
+    convert.mockRejectedValue(new Error('Conversion failed'));
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledTimes(3);
+    expect(onError).toHaveBeenCalledOnce();
+    playback.destroy();
+  });
+
+  it('cancels a pending retry when destroyed', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError } = setup();
+    convert.mockRejectedValue(new Error('Conversion failed'));
+    const starting = playback.start(0);
+    await vi.advanceTimersByTimeAsync(0);
+    playback.destroy();
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('a newer seek supersedes a pending retry', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError, video, source } = setup();
+    await playback.start(0);
+    source.readyState = 'open';
+    source.duration = 1000;
+    convert.mockRejectedValueOnce(new Error('Conversion failed'));
+    video.currentTime = 100;
+    playback.seeking();
+    await vi.advanceTimersByTimeAsync(0);
+    video.currentTime = 500;
+    source.buffer.buffered = ranges([500, 510]);
+    vi.spyOn(source.buffer, 'appendBuffer').mockImplementationOnce(() => {
+      source.duration = 520;
+      source.buffer.buffered = ranges([500, 520]);
+    });
+    playback.seeking();
+    await vi.runAllTimersAsync();
+    expect(convert).toHaveBeenCalledTimes(3);
+    expect(convert).toHaveBeenNthCalledWith(1, 0);
+    expect(convert).toHaveBeenNthCalledWith(2, 100);
+    expect(convert).toHaveBeenNthCalledWith(3, 510);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('evicts distant future data on quota pressure after a backward seek', async () => {
+    const { playback, onError, source } = setup();
+    source.buffer.buffered = ranges([0, 10], [500, 560]);
+    const remove = vi.spyOn(source.buffer, 'remove');
+    const append = vi.spyOn(source.buffer, 'appendBuffer');
+    append.mockImplementationOnce(() => {
+      throw new DOMException('Buffer full', 'QuotaExceededError');
+    });
+    await playback.start(0);
+    expect(remove).toHaveBeenCalledWith(3, 560);
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('retries a failed converted stream request', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError } = setup();
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('Network error'));
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('retries when the converted response body fails', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError } = setup();
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error('Read interrupted'));
+          },
+        }),
+      ),
+    );
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('bounds retries when FFmpeg repeatedly ends without making progress', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError, source } = setup();
+    source.buffer.buffered = ranges();
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledTimes(3);
+    expect(onError).toHaveBeenCalledOnce();
+    playback.destroy();
+  });
 
   it('does not start a backend process if destroyed before sourceopen', async () => {
     const { playback, convert, source } = setup();

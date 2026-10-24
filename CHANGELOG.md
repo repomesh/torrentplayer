@@ -7,6 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Audio conversion retries temporary startup and stream-read failures twice before falling back
+  to silent playback. Seeking again cancels a pending retry. When large videos fill the media
+  buffer after backward seeks, distant future segments are evicted before retrying the append.
+
 ## [0.3.1] - 2026-10-23
 
 ### Added

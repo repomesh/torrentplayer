@@ -27,6 +27,9 @@ export const BEHIND_KEEP_SECS = 30;
 export const REACH_SECS = 3;
 /** How often a paused reader checks whether to resume. */
 const ROOM_POLL_MS = 500;
+/** Retry temporary conversion/read failures without abandoning audio on the first stall. */
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 1000;
 
 /** Seconds buffered from `time` onward in the range that contains it (0 if none does). */
 export function bufferedAhead(ranges: TimeRanges, time: number): number {
@@ -185,7 +188,7 @@ export class ConvertedPlayback {
   }
 
   /** Starts a conversion from `start` and appends its output until it ends or is replaced. */
-  private async load(start: number, first: boolean): Promise<void> {
+  private async load(start: number, first: boolean, retries = 0): Promise<void> {
     const generation = ++this.generation;
     this.request?.abort();
     const request = new AbortController();
@@ -193,15 +196,20 @@ export class ConvertedPlayback {
     void this.reader?.cancel().catch(() => undefined);
     this.reader = null;
     this.running = { start, end: start };
+    let retryable = true;
+    let retryFrom = start;
+    let ready = !first;
     try {
       const converted = await this.options.convert(start);
       if (!this.current(generation)) {
         return;
       }
+      retryable = false;
       const buffer = await this.prepare(converted);
       if (!this.current(generation)) {
         return;
       }
+      retryable = true;
       const response = await fetch(converted.url, { cache: 'no-store', signal: request.signal });
       if (!response.ok || response.body === null) {
         throw new Error(`The converted stream failed (HTTP ${String(response.status)}).`);
@@ -212,9 +220,12 @@ export class ConvertedPlayback {
         return;
       }
       this.reader = reader;
-      let ready = !first;
       for (;;) {
         await this.roomAhead(generation);
+        if (!this.current(generation)) {
+          return;
+        }
+        retryable = true;
         const { done, value } = await reader.read();
         if (!this.current(generation)) {
           return;
@@ -225,6 +236,7 @@ export class ConvertedPlayback {
             return;
           }
           const end = this.running.end;
+          retryFrom = Math.max(start, end);
           this.running = null;
           this.reader = null;
           if (endedEarly(end, this.source.duration)) {
@@ -239,6 +251,7 @@ export class ConvertedPlayback {
           }
           return;
         }
+        retryable = false;
         if (!(await this.append(buffer, value, generation))) {
           return;
         }
@@ -257,6 +270,17 @@ export class ConvertedPlayback {
       }
     } catch (reason: unknown) {
       if (this.current(generation)) {
+        if (retryable && retries < MAX_RETRIES) {
+          const from = Math.max(retryFrom, this.running?.end ?? start);
+          request.abort();
+          void this.reader?.cancel().catch(() => undefined);
+          await sleep(RETRY_DELAY_MS);
+          // A new seek or closing the player supersedes the pending retry.
+          if (this.current(generation)) {
+            await this.load(from, !ready, retries + 1);
+          }
+          return;
+        }
         this.options.onError(reason);
       }
     }
@@ -305,9 +329,9 @@ export class ConvertedPlayback {
       if (!(reason instanceof DOMException && reason.name === 'QuotaExceededError')) {
         throw reason;
       }
-      // Full even after trimming: wait for playback to move on, then retry once.
-      await sleep(ROOM_POLL_MS * 4);
-      await this.trimBehind(buffer);
+      // Backward seeks can leave distant future ranges occupying the quota. Free both sides
+      // of a small playback window; waiting cannot help when playback is stalled for this data.
+      await this.trimForQuota(buffer, generation);
       if (!this.current(generation)) {
         return false;
       }
@@ -315,6 +339,30 @@ export class ConvertedPlayback {
     }
     await idle(buffer);
     return this.current(generation);
+  }
+
+  private async trimForQuota(buffer: SourceBuffer, generation: number): Promise<void> {
+    await idle(buffer);
+    if (!this.current(generation)) {
+      return;
+    }
+    const behind = Math.max(0, this.video.currentTime - 1);
+    if (behind > 0) {
+      buffer.remove(0, behind);
+      await idle(buffer);
+    }
+    if (!this.current(generation)) {
+      return;
+    }
+    // Keep the active conversion's output: discarding it would leave a gap before the next
+    // fragment. Only unrelated future ranges left by earlier seeks may be evicted.
+    const ahead = Math.max(this.video.currentTime + REACH_SECS, (this.running?.end ?? 0) + 0.1);
+    const ranges = buffer.buffered;
+    const end = ranges.length > 0 ? ranges.end(ranges.length - 1) : 0;
+    if (end > ahead) {
+      buffer.remove(ahead, end);
+      await idle(buffer);
+    }
   }
 
   /** Removes data more than {@link BEHIND_KEEP_SECS} behind the playhead. */
