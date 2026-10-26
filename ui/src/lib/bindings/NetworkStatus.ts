@@ -30,7 +30,9 @@ trafficAllowed: boolean,
 killSwitchEngaged: boolean, 
 /**
  * Whether scoped UDP is available: direct, through WireGuard, or via a SOCKS5 UDP
- * association. Proxy UDP support is negotiated per association, not by the health check.
+ * association. Proxy UDP support is negotiated per association, not by the health check:
+ * this turns false once the proxy refuses one (no UDP support, or an unusable relay), until
+ * one succeeds or the settings change.
  */
 udpAllowed: boolean, 
 /**

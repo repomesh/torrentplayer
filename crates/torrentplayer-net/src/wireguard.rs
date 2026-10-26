@@ -261,12 +261,38 @@ impl Parser {
             .split_once('=')
             .ok_or_else(|| line_error(n, "expected 'Key = Value'"))?;
         let (key, value) = (key.trim(), value.trim());
+        if !is_setting_name(key) {
+            return self.unrecognized(n, key);
+        }
         let lower = key.to_ascii_lowercase();
         match self.section {
             Section::None => Err(line_error(n, "setting outside a section")),
             Section::Interface => self.interface_key(n, key, &lower, value),
             Section::Peer => self.peer_key(n, key, &lower, value),
         }
+    }
+
+    /// A line whose key is not a setting name. Base64 keys end in `=`, so this is probably a
+    /// key pasted on its own, or a key setting without its ` = ` (`PresharedKey <key>`).
+    /// Neither the line nor its key is repeated, as both may hold key material. A malformed key
+    /// setting is refused rather than ignored: the tunnel would otherwise run without that key.
+    fn unrecognized(&mut self, n: usize, key: &str) -> Result<(), WireGuardError> {
+        let lower = key.to_ascii_lowercase();
+        if let Some(name) = ["PrivateKey", "PublicKey", "PresharedKey"]
+            .into_iter()
+            .find(|name| lower.starts_with(&name.to_ascii_lowercase()))
+        {
+            return Err(line_error(
+                n,
+                format!("{name} must be written as '{name} = <key>'"),
+            ));
+        }
+        if self.section == Section::None {
+            return Err(line_error(n, "setting outside a section"));
+        }
+        self.warnings
+            .push(format!("line {n}: an unrecognized line was ignored"));
+        Ok(())
     }
 
     fn interface_key(
@@ -526,6 +552,12 @@ fn parse_endpoint(n: usize, value: &str) -> Result<String, WireGuardError> {
     Err(bad())
 }
 
+/// A setting name as `wg-quick` writes them (`PrivateKey`, `AllowedIPs`), short enough to repeat
+/// in a warning. Anything else may be key material and is never repeated.
+fn is_setting_name(key: &str) -> bool {
+    (1..=32).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_alphabetic())
+}
+
 /// A DNS name: dot-separated labels of letters, digits, and hyphens.
 fn is_host_name(host: &str) -> bool {
     let host = host.strip_suffix('.').unwrap_or(host);
@@ -635,6 +667,53 @@ PersistentKeepalive = 25
         assert!(error_for(&text).to_string().contains("zeros"));
         let text = text.replace(&zeros, "not base64!!");
         assert!(error_for(&text).to_string().contains("base64"));
+    }
+
+    #[test]
+    fn malformed_key_lines_are_never_echoed() {
+        let interface = format!("[Interface]\nPrivateKey = {PRIVATE}\nAddress = 10.0.0.2/32\n");
+        let peer = format!(
+            "[Peer]\nPublicKey = {PUBLIC}\nAllowedIPs = 0.0.0.0/0\nEndpoint = 1.2.3.4:51820\n"
+        );
+        // Any run of 8 characters from a key.
+        let leaks = |text: &str| {
+            [PRIVATE, PUBLIC, PSK]
+                .iter()
+                .any(|key| (0..=key.len() - 8).any(|i| text.contains(&key[i..i + 8])))
+        };
+        for line in [
+            format!("PresharedKey {PSK}"),
+            format!("PresharedKey: {PSK}"),
+            format!("presharedkey   {PSK}"),
+            format!("PublicKey {PUBLIC}"),
+        ] {
+            let error = error_for(&format!("{interface}{peer}{line}\n")).to_string();
+            assert!(error.starts_with("line 8: "), "{error}");
+            assert!(error.contains(" = <key>'"), "{error}");
+            assert!(!leaks(&error), "{error}");
+        }
+        let text = format!("[Interface]\nPrivateKey {PRIVATE}\nAddress = 10.0.0.2/32\n{peer}");
+        let error = error_for(&text).to_string();
+        assert!(error.contains("line 2: PrivateKey must be"), "{error}");
+        assert!(!leaks(&error), "{error}");
+
+        // A key pasted on its own line, in either section, or another non-name: ignored, and
+        // not repeated.
+        for text in [
+            format!("{interface}{peer}{PSK}\n"),
+            format!("[Interface]\n{PSK}\nPrivateKey = {PRIVATE}\nAddress = 10.0.0.2\n{peer}"),
+            format!("{interface}{peer}Some-Thing = {PSK}\n"),
+        ] {
+            let (config, warnings) = WireGuardConfig::parse(&text).unwrap();
+            assert_eq!(warnings.len(), 1, "{warnings:?}");
+            assert!(warnings[0].contains("unrecognized line"), "{warnings:?}");
+            assert!(!leaks(&warnings[0]), "{warnings:?}");
+            let summary = serde_json::to_string(&config.summary(warnings)).unwrap();
+            assert!(!summary.contains(PSK) && !summary.contains(PRIVATE));
+        }
+        // A setting name is still named.
+        let (_, warnings) = WireGuardConfig::parse(&format!("{interface}{peer}Wat = 1\n")).unwrap();
+        assert_eq!(warnings, ["line 8: unknown setting Wat was ignored"]);
     }
 
     #[test]

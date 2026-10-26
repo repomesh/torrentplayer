@@ -351,6 +351,31 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   withdrawn, instead of staying open until TorrentPlayer quits.
 - Downloads in the old `Downloads\TorrentStream` cache now move to `Downloads\TorrentPlayer` even
   when its cache folder already exists. A torrent cached in both stays in the old folder.
+- Importing a WireGuard configuration with a malformed key line, such as `PresharedKey <key>`
+  without the `=`, showed most of the key in the import warnings and silently dropped it. Such
+  key lines are now refused, other unrecognized lines are ignored without being repeated, and no
+  warning or error quotes key material.
+- A direct peer connection still being made when you switch to the WireGuard tunnel or a SOCKS5
+  proxy is now abandoned at once. Before, it could still reach the peer from your own address
+  and was only closed afterwards.
+- A SOCKS5 proxy on the internet can no longer point DHT and UDP tracker traffic at your own
+  computer or local network by naming a local UDP relay; such relays are refused. A proxy that
+  is itself on your computer or network may still use one.
+- Teredo (`2001::/32`), IPv6 benchmarking (`2001:2::/48`), and the new IPv6 documentation range
+  (`3fff::/20`) no longer count as public addresses, so web seeds and peers cannot use them to
+  reach hosts that only public destinations should.
+- The network status now shows DHT and UDP as off once the SOCKS5 proxy refuses a UDP
+  association, instead of always reporting UDP as available.
+- Turning off incoming connections or UPnP, or leaving direct mode, now asks the router to remove
+  TorrentPlayer's UPnP port mapping (for up to two seconds, never delaying quitting) instead of
+  leaving it open until its lease ran out.
+- Clearing a proxy password or WireGuard key now reports an error if a copy filed under the old
+  Lumen name in the system credential store cannot be removed. Before, that copy was silently
+  kept and brought the cleared secret back on the next read.
+- When the system credential store cannot be read (for example, while it is locked), the
+  WireGuard and SOCKS5 modes now block traffic with a message saying so and read it again after a
+  few seconds, then less often. Before, the WireGuard tunnel could start without its preshared
+  key, and a missing private key left the tunnel in an error state that was never retried.
 
 ### Known limitations
 

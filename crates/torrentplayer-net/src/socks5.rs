@@ -463,15 +463,18 @@ where
     if request[0] != VERSION || request[2] != 0 {
         return Err(Socks5Error::Protocol("malformed request"));
     }
-    if request[1] != CMD_CONNECT {
-        send_reply(stream, Reply::CommandNotSupported).await?;
-        return Err(Socks5Error::UnsupportedCommand);
-    }
     if !matches!(request[3], ATYP_V4 | ATYP_V6 | ATYP_DOMAIN) {
         send_reply(stream, Reply::AddressTypeNotSupported).await?;
         return Err(Socks5Error::Protocol("unknown address type"));
     }
-    Ok((read_address(stream, request[3]).await?, user_index))
+    // Read the whole request before refusing it: closing with unread data resets the
+    // connection, and the client might then never see the reply.
+    let target = read_address(stream, request[3]).await?;
+    if request[1] != CMD_CONNECT {
+        send_reply(stream, Reply::CommandNotSupported).await?;
+        return Err(Socks5Error::UnsupportedCommand);
+    }
+    Ok((target, user_index))
 }
 
 /// Reads a length-prefixed field (RFC 1929): one length byte (1-255), then that many bytes.

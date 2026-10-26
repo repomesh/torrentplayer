@@ -642,6 +642,38 @@ async fn a_direct_dial_started_before_a_switch_to_protected_never_goes_out() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_to_protected_abandons_a_direct_dial_in_flight() {
+    // A dial still in progress when the mode becomes protected must not reach the peer, not
+    // even to be dropped once it connects.
+    let (echo, hits) = echo_server().await;
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    *net.inner.connect_delay.lock().unwrap() = Duration::from_millis(500);
+    let connecting = tokio::spawn({
+        let net = net.clone();
+        async move { net.connect(echo).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    net.apply(NetworkConfig {
+        hold: Some("confirm the network settings first".into()),
+        ..NetworkConfig::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        connecting.await.unwrap(),
+        Err(NetError::KillSwitch(_))
+    ));
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "a direct connection went out"
+    );
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hold_blocks_direct_mode_until_cleared() {
     let (echo, hits) = echo_server().await;
     let held = NetworkConfig {
@@ -800,10 +832,22 @@ async fn unsupported_proxy_udp_is_refused_without_fallback_and_the_kill_switch_b
         .unwrap();
     net.settled(Duration::from_secs(5)).await;
     assert!(net.policy().bound_udp_allowed);
+    assert!(
+        net.status().udp_allowed,
+        "unknown until a UDP association is asked for"
+    );
+    let mut changes = net.status_changes();
+    changes.borrow_and_update();
     assert!(matches!(
         net.udp_socket(target).await,
         Err(NetError::Proxy(_))
     ));
+    assert!(changes.has_changed().unwrap(), "the refusal is announced");
+    assert!(!net.status().udp_allowed, "the status shows the refusal");
+    // Until the settings change.
+    net.apply(socks_mode(&proxy, Some(("alice", "pw"))))
+        .unwrap();
+    assert!(net.status().udp_allowed);
     net.shutdown();
 
     let net = Network::start(dead_proxy().await, fast_options())
@@ -841,6 +885,7 @@ async fn socks_udp_uses_only_the_relay_and_dies_with_its_control_connection() {
     let net = Network::start(cfg, fast_options()).await.unwrap();
     assert!(net.settled(Duration::from_secs(3)).await.traffic_allowed);
     let (socket, lease) = net.udp_socket(destination).await.unwrap();
+    assert!(net.status().udp_allowed);
     socket.send_to(b"via proxy", destination).await.unwrap();
     let mut bytes = [0; 64];
     let (n, from) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
@@ -1238,10 +1283,19 @@ async fn the_port_is_reachable_only_while_the_router_confirms_a_public_mapping()
     gateway.set_external(Some(public));
     wait_for_reachable(&net, Some(port)).await;
 
-    // Closing the listener forgets the mapping at once.
+    // Closing the listener forgets the mapping at once, and asks the router to remove it.
+    assert!(gateway.unmapped_ports().is_empty());
     net.set_incoming(IncomingConfig::default());
     wait_for_incoming(&net, |s| *s == IncomingStatus::Off).await;
     assert_eq!(net.reachable_port(), None);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while gateway.unmapped_ports().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the mapping is removed");
+    assert_eq!(gateway.unmapped_ports(), [port]);
     net.shutdown();
 }
 

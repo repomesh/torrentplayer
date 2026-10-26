@@ -9,6 +9,7 @@
 //! events, and the public IPv4 and IPv6 addresses (for the status bar, unless turned off) as
 //! [`PUBLIC_IP`] events. See `docs/network.md` and the network section of `docs/ipc.md`.
 
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -18,8 +19,8 @@ use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::watch;
 use torrentplayer_net::wireguard::{WgInterface, WgPeer};
 use torrentplayer_net::{
-    IncomingConfig, NetError, Network, NetworkConfig, NetworkMode, NetworkOptions, NetworkStatus,
-    PublicIp, Secret, Socks5Config, WireGuardConfig, WireGuardSummary,
+    ConnectionState, IncomingConfig, NetError, Network, NetworkConfig, NetworkMode, NetworkOptions,
+    NetworkStatus, PublicIp, Secret, Socks5Config, WireGuardConfig, WireGuardSummary,
 };
 use torrentplayer_settings::{
     ExposeSecret as _, Ipv6Policy, NetworkHold, NetworkSettings, SecretError, SecretKey,
@@ -52,6 +53,13 @@ pub(crate) const VPN_ADAPTER_HOLD: &str =
 /// the mode the user chose is unknown, until the user confirms a mode.
 pub(crate) const SETTINGS_UNREADABLE_HOLD: &str =
     "the network settings could not be read; choose a connection in Settings → Network & VPN";
+/// Why traffic is held when the proxy password or a WireGuard key could not be read from the
+/// credential store (as opposed to not being set). Reading is tried again, after
+/// [`SECRETS_RETRY_FIRST`] and then less often, up to [`SECRETS_RETRY_MAX`].
+pub(crate) const SECRETS_UNREADABLE_HOLD: &str = "the system credential store could not be \
+     read; unlock it if it is locked. TorrentPlayer tries again shortly";
+const SECRETS_RETRY_FIRST: Duration = Duration::from_secs(5);
+const SECRETS_RETRY_MAX: Duration = Duration::from_secs(5 * 60);
 
 /// Managed state: the network manager.
 #[derive(Clone)]
@@ -166,8 +174,16 @@ pub(crate) fn start(settings: &Settings, secrets: &dyn SecretStore) -> anyhow::R
     Ok(network)
 }
 
+/// Whether traffic is held because secrets could not be read ([`SECRETS_UNREADABLE_HOLD`]).
+fn secrets_unreadable(network: &Network) -> bool {
+    matches!(
+        network.status().state,
+        ConnectionState::Error { reason } if reason == SECRETS_UNREADABLE_HOLD
+    )
+}
+
 /// Applies network settings changes and sends status changes to the webview, for as long as
-/// the app runs.
+/// the app runs. While secrets cannot be read, it reads them again from time to time.
 pub(crate) fn follow(
     app: &AppHandle,
     network: &Network,
@@ -176,9 +192,27 @@ pub(crate) fn follow(
 ) {
     let (handle, net) = (app.clone(), network.clone());
     tauri::async_runtime::spawn(async move {
-        // Secret changes notify without changing the value, so every notification rebuilds the
-        // configuration; applying an unchanged one does nothing.
-        while settings.changed().await.is_ok() {
+        // While the credential store cannot be read, try again after this long, doubling.
+        let mut retry = secrets_unreadable(&net).then_some(SECRETS_RETRY_FIRST);
+        loop {
+            // Secret changes notify without changing the value, so every notification rebuilds
+            // the configuration; applying an unchanged one does nothing.
+            match retry {
+                Some(delay) => tokio::select! {
+                    changed = settings.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        retry = None;
+                    }
+                    () = tokio::time::sleep(delay) => {}
+                },
+                None => {
+                    if settings.changed().await.is_err() {
+                        return;
+                    }
+                }
+            }
             let network_settings = settings.borrow_and_update().network.clone();
             let incoming = incoming_from_settings(&network_settings);
             let store = Arc::clone(&secrets);
@@ -187,7 +221,13 @@ pub(crate) fn follow(
             })
             .await;
             match built {
-                Ok(config) => apply(&handle, &net, config, incoming).await,
+                Ok(config) => {
+                    let unreadable = config.hold.as_deref() == Some(SECRETS_UNREADABLE_HOLD);
+                    apply(&handle, &net, config, incoming).await;
+                    retry = unreadable.then(|| {
+                        retry.map_or(SECRETS_RETRY_FIRST, |d| (d * 2).min(SECRETS_RETRY_MAX))
+                    });
+                }
                 Err(error) => tracing::error!(%error, "could not read the network settings"),
             }
         }
@@ -252,7 +292,9 @@ pub(crate) fn incoming_from_settings(settings: &NetworkSettings) -> IncomingConf
 /// ([`VPN_ADAPTER_HOLD`]) until the user dismisses the notice or picks another mode: the user
 /// chose to send nothing outside their VPN, so nothing is sent before they confirm the change.
 /// Settings that could not be read ([`NetworkHold::SettingsUnreadable`]) load as Direct and are
-/// held the same way ([`SETTINGS_UNREADABLE_HOLD`]): the mode the user chose is unknown.
+/// held the same way ([`SETTINGS_UNREADABLE_HOLD`]): the mode the user chose is unknown. So is
+/// any mode whose secrets could not be read from the credential store
+/// ([`SECRETS_UNREADABLE_HOLD`]); [`follow`] then reads them again from time to time.
 ///
 /// There is no kill-switch setting: every mode except direct always fails closed. `proxy_dht`
 /// controls DHT through SOCKS5 UDP ASSOCIATE, without a direct fallback. `encryption` is not
@@ -261,6 +303,7 @@ pub(crate) fn config_from_settings(
     settings: &NetworkSettings,
     secrets: &dyn SecretStore,
 ) -> NetworkConfig {
+    let unreadable = Cell::new(false);
     let mode = match settings.mode {
         torrentplayer_settings::NetworkMode::Direct => NetworkMode::Direct,
         torrentplayer_settings::NetworkMode::Socks5 => {
@@ -268,7 +311,7 @@ pub(crate) fn config_from_settings(
             let username = s.username.clone().filter(|u| !u.is_empty());
             let password = username
                 .as_ref()
-                .and_then(|_| read_secret(secrets, SecretKey::Socks5Password));
+                .and_then(|_| read_secret(secrets, SecretKey::Socks5Password, &unreadable));
             NetworkMode::Socks5(Socks5Config {
                 host: s.host.clone(),
                 port: s.port,
@@ -280,10 +323,12 @@ pub(crate) fn config_from_settings(
             })
         }
         torrentplayer_settings::NetworkMode::WireGuard => {
-            NetworkMode::WireGuard(wireguard(&settings.wireguard, secrets))
+            NetworkMode::WireGuard(wireguard(&settings.wireguard, secrets, &unreadable))
         }
     };
     let hold = match settings.hold {
+        // Never run without a secret that is set but could not be read (a PSK, say).
+        _ if unreadable.get() => Some(SECRETS_UNREADABLE_HOLD.to_owned()),
         _ if mode != NetworkMode::Direct => None,
         Some(NetworkHold::VpnAdapterModeRemoved) => Some(VPN_ADAPTER_HOLD.to_owned()),
         Some(NetworkHold::SettingsUnreadable) => Some(SETTINGS_UNREADABLE_HOLD.to_owned()),
@@ -296,22 +341,33 @@ pub(crate) fn config_from_settings(
     }
 }
 
-fn read_secret(secrets: &dyn SecretStore, key: SecretKey) -> Option<Secret> {
+/// Reads a secret: `None` if it is not set. A read failure also returns `None`, and sets
+/// `unreadable`.
+fn read_secret(
+    secrets: &dyn SecretStore,
+    key: SecretKey,
+    unreadable: &Cell<bool>,
+) -> Option<Secret> {
     match secrets.get(key) {
         Ok(value) => value.map(|v| Secret::new(v.expose_secret())),
         Err(error) => {
             tracing::warn!(%error, ?key, "could not read a network secret");
+            unreadable.set(true);
             None
         }
     }
 }
 
 /// Rebuilds the imported configuration with keys read only inside the backend.
-fn wireguard(s: &WireGuardSettings, secrets: &dyn SecretStore) -> WireGuardConfig {
+fn wireguard(
+    s: &WireGuardSettings,
+    secrets: &dyn SecretStore,
+    unreadable: &Cell<bool>,
+) -> WireGuardConfig {
     let peers = match (&s.peer_public_key, &s.peer_endpoint) {
         (Some(public_key), Some(endpoint)) => vec![WgPeer {
             public_key: public_key.clone(),
-            preshared_key: read_secret(secrets, SecretKey::WireGuardPresharedKey),
+            preshared_key: read_secret(secrets, SecretKey::WireGuardPresharedKey, unreadable),
             allowed_ips: s.allowed_ips.clone(),
             endpoint: endpoint.clone(),
             persistent_keepalive: s.persistent_keepalive,
@@ -320,7 +376,8 @@ fn wireguard(s: &WireGuardSettings, secrets: &dyn SecretStore) -> WireGuardConfi
     };
     WireGuardConfig {
         interface: WgInterface {
-            private_key: read_secret(secrets, SecretKey::WireGuardPrivateKey).unwrap_or_default(),
+            private_key: read_secret(secrets, SecretKey::WireGuardPrivateKey, unreadable)
+                .unwrap_or_default(),
             addresses: s.addresses.clone(),
             dns: s.dns.clone(),
             mtu: s.mtu,
@@ -683,6 +740,57 @@ mod tests {
         );
         assert!(wg.peers[0].preshared_key.is_some());
         assert!(!format!("{wg:?}").contains(parsed.private_key.expose_secret()));
+    }
+
+    /// A credential store that is there but refuses every read, as when it is locked.
+    #[derive(Debug)]
+    struct LockedStore;
+
+    impl SecretStore for LockedStore {
+        fn available(&self) -> bool {
+            true
+        }
+
+        fn set(&self, _: SecretKey, _: &SecretString) -> Result<(), SecretError> {
+            Err(SecretError::Refused)
+        }
+
+        fn get(&self, _: SecretKey) -> Result<Option<SecretString>, SecretError> {
+            Err(SecretError::Refused)
+        }
+
+        fn clear(&self, _: SecretKey) -> Result<(), SecretError> {
+            Err(SecretError::Refused)
+        }
+    }
+
+    #[test]
+    fn unreadable_secrets_hold_traffic_instead_of_running_without_them() {
+        let mut wg = NetworkSettings {
+            mode: torrentplayer_settings::NetworkMode::WireGuard,
+            ..NetworkSettings::default()
+        };
+        wg.wireguard.peer_endpoint = Some("198.51.100.1:51820".into());
+        wg.wireguard.peer_public_key = Some("xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=".into());
+        for settings in [wg, socks_settings(Some("alice"))] {
+            let config = config_from_settings(&settings, &LockedStore);
+            assert_eq!(config.hold.as_deref(), Some(SECRETS_UNREADABLE_HOLD));
+            assert!(config.is_protected());
+            // Not set at all is different: the mode says what is missing.
+            assert_eq!(
+                config_from_settings(&settings, &MemoryStore::new()).hold,
+                None
+            );
+        }
+        // Without a username nothing is read, so nothing is held.
+        assert_eq!(
+            config_from_settings(&socks_settings(None), &LockedStore).hold,
+            None
+        );
+        assert_eq!(
+            config_from_settings(&NetworkSettings::default(), &LockedStore),
+            NetworkConfig::default()
+        );
     }
 
     #[test]
