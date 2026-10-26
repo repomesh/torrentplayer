@@ -313,6 +313,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   address stream exhausted"): the metadata lookup now gets up to 200 DHT peers instead of 20.
 - Videos with chapters whose Dolby or DTS audio needs converting, such as Sintel, now play with
   sound. The conversion used to fail at once with "The audio could not be converted".
+- A queue file that could not be read (for example while an antivirus scanner held it) or was
+  damaged no longer loses the queue: it is retried briefly, copied aside to
+  `queue.invalid-<time>.json` without replacing earlier copies, and never overwritten before a
+  copy exists. While the queue loaded with problems, finished downloads are not cleaned up, so
+  the lost queue's downloads are no longer deleted at startup. Queue files from a newer version
+  are copied to `queue.newer-<time>.json` before they are first replaced.
 
 ### Known limitations
 

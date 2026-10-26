@@ -649,8 +649,12 @@ loopback addresses) are refused.
 #### `load_queue`
 
 The saved queue (`queue.json` in the app data folder), or an empty one. Invalid items are
-dropped, a `current` that names no item is cleared, and a damaged file is set aside as
-`queue.invalid.json`.
+dropped and a `current` that names no item is cleared. A file that cannot be read or is damaged
+gives an empty queue and is copied to `queue.invalid-<time>.json` (an existing copy is never
+replaced); a file with dropped items, or from a newer version (`queue.newer-<time>.json`), is
+copied the same way before it is first replaced. `save_queue` fails rather than replace a file
+that has no copy yet. While the queue loaded with such problems, finished downloads are not
+cleaned up.
 
 |            |                                                                          |
 | ---------- | ------------------------------------------------------------------------ |

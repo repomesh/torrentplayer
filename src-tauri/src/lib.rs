@@ -177,8 +177,10 @@ pub fn run() -> anyhow::Result<()> {
             }
             let library = library::LibraryState::new(folders.data.clone());
             let queue = queue::QueueState::new(folders.data.clone());
-            let saved_queue = queue.load();
-            settings.run_startup_maintenance(&saved_queue);
+            let loaded_queue = queue.load();
+            settings
+                .run_startup_maintenance((!loaded_queue.degraded).then_some(&loaded_queue.queue));
+            let saved_queue = loaded_queue.queue;
             // The network manager starts before anything can connect, and then follows the
             // network settings, so no traffic ever leaves outside the selected mode.
             let network = network::start(&settings.current(), settings.secrets().as_ref())?;
