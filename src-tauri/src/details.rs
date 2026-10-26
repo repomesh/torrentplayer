@@ -131,9 +131,13 @@ pub(crate) async fn torrent_details(
     Ok(core.engine.torrent_details(&fetched).map(dto))
 }
 
-/// Whether `link` may be opened in the system browser: an http(s) URL with a host name, no
-/// credentials, not on this computer or the local network, and at most 2 KiB. Returns it
-/// normalized.
+/// Whether `link` may be opened in the system browser: an http(s) URL with a host, no
+/// credentials, and at most 2 KiB, whose host does not name this computer or the local network.
+/// Returns it normalized.
+///
+/// The host check is lexical: IP addresses outside the public ranges, `localhost`, and `.local`
+/// names are refused, but a public-looking name is not resolved, so one whose DNS points at a
+/// local address passes. The browser, not TorrentPlayer, makes the request.
 pub(crate) fn openable(link: &str) -> Option<String> {
     if link.len() > MAX_LINK_BYTES {
         return None;
