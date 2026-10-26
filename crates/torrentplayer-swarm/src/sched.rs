@@ -99,7 +99,8 @@ pub struct SchedulerConfig {
     /// Upper bound on memory held by partially downloaded background pieces, shared by every
     /// torrent of the engine. Torrents nobody is playing or reading stop starting pieces at
     /// three quarters of it, leaving the rest to the one being played; urgent pieces are never
-    /// held back, and every torrent may always work on at least one piece.
+    /// held back, and every torrent may always work on at least one piece. A paused torrent
+    /// gives its partial pieces back, and so does a stalled one while the budget is contended.
     pub max_in_progress_bytes: u64,
 }
 
@@ -178,6 +179,8 @@ struct Progress {
     /// For a piece that failed its hash check before: the one peer downloading it again (see
     /// [`Scheduler::take_blocks`]).
     owner: Option<PeerKey>,
+    /// When a block was last requested or received (or the piece was started).
+    active: Instant,
 }
 
 /// A digest of one block's data, for smart ban (see [`Scheduler::on_verified`]).
@@ -207,6 +210,10 @@ pub(crate) struct Verified {
 /// Torrents with no playhead or reader leave this fraction (one in `STREAMING_RESERVE`) of the
 /// [`PieceBudget`] to torrents being played.
 const STREAMING_RESERVE: u64 = 4;
+/// While the [`PieceBudget`] is contended, a partial piece with no block requested or received
+/// for this long is dropped and its memory given back, so a stalled torrent cannot hold it
+/// forever.
+const STALE_PIECE: Duration = Duration::from_secs(60);
 
 /// Memory for partially downloaded pieces, shared by every torrent of an engine (see
 /// [`SchedulerConfig::max_in_progress_bytes`]). Each [`Scheduler`] accounts for its own
@@ -223,6 +230,11 @@ impl PieceBudget {
             limit,
             used: AtomicU64::new(0),
         })
+    }
+
+    /// What torrents with no playhead or reader may fill (see [`STREAMING_RESERVE`]).
+    fn idle_limit(&self) -> u64 {
+        self.limit - self.limit / STREAMING_RESERVE
     }
 
     /// Takes `bytes` if that keeps the total within `limit`.
@@ -243,7 +255,6 @@ impl PieceBudget {
             });
     }
 
-    #[cfg(test)]
     fn used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
     }
@@ -812,6 +823,12 @@ impl Scheduler {
             }
         }
         self.cancelled_requests += cancels.len() as u64;
+        // The user paused it: its partial pieces give their memory back to other torrents and
+        // are downloaded again later.
+        let started: Vec<u32> = self.progress.keys().copied().collect();
+        for piece in started {
+            self.discard_progress(piece);
+        }
         cancels
     }
 
@@ -1106,7 +1123,7 @@ impl Scheduler {
                 continue;
             }
             let mine = self.eta(key, picked.len());
-            self.ensure_progress(piece, true);
+            self.ensure_progress(piece, true, now);
             let duplicate = !self.cfg.endgame_horizon.is_zero() && due <= self.cfg.endgame_horizon;
             let rescue = mine.zip(self.rate_of(key)).map(|(eta, rate)| Rescue {
                 needed_in,
@@ -1146,7 +1163,7 @@ impl Scheduler {
                 {
                     continue;
                 }
-                if !self.ensure_progress(piece, false) {
+                if !self.ensure_progress(piece, false, now) {
                     break;
                 }
                 want -= self.take_blocks(key, piece, want, false, None, now, &mut picked);
@@ -1185,7 +1202,7 @@ impl Scheduler {
 
     /// Creates download state for a piece. Background pieces respect the engine's memory
     /// budget, and leave part of it to torrents being played.
-    fn ensure_progress(&mut self, piece: u32, urgent: bool) -> bool {
+    fn ensure_progress(&mut self, piece: u32, urgent: bool, now: Instant) -> bool {
         if self.progress.contains_key(&piece) {
             return true;
         }
@@ -1195,7 +1212,7 @@ impl Scheduler {
         let limit = if urgent || self.in_progress_bytes == 0 {
             u64::MAX
         } else if self.interests.is_empty() {
-            self.budget.limit - self.budget.limit / STREAMING_RESERVE
+            self.budget.idle_limit()
         } else {
             self.budget.limit
         };
@@ -1211,10 +1228,21 @@ impl Scheduler {
                 received: 0,
                 senders: vec![None; blocks],
                 owner: None,
+                active: now,
             },
         );
         self.in_progress_bytes += size;
         true
+    }
+
+    /// Forgets the partial download of `piece` and gives its memory back. Blocks still on
+    /// their way are counted as wasted when they arrive.
+    fn discard_progress(&mut self, piece: u32) {
+        if let Some(progress) = self.progress.remove(&piece) {
+            let size = progress.data.len() as u64;
+            self.in_progress_bytes -= size;
+            self.budget.give_back(size);
+        }
     }
 
     /// When a block requested from `key` now, after `extra` more, would arrive: what is queued
@@ -1400,6 +1428,9 @@ impl Scheduler {
                 taken += 1;
             }
         }
+        if taken > 0 {
+            progress.active = now;
+        }
         taken
     }
 
@@ -1506,6 +1537,7 @@ impl Scheduler {
         let at = begin as usize;
         progress.data[at..at + data.len()].copy_from_slice(data);
         progress.received += 1;
+        progress.active = now;
         progress.senders[block as usize] = Some(key);
         if progress.received as usize == progress.blocks.len()
             && let Some(done) = self.progress.remove(&piece)
@@ -1682,6 +1714,23 @@ impl Scheduler {
         }
 
         self.cancelled_requests += cancels.len() as u64;
+        if self.budget.used() >= self.budget.idle_limit() {
+            let stale: Vec<u32> = self
+                .progress
+                .iter()
+                .filter(|(_, p)| {
+                    now.saturating_duration_since(p.active) >= STALE_PIECE
+                        && !p
+                            .blocks
+                            .iter()
+                            .any(|b| matches!(b, BlockState::Requested(_)))
+                })
+                .map(|(&piece, _)| piece)
+                .collect();
+            for piece in stale {
+                self.discard_progress(piece);
+            }
+        }
         if refresh_background {
             let mut order: Vec<u32> = (0..self.meta.piece_count())
                 .filter(|&p| self.wanted[p as usize] && !self.have[p as usize])
@@ -1815,21 +1864,21 @@ mod tests {
 
         // A torrent nobody is playing stops at three quarters of the budget...
         let started = (0..100)
-            .take_while(|&p| background.ensure_progress(p, false))
+            .take_while(|&p| background.ensure_progress(p, false, Instant::now()))
             .count();
         assert_eq!(started, 6);
         // ...and the torrent being played gets the rest.
         let started = (0..100)
-            .take_while(|&p| playing.ensure_progress(p, false))
+            .take_while(|&p| playing.ensure_progress(p, false, Instant::now()))
             .count();
         assert_eq!(started, 2);
         assert_eq!(budget.used(), 8 * piece);
 
         // Another torrent can still work on one piece, and urgent pieces are never held back.
         let mut third = shared(100);
-        assert!(third.ensure_progress(0, false));
-        assert!(!third.ensure_progress(1, false));
-        assert!(playing.ensure_progress(50, true));
+        assert!(third.ensure_progress(0, false, Instant::now()));
+        assert!(!third.ensure_progress(1, false, Instant::now()));
+        assert!(playing.ensure_progress(50, true, Instant::now()));
         assert_eq!(budget.used(), 10 * piece);
 
         // A torrent that goes away gives back its pieces: alone, the one being played gets the
@@ -1837,7 +1886,7 @@ mod tests {
         drop((background, third));
         assert_eq!(budget.used(), 3 * piece);
         let started = (3..100)
-            .take_while(|&p| playing.ensure_progress(p, false))
+            .take_while(|&p| playing.ensure_progress(p, false, Instant::now()))
             .count();
         assert_eq!(started, 5);
         assert_eq!(budget.used(), 8 * piece);
@@ -1850,7 +1899,7 @@ mod tests {
         // A torrent whose partial pieces stall (its peers left) holds every byte it may.
         let mut stalled = Scheduler::with_budget(meta(100), small_queues(), Arc::clone(&budget));
         let started = (0..100)
-            .take_while(|&p| stalled.ensure_progress(p, false))
+            .take_while(|&p| stalled.ensure_progress(p, false, Instant::now()))
             .count();
         assert_eq!(started, 3);
         assert_eq!(budget.used(), 3 * piece);
@@ -1869,6 +1918,80 @@ mod tests {
         }
         assert_eq!(s.stats().have_pieces, 20, "every piece downloaded");
         assert_eq!(budget.used(), 3 * piece, "only the stalled pieces are held");
+    }
+
+    #[test]
+    fn pausing_gives_back_partial_pieces_and_ignores_their_late_blocks() {
+        let budget = PieceBudget::new(64 * MIB);
+        let mut s = Scheduler::with_budget(meta(10), small_queues(), Arc::clone(&budget));
+        s.want_range(0, s.meta.total_len);
+        s.tick(Instant::now(), true);
+        seed(&mut s, 1);
+        let requests = s.fill(1, Instant::now());
+        assert!(budget.used() > 0);
+
+        s.set_paused(true);
+        assert_eq!(budget.used(), 0, "a paused torrent holds no partial pieces");
+        assert!(s.progress.is_empty());
+        // A peer that ignores the cancels still sends them: dropped, not stored.
+        let wasted = s.stats().wasted_bytes;
+        for r in requests {
+            assert!(deliver(&mut s, 1, r).completed.is_none());
+        }
+        assert_eq!(s.stats().wasted_bytes, wasted + u64::from(PIECE));
+        assert_eq!(budget.used(), 0);
+
+        s.set_paused(false);
+        for _ in 0..20 {
+            for r in s.fill(1, Instant::now()) {
+                if let Some((piece, _)) = deliver(&mut s, 1, r).completed {
+                    s.on_verified(piece, PieceCheck::Valid(None));
+                }
+            }
+        }
+        assert_eq!(s.stats().have_pieces, 10, "downloaded again after resuming");
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn stalled_partial_pieces_are_given_back_while_the_budget_is_contended() {
+        let piece = u64::from(PIECE);
+        let cfg = SchedulerConfig {
+            request_timeout: Duration::from_secs(600),
+            ..small_queues()
+        };
+        let t0 = Instant::now();
+        let stall = |budget: &Arc<PieceBudget>| {
+            let mut s = Scheduler::with_budget(meta(100), cfg.clone(), Arc::clone(budget));
+            s.want_range(0, s.meta.total_len);
+            s.tick(t0, true);
+            seed(&mut s, 1);
+            // Piece 0 has requests outstanding at a peer that never answers; two more pieces
+            // were started and have none.
+            assert!(s.fill(1, t0).iter().all(|r| r.piece == 0));
+            assert!(s.ensure_progress(10, false, t0) && s.ensure_progress(11, false, t0));
+            s
+        };
+
+        // Uncontended, nothing is dropped however long it stalls.
+        let budget = PieceBudget::new(100 * piece);
+        let mut s = stall(&budget);
+        s.tick(t0 + 10 * STALE_PIECE, false);
+        assert_eq!(budget.used(), 3 * piece);
+
+        // Contended (it holds all that a torrent nobody plays may), stale pieces without
+        // outstanding requests are given back.
+        let budget = PieceBudget::new(4 * piece);
+        let mut s = stall(&budget);
+        s.tick(t0 + Duration::from_secs(59), false);
+        assert_eq!(budget.used(), 3 * piece, "not stale yet");
+        s.tick(t0 + STALE_PIECE, false);
+        assert_eq!(
+            budget.used(),
+            piece,
+            "only the piece with requests outstanding is kept"
+        );
+        assert_eq!(s.progress.keys().copied().collect::<Vec<_>>(), [0]);
     }
 
     #[test]
