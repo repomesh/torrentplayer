@@ -482,6 +482,9 @@ pub(crate) struct Scheduler {
     /// needed whole before playback starts): first among equally urgent pieces. Sorted.
     index_pieces: Vec<u32>,
     background: Vec<u32>,
+    /// Every piece of `background` before this index is verified, being downloaded, or being
+    /// checked, so a fill starts looking there. Reset whenever a piece can drop out of those.
+    background_skip: usize,
     peers: HashMap<PeerKey, Peer>,
     interests: HashMap<InterestId, Interest>,
     /// Interests in their critical phase.
@@ -536,6 +539,7 @@ impl Scheduler {
             critical_pieces: Vec::new(),
             index_pieces: Vec::new(),
             background: Vec::new(),
+            background_skip: 0,
             peers: HashMap::new(),
             interests: HashMap::new(),
             critical_interests: HashSet::new(),
@@ -601,6 +605,7 @@ impl Scheduler {
         {
             *slot = false;
             self.have_count -= 1;
+            self.background_skip = 0;
         }
     }
 
@@ -1151,16 +1156,22 @@ impl Scheduler {
                     want -= self.take_blocks(key, piece, want, false, None, now, &mut picked);
                 }
             }
-            // 3. Rarest wanted pieces first.
-            let mut i = 0;
+            // 3. Rarest wanted pieces first, skipping the run of pieces already taken care of
+            // at the front, which grows as pieces are started.
+            let mut i = self.background_skip;
             while want > 0 && i < self.background.len() {
                 let piece = self.background[i];
                 i += 1;
                 if self.have(piece)
                     || self.progress.contains_key(&piece)
                     || self.verifying.contains_key(&piece)
-                    || !self.peer_has(key, piece)
                 {
+                    if self.background_skip == i - 1 {
+                        self.background_skip = i;
+                    }
+                    continue;
+                }
+                if !self.peer_has(key, piece) {
                     continue;
                 }
                 if !self.ensure_progress(piece, false, now) {
@@ -1242,6 +1253,7 @@ impl Scheduler {
             let size = progress.data.len() as u64;
             self.in_progress_bytes -= size;
             self.budget.give_back(size);
+            self.background_skip = 0;
         }
     }
 
@@ -1599,8 +1611,9 @@ impl Scheduler {
                     }
                 }
                 self.remember_suspect(piece, &senders, &digests);
+                self.background_skip = 0;
             }
-            PieceCheck::NotStored => {}
+            PieceCheck::NotStored => self.background_skip = 0,
         }
         verified
     }
@@ -1741,6 +1754,7 @@ impl Scheduler {
                 .collect();
             order.sort_by_key(|&p| (self.availability[p as usize], p));
             self.background = order;
+            self.background_skip = 0;
         }
         cancels
     }
@@ -2682,6 +2696,31 @@ mod tests {
         let requests = s.fill(1, Instant::now());
         assert!(requests.iter().all(|r| r.piece >= 4), "{requests:?}");
         assert_ne!(requests[0].piece, 6, "piece 6 is less rare than 4, 5, 7");
+    }
+
+    #[test]
+    fn background_fills_skip_started_pieces_until_one_is_dropped() {
+        let mut s = sched(8, small_queues());
+        s.want_range(0, 8 * u64::from(PIECE));
+        seed(&mut s, 1);
+        seed(&mut s, 2);
+        s.tick(Instant::now(), true);
+        // Peer 1 takes every block of the rarest piece, so peer 2 starts the next one.
+        let first = s.fill(1, Instant::now());
+        assert_eq!(first.len(), 4);
+        assert!(first.iter().all(|r| r.piece == first[0].piece));
+        let second = s.fill(2, Instant::now());
+        assert!(!second.is_empty());
+        assert!(second.iter().all(|r| r.piece != first[0].piece));
+        assert_eq!(
+            s.background_skip, 1,
+            "the started piece is skipped from now on"
+        );
+        // Pausing drops both partial pieces: the first is the first one started again.
+        s.set_paused(true);
+        s.set_paused(false);
+        assert_eq!(s.background_skip, 0);
+        assert_eq!(s.fill(1, Instant::now())[0].piece, first[0].piece);
     }
 
     fn rate(bytes_per_sec: f64) -> Rate {
