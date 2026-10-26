@@ -322,6 +322,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   of hanging), and gives the memory of its partial pieces back to the other torrents at once.
   Before, an open stream request kept the stopped torrent and its share of the piece memory
   budget alive.
+- Web seeds no longer count towards the thin-swarm limit (four peers), so a slow BitTorrent
+  peer in a small swarm is kept, and retried after it disconnects, even while web seeds are in
+  use.
 
 ### Known limitations
 

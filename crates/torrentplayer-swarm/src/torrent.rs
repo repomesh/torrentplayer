@@ -1342,6 +1342,13 @@ impl Shared {
             .len()
     }
 
+    /// Whether a swarm of `live` peers (counted with [`Shared::live_peers`]) is thin. Web seeds
+    /// do not count: the guards keep BitTorrent peers while there are few of them, whatever web
+    /// seeds there are.
+    fn is_thin(&self, live: usize) -> bool {
+        live.saturating_sub(self.web_seeds.load(Ordering::Relaxed)) <= THIN_SWARM
+    }
+
     /// Asks the driver to re-plan soon; `seek` also cancels requests that are no longer urgent.
     pub(crate) fn request_replan(&self, seek: bool) {
         if seek {
@@ -1771,7 +1778,7 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             let mut peers = shared.peers.lock().unwrap_or_else(PoisonError::into_inner);
             for key in unresponsive {
                 // In a thin swarm a slow peer is better than none: keep it.
-                if peers.len() <= THIN_SWARM {
+                if shared.is_thin(peers.len()) {
                     break;
                 }
                 // Dropping the sender ends the peer's writer, and so its connection.
@@ -1988,7 +1995,7 @@ impl Shared {
 
     /// Called by a peer task when it ends, to schedule the next attempt.
     pub(crate) fn peer_finished(&self, addr: SocketAddr, end: PeerEnd) {
-        let thin = self.live_peers() <= THIN_SWARM;
+        let thin = self.is_thin(self.live_peers());
         self.candidates().finished(addr, end, thin, Instant::now());
     }
 }
