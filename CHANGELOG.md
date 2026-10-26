@@ -316,6 +316,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A web seed that answers range requests with an empty `206` response (or one that ends before
   a whole block) is now backed off like any failing server instead of being asked again at once,
   in a tight loop.
+- A block from a peer that starts past the end of its piece no longer trips an arithmetic
+  overflow check in debug builds; it is ignored like any other malformed block.
 
 ### Known limitations
 

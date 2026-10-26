@@ -1465,8 +1465,12 @@ impl Scheduler {
             return outcome;
         }
         let block = begin / BLOCK_LEN;
+        // Checked first: a block past the end of the piece has no request.
+        if block >= self.meta.blocks_in(piece) {
+            return outcome;
+        }
         let expected = block_request(&self.meta, piece, block);
-        if block >= self.meta.blocks_in(piece) || data.len() != expected.len as usize {
+        if data.len() != expected.len as usize {
             return outcome;
         }
         let requested = peer
@@ -2625,6 +2629,18 @@ mod tests {
         assert!(
             !s.on_bitfield(1, &[0xff; 1]),
             "bitfield too short for 10 pieces"
+        );
+        assert!(
+            s.on_block(1, 0, PIECE + BLOCK_LEN, &[0; 16_384])
+                .completed
+                .is_none(),
+            "past the end of the piece"
+        );
+        assert!(
+            s.on_block(1, 0, u32::MAX / BLOCK_LEN * BLOCK_LEN, &[0; 16_384])
+                .completed
+                .is_none(),
+            "far past the end of the piece"
         );
         assert!(
             !s.on_bitfield(1, &[0xff; 5]),
