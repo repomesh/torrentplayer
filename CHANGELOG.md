@@ -89,6 +89,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   panel no longer animates its progress bars (about 1 % of a core for the UI during downloads
   instead of about 9 %) and stops checking downloads while the window is minimized; the VPN tunnel,
   player and status bar wake up less often.
+- librqbit (used for magnet metadata, or for every torrent with the librqbit engine) stops its
+  session, with its DHT node, trackers and listener, after a minute with no torrents and nothing
+  to do, and starts a new one when next needed. It used to keep its DHT node running until the app
+  quit after the first magnet link.
 - The queue says when the kill switch blocks downloads, with a button to Network & VPN settings,
   instead of "Finding peers…" forever.
 - When a video ends, a card offers Play next (Shift+N) or Replay, also in fullscreen. Nothing plays

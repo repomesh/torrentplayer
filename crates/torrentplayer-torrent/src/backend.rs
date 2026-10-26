@@ -26,7 +26,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -42,7 +42,7 @@ use tracing::{info, warn};
 use crate::engine::http_for;
 use crate::engine::{
     Engine, EngineConfig, EngineError, FileEntry, MAX_FILES, TorrentId, TorrentInfo, TorrentState,
-    TorrentStats,
+    TorrentStats, WeakEngine,
 };
 use crate::media::{FileKind, mime_type};
 use crate::metadata::{LinkTarget, MetadataCache};
@@ -59,6 +59,11 @@ mod small_file;
 
 /// Name of the environment variable that selects the engine.
 pub const ENGINE_ENV_VAR: &str = "TORRENTPLAYER_ENGINE";
+
+/// How long librqbit may go unused (no torrents, nothing in flight) before its session, with
+/// its DHT node, trackers, and listener, is stopped. The next torrent that needs it starts a
+/// new one.
+const RQBIT_IDLE_STOP: Duration = Duration::from_secs(60);
 
 /// Which engine to use for new torrents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -205,14 +210,17 @@ impl Backed {
 pub struct StreamEngine {
     config: StreamEngineConfig,
     swarm: Option<Swarm>,
-    /// librqbit, once started. Replaced when the network mode turns protection on or off.
-    rqbit: tokio::sync::Mutex<Option<Engine>>,
+    /// librqbit, once started. Replaced when the network mode turns protection on or off, and
+    /// stopped once unused for a while (see `stop_rqbit_when_idle`).
+    rqbit: Arc<tokio::sync::Mutex<Option<Engine>>>,
+    /// How long librqbit may go unused before it stops: [`RQBIT_IDLE_STOP`], shorter in tests.
+    rqbit_idle_stop: Duration,
     /// The download and upload limits now (see [`StreamEngine::set_rate_limits`]).
     limits: Mutex<(Option<NonZeroU32>, Option<NonZeroU32>)>,
     /// TorrentPlayer's network manager, shared by both engines; `None` connects directly.
     network: Option<torrentplayer_net::Network>,
     http: reqwest::Client,
-    torrents: Mutex<HashMap<TorrentId, Backed>>,
+    torrents: Arc<Mutex<HashMap<TorrentId, Backed>>>,
     next_id: AtomicUsize,
     /// The current preload. Lock order: this before `torrents`.
     preload: Mutex<Option<PreloadSlot>>,
@@ -406,10 +414,11 @@ impl StreamEngine {
             limits: Mutex::new((config.download_limit_bps, config.upload_limit_bps)),
             config,
             swarm,
-            rqbit: tokio::sync::Mutex::new(None),
+            rqbit: Arc::new(tokio::sync::Mutex::new(None)),
+            rqbit_idle_stop: RQBIT_IDLE_STOP,
             network,
             http,
-            torrents: Mutex::new(HashMap::new()),
+            torrents: Arc::new(Mutex::new(HashMap::new())),
             next_id: AtomicUsize::new(1),
             preload: Mutex::new(None),
             swarm_window,
@@ -496,6 +505,14 @@ impl StreamEngine {
         };
         *slot = Some(engine.clone());
         self.report_rqbit_listener(Some(&engine));
+        tokio::spawn(stop_rqbit_when_idle(
+            Arc::downgrade(&self.rqbit),
+            Arc::downgrade(&self.torrents),
+            engine.downgrade(),
+            self.rqbit_idle_stop,
+            // Only reported when librqbit is the engine for every torrent.
+            self.network.clone().filter(|_| self.swarm.is_none()),
+        ));
         Ok(engine)
     }
 
@@ -521,22 +538,14 @@ impl StreamEngine {
         let Some(network) = self.network.as_ref().filter(|_| self.swarm.is_none()) else {
             return;
         };
-        let report = if network.policy().protected {
-            ExternalListener::Idle(
-                "librqbit accepts incoming peers only in direct mode; choose the automatic \n                 engine to accept them through WireGuard"
-                    .into(),
-            )
-        } else {
-            match engine.map(Engine::listen_addr) {
-                Some(Some(addr)) => ExternalListener::Listening(addr),
-                Some(None) if self.rqbit_listen(false).is_some() => {
-                    ExternalListener::Failed("librqbit could not open the port".into())
-                }
-                Some(None) => ExternalListener::Idle("librqbit is not listening".into()),
-                None => ExternalListener::Idle(
-                    "librqbit opens the port when its first torrent starts".into(),
-                ),
+        let report = match engine.map(Engine::listen_addr) {
+            None => stopped_rqbit_listener(network),
+            Some(_) if network.policy().protected => stopped_rqbit_listener(network),
+            Some(Some(addr)) => ExternalListener::Listening(addr),
+            Some(None) if self.rqbit_listen(false).is_some() => {
+                ExternalListener::Failed("librqbit could not open the port".into())
             }
+            Some(None) => ExternalListener::Idle("librqbit is not listening".into()),
         };
         network.set_external_listener(Some(report));
     }
@@ -1930,6 +1939,73 @@ impl StreamEngine {
     }
 }
 
+/// What librqbit's listener is, for the status, while no session runs (or in a protected
+/// mode, where it never listens).
+fn stopped_rqbit_listener(network: &torrentplayer_net::Network) -> ExternalListener {
+    if network.policy().protected {
+        ExternalListener::Idle(
+            "librqbit accepts incoming peers only in direct mode; choose the automatic \n                 engine to accept them through WireGuard"
+                .into(),
+        )
+    } else {
+        ExternalListener::Idle("librqbit opens the port when its first torrent starts".into())
+    }
+}
+
+/// Stops `engine` once it has been idle (see `Engine::idle_for`) for `after`, unless it was
+/// replaced or stopped first; the next torrent that needs librqbit starts a new session. The
+/// check and the stop happen under the slot's lock, which every caller takes to get the
+/// engine (see `StreamEngine::rqbit`): a caller either gets it first, and so keeps it in use,
+/// or waits for the stop and starts a new one. `network`, if given, is told the listener
+/// closed.
+async fn stop_rqbit_when_idle(
+    slot: Weak<tokio::sync::Mutex<Option<Engine>>>,
+    torrents: Weak<Mutex<HashMap<TorrentId, Backed>>>,
+    engine: WeakEngine,
+    after: Duration,
+    network: Option<torrentplayer_net::Network>,
+) {
+    let mut wait = after;
+    loop {
+        tokio::time::sleep(wait).await;
+        let (Some(slot), Some(torrents)) = (slot.upgrade(), torrents.upgrade()) else {
+            return;
+        };
+        let mut slot = slot.lock().await;
+        let Some(current) = slot.as_ref().filter(|current| engine.is(current)) else {
+            return;
+        };
+        let has_torrents = torrents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .any(|b| matches!(b, Backed::Rqbit { .. }));
+        match current.idle_for().filter(|_| !has_torrents) {
+            Some(idle) if idle >= after => {}
+            Some(idle) => {
+                wait = after.saturating_sub(idle);
+                continue;
+            }
+            None => {
+                wait = after;
+                continue;
+            }
+        }
+        let Some(current) = slot.take() else {
+            return;
+        };
+        info!(
+            idle_secs = after.as_secs(),
+            "librqbit unused: stopping its session"
+        );
+        current.shutdown().await;
+        if let Some(network) = &network {
+            network.set_external_listener(Some(stopped_rqbit_listener(network)));
+        }
+        return;
+    }
+}
+
 /// A copy of what is needed to talk to a torrent's engine, taken out of the lock.
 enum Handle {
     Rqbit(TorrentId),
@@ -2355,6 +2431,97 @@ mod tests {
 
     fn magnet() -> TorrentSource {
         TorrentSource::parse_link(&format!("magnet:?xt=urn:btih:{HASH}")).unwrap()
+    }
+
+    /// librqbit alone, without a network manager or public discovery, stopping after `idle`
+    /// unused.
+    async fn rqbit_only(dir: &Path, idle: Duration) -> StreamEngine {
+        let mut config = StreamEngineConfig::new(dir.to_path_buf());
+        config.choice = EngineChoice::Rqbit;
+        config.public_discovery = false;
+        let mut engine = StreamEngine::start(config).await.unwrap();
+        engine.rqbit_idle_stop = idle;
+        engine
+    }
+
+    /// Whether a librqbit operation runs, rather than failing because its session stopped.
+    async fn runs(engine: &Engine) -> bool {
+        matches!(
+            engine.remove(usize::MAX, false).await,
+            Err(EngineError::UnknownTorrent | EngineError::Engine(_))
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unused_librqbit_stops_and_starts_again_when_needed() {
+        let dir = tempfile::tempdir().unwrap();
+        let idle = Duration::from_millis(200);
+        let engine = rqbit_only(dir.path(), idle).await;
+        let first = engine.rqbit().await.unwrap();
+        let weak = first.downgrade();
+        // Held by a caller: in use, however long.
+        tokio::time::sleep(idle * 3).await;
+        assert!(engine.rqbit.lock().await.is_some());
+        assert!(runs(&first).await);
+        drop(first);
+        tokio::time::sleep(idle * 3).await;
+        assert!(engine.rqbit.lock().await.is_none(), "stopped once unused");
+
+        let second = engine.rqbit().await.unwrap();
+        assert!(!weak.is(&second), "a new session");
+        assert!(!second.is_stopping());
+        assert!(runs(&second).await);
+        drop(second);
+        engine.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn librqbit_stops_only_after_its_last_operation_is_long_past() {
+        let dir = tempfile::tempdir().unwrap();
+        let idle = Duration::from_secs(1);
+        let engine = rqbit_only(dir.path(), idle).await;
+        drop(engine.rqbit().await.unwrap());
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        let used = engine.rqbit().await.unwrap();
+        assert!(runs(&used).await);
+        drop(used);
+        // 1.2 s since the session started, 0.5 s since it was last used.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(engine.rqbit.lock().await.is_some());
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(engine.rqbit.lock().await.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_callers_share_one_librqbit_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = rqbit_only(dir.path(), Duration::from_millis(50)).await;
+        for _ in 0..5 {
+            let (a, b) = tokio::join!(engine.rqbit(), engine.rqbit());
+            let (a, b) = (a.unwrap(), b.unwrap());
+            assert!(a.downgrade().is(&b), "one session for both");
+            drop((a, b));
+            // Long enough for it to stop, so the next round starts one again.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            assert!(engine.rqbit.lock().await.is_none());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_caller_racing_the_idle_stop_never_gets_a_stopped_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let idle = Duration::from_millis(30);
+        let engine = rqbit_only(dir.path(), idle).await;
+        // Ask again right around the moment the session becomes idle long enough, so some
+        // requests land while it is being stopped.
+        for round in 0u32..40 {
+            let first = engine.rqbit().await.unwrap();
+            drop(first);
+            tokio::time::sleep(idle + Duration::from_millis(u64::from(round % 5))).await;
+            let next = engine.rqbit().await.unwrap();
+            assert!(!next.is_stopping());
+            assert!(runs(&next).await, "round {round}");
+        }
     }
 
     fn file_source() -> TorrentSource {
