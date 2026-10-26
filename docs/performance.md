@@ -67,7 +67,7 @@ Use the native Windows release binary to include Windows filesystem behavior. Th
 accepts a Windows `.exe` path from WSL and translates the output paths:
 
 ```sh
-python3 scripts/benchmark-streaming.py --binary target/agent-net/release/torrentplayer-bench.exe \
+python3 scripts/benchmark-streaming.py --binary target/release/torrentplayer-bench.exe \
   --scenario 4k-rate --scenario large-file --runs 5
 ```
 

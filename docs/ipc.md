@@ -14,9 +14,9 @@ The webview talks to the Rust backend only through Tauri commands (request/respo
   `cargo test -p torrentplayer-app` writes them to `ui/src/lib/bindings/`. Never edit those files by hand;
   CI fails if they are out of date.
 - **One wrapper module.** Frontend code calls commands only through `ui/src/lib/ipc.ts`.
-- **Naming.** Commands are `snake_case` verbs or nouns (`app_info`, `add_torrent`). Events are
-  `kebab-case` with a subsystem prefix (`stream-stats`, `net-state-changed`). Payload fields are
-  `camelCase` (`#[serde(rename_all = "camelCase")]`).
+- **Naming.** Commands are `snake_case` verbs or nouns (`app_info`, `add_torrent_link`). Events
+  are `kebab-case` with a subsystem prefix (`settings-changed`, `network-status`). Payload fields
+  are `camelCase` (`#[serde(rename_all = "camelCase")]`).
 
 ## Errors
 
@@ -56,14 +56,18 @@ itself; check Settings → Network & VPN).
 
 Torrents are served by one of two engines behind the same commands (`torrentplayer_torrent::StreamEngine`):
 
-- **torrentplayer-swarm**, TorrentPlayer's own streaming-first engine, for `.torrent` files and http(s) links to
-  them. See [ADR 0006](adr/0006-streaming-engine.md).
-- **librqbit** for magnet links (torrentplayer-swarm resolves magnets from milestone M3). It starts
-  lazily, the first time a magnet link is added.
+- **torrentplayer-swarm**, TorrentPlayer's own streaming-first engine, for every source by
+  default: `.torrent` files, http(s) links to them, and magnet links. See
+  [ADR 0006](adr/0006-streaming-engine.md).
+- **librqbit** fetches a magnet link's metadata for torrentplayer-swarm (metadata only), and
+  serves every torrent when it is chosen as the engine. It starts lazily, the first time it is
+  needed, and its session (DHT node, trackers, listener) stops after a minute with no torrents
+  and nothing in flight; the next magnet link starts a new one.
 
-The `TORRENTPLAYER_ENGINE` environment variable overrides the choice: `auto` (default), `swarm` (magnet
-links are refused with `source-refused`), or `rqbit` (everything through librqbit). The engine
-serving a stream is reported in `StreamStats.engine` and logged when the stream starts.
+The `advanced.engine` setting, or the `TORRENTPLAYER_ENGINE` environment variable (which
+overrides it), chooses: `auto` (default) or `swarm` (torrentplayer-swarm for everything), or
+`rqbit` (everything through librqbit). The engine serving a stream is reported in
+`StreamStats.engine` and logged when the stream starts.
 
 ## Commands
 
@@ -98,7 +102,9 @@ for indexers that only have magnets) adds that magnet link (`StreamEngine::resol
 adds, preloads, and prefetches resolve links the same way). What each link gave is remembered
 (256 links), so following it again sends no request; links are never logged, since search sites
 put tokens in them. The search service's own download links count against the search rate
-limiter. Adding a torrent that is already present returns the existing one. `TorrentSummary.magnet` is a magnet link that adds the torrent again; for
+limiter. Before either engine reads a `.torrent` file (from a file, a link, or a search
+result), it is refused as malformed if its piece length is 0 or above 64 MiB, it has no data,
+or its file lengths overflow. Adding a torrent that is already present returns the existing one. `TorrentSummary.magnet` is a magnet link that adds the torrent again; for
 torrents in torrentplayer-swarm it carries up to 20 of their trackers (about 4 KiB at most).
 
 |            |                                                                  |
@@ -226,13 +232,16 @@ from `start` seconds, and stops the stream's previous conversion. Waits for the 
 FFmpeg's initialization segment (at most 60 s). The result is a live stream: fragmented MP4 with
 the video copied and the original timestamps, read once with `fetch` and fed to Media Source
 Extensions (see `ui/src/lib/converted.ts` and [ADR 0007](adr/0007-dolby-and-dts-audio.md)).
+The player keeps what it buffers within 96 MiB, sized by the stream's measured bitrate (10–60 s
+ahead and 4–30 s behind, the short end for high-bitrate video), waits for playback when the
+buffer is full anyway, and retries a failed start or read twice before giving up.
 
-|            |                                                                                                      |
-| ---------- | ---------------------------------------------------------------------------------------------------- |
-| Arguments  | `{ streamId: number, start: number }`                                                                |
-| Returns    | [`ConvertedStream`](../ui/src/lib/bindings/ConvertedStream.ts)                                       |
-| Errors     | `not-found`, `invalid-argument` (bad `start`, or audio that needs no conversion), `audio-conversion` |
-| Permission | `allow-convert-audio`                                                                                |
+|            |                                                                                                                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | `{ streamId: number, start: number }`                                                                                                                                              |
+| Returns    | [`ConvertedStream`](../ui/src/lib/bindings/ConvertedStream.ts)                                                                                                                     |
+| Errors     | `not-found` (also when a newer call replaced this one), `invalid-argument` (bad `start`, or audio that needs no conversion), `audio-conversion` (also a build without the sidecar) |
+| Permission | `allow-convert-audio`                                                                                                                                                              |
 
 ```ts
 type ConvertedStream = {
@@ -476,12 +485,13 @@ from peers (no files are created, nothing is downloaded or uploaded); a `.torren
 downloaded. The metadata gets the same checks as an add (file paths, file count) and is kept in
 the engine with the peers seen (64 torrents, 64 MiB at most, least recently used evicted), so
 adding or preloading that torrent later skips asking peers for it: in torrentplayer-swarm it uses the
-kept metadata and peers, and with librqbit (automatic engine, magnet links) it is added from
-the kept metadata and still finds peers through the DHT and trackers. Concurrent fetches of the
-same torrent (a prefetch and an add) wait for each other. Failures are only logged; playing a
-result fetches its metadata itself if needed. Traffic follows the network mode: protected modes
-have no DHT, so magnet links without working trackers fail there, and in protected modes
-librqbit is given the magnet link, not the kept metadata. Does nothing while
+kept metadata and peers, and with the `rqbit` engine choice librqbit adds it from the kept
+metadata and still finds peers through the DHT and trackers. Concurrent fetches of the same
+torrent (a prefetch and an add) wait for each other. Failures are only logged; playing a result
+fetches its metadata itself if needed. Traffic follows the network mode: in protected modes
+peers come from the mode's own scoped DHT and trackers (no UDP through a TCP-only SOCKS5 proxy,
+so magnet links without working HTTP trackers fail there), and librqbit, when it is the engine,
+is given the magnet link, not the kept metadata. Does nothing while
 `search.preloadTopResult` is off. Starts the engine.
 
 |            |                                                                                                       |
@@ -995,8 +1005,9 @@ carry a `reason`.
 
 #### `recheck_network`
 
-Checks the proxy or WireGuard tunnel now instead of at the next 5-second interval (a "Try again" button
-while the kill switch is engaged), waits up to 6 s for the result, and returns the status.
+Checks the proxy or WireGuard tunnel now instead of at the next scheduled check (every 5 s, up
+to 80 s for an idle SOCKS5 proxy; a "Try again" button while the kill switch is engaged), waits
+up to 6 s for the result, and returns the status.
 
 |            |                                                            |
 | ---------- | ---------------------------------------------------------- |
@@ -1029,9 +1040,10 @@ checks it as `validate_wireguard_config` does, refuses files with more than one 
 preshared key, if any, under `wireGuardPresharedKey` (removing an old one otherwise), and saves
 the non-secret parts (addresses, DNS, MTU, the peer's public key, endpoint, allowed ranges, and
 keep-alive, plus `name`) in `network.wireguard`. The merged settings are validated before any key
-is stored, so an invalid file saves nothing. The text is wiped from memory after parsing. Emits
-`settings-changed` once. The built-in tunnel does not exist yet, so importing does not change the
-mode.
+is stored, so an invalid file saves nothing, and if the settings cannot be saved the previous
+keys are put back; no other settings change can run during the import. The text is wiped from
+memory after parsing. Emits `settings-changed` once. Importing does not change the mode; while
+WireGuard is selected, the new configuration starts a new tunnel.
 
 |            |                                                                                                                                          |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |

@@ -124,8 +124,9 @@ epochs as outgoing connections.
   interface, so the VPN app decides which networks reach it.
 - **Engines.** torrentplayer-swarm reads the handshake of each accepted connection (at most 32
   at once, within the handshake timeout), hands it to the torrent it names, and serves it like
-  an outgoing peer. Unknown torrents, paused torrents, our own peer id, and torrents at their
-  peer limit (connected plus connecting) are refused. Trackers are told the listening port,
+  an outgoing peer. Unknown torrents, paused torrents, our own peer id, addresses banned for
+  bad data (from any port), and torrents at their peer limit (connected plus connecting) are
+  refused. Trackers are told the listening port,
   and torrentplayer-swarm announces it in its DHT lookups (BEP 5 `announce_peer`, with the
   port itself rather than the DHT's UDP port), and answers as a read-write DHT node, only
   while peers can reach the port (`Network::reachable_port`): the listener is open on it, and
@@ -143,8 +144,11 @@ epochs as outgoing connections.
   moved into a tunnel, so it never listens in a protected mode. With the automatic
   engine librqbit only fetches magnet metadata and never listens.
 - **UPnP** (`network.incomingPeers.upnp`, off by default) asks the router to forward the port
-  with UPnP IGD (SSDP discovery from `librqbit-upnp`; only routers at local addresses are
-  used), only in direct mode and only while listening. The mapping's lease is 60 seconds,
+  with UPnP IGD, only in direct mode and only while listening. Routers are found with SSDP
+  (`librqbit-upnp`'s discovery, repeated every 60 seconds while no mapping is confirmed; only
+  routers whose description and control URLs are on the local network are used), and
+  `torrentplayer_net` sends the `AddPortMapping` requests to their `WANIPConnection` service
+  itself (`incoming.rs`). The mapping's lease is 60 seconds,
   renewed every 30, so it lapses within a minute after listening stops or the mode changes.
   It counts as confirmed while the router accepts the renewals and reports a public external
   address (not behind carrier-grade or double NAT), and as lost once a lease passes without a
@@ -191,7 +195,9 @@ as it does in a protected mode. The app sets it while `network.hold` is set in D
 loading does in two cases: settings migrated from the removed VPN adapter mode
 (`vpnAdapterModeRemoved`), and a `settings.json` that exists but could not be read or parsed, or
 whose network section or connection mode is invalid (`settingsUnreadable`, see
-[Configuration](configuration.md#where-settings-are-stored)). Traffic is held until the user dismisses
+[Configuration](configuration.md#where-settings-are-stored)); the same hold applies when the
+settings of the app from before the rename could be neither moved nor copied (an older copy
+still running). Traffic is held until the user dismisses
 the notice in Settings → Network & VPN or beside the status bar's indicator (or picks the
 SOCKS5 or WireGuard mode, whose own kill switch then applies). A user who chose to send nothing
 outside their VPN therefore never sends anything directly without confirming it first, even when
@@ -253,8 +259,10 @@ flowchart LR
   needs librqbit restarted, and `.torrent` files are refused when librqbit is forced as the engine (their
   tracker lists cannot be filtered); with the automatic engine, `.torrent` files go to
   torrentplayer-swarm anyway. These session options are fixed at start, so when protection turns on or
-  off `StreamEngine::apply_network` stops the librqbit session first (dropping its torrents),
-  then switches; the next magnet link starts a new session.
+  off `StreamEngine::apply_network` stops the librqbit session first (dropping its torrents and
+  any metadata fetch in progress, which fails with a message to try again), then switches; the
+  next magnet link starts a new session. The session also stops after a minute with no torrents
+  and nothing in flight, in every mode.
 - **Settings.** The app starts the network manager from the saved settings before anything
   connects, and re-applies them after every settings or secret change
   (`src-tauri/src/network.rs`). There is no separate apply command.
@@ -455,6 +463,7 @@ The Settings page (`torrentplayer-settings`) stores what the user chooses; the a
 | `network.wireguard`            | Shown in the status (endpoint). The keys are read from the credential store, in Rust only, whenever the network settings are applied.                         |
 | `network.ipv6`                 | `tunnel` allows IPv6 destinations in protected modes; `disable` refuses them.                                                                                 |
 | `network.incomingPeers`        | `enabled`, `port` (0: random), `upnp` (direct mode only); see [Incoming](#incoming-peer-connections).                                                         |
+| `network.showPublicIp`         | The status bar's public-IP check (see [Connection check](#connection-check)).                                                                                 |
 | `network.encryption`           | Not implemented by either engine yet.                                                                                                                         |
 
 ## Limits
@@ -472,6 +481,9 @@ The Settings page (`torrentplayer-settings`) stores what the user chooses; the a
 - With the `rqbit` engine choice in the SOCKS5 and WireGuard modes, TorrentPlayer announces to a
   torrent's trackers for librqbit once, when it opens; it is not announced again, so a long
   session finds no new tracker peers.
+- HTTP trackers on the local network or `localhost` are refused (also after a redirect, in every
+  mode); UDP trackers at local addresses, and librqbit's own tracker requests with the `rqbit`
+  engine in Direct mode, are not covered yet.
 - Switching protection on or off stops librqbit's torrents (only those using the `rqbit`
   engine choice); they must be added again. torrentplayer-swarm torrents, magnet links included,
   continue.

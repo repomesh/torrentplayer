@@ -3,6 +3,13 @@
 - **Status:** Accepted; the fallback shipped first (see [Implementation](#implementation))
 - **Date:** 2026-10-18, implemented 2026-10-20
 
+> **Update (2026-10-26, 0.3.1):** the fixed 60 s ahead / 30 s behind buffer described under
+> [Implementation](#implementation) overflowed the webview's media buffer at high bitrates. The
+> player now keeps what it buffers within 96 MiB, sized by the measured bitrate (10–60 s ahead,
+> 4–30 s behind), waits for playback when an append is refused, evicts distant segments after
+> backward seeks, and retries a failed start or read twice (`ui/src/lib/converted.ts`). FFmpeg
+> also runs with `-protocol_whitelist http,tcp` and a `-format_whitelist` of media containers.
+
 ## Context
 
 The built-in player is the webview's `<video>` element (WebView2, Chromium). It decodes AAC,

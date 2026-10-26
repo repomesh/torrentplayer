@@ -7,66 +7,64 @@ including the player controls overlaid on the video.
 ## Data flow
 
 ```text
-                 ┌──────────────────────────── Rust backend ────────────────────────────┐
-                 │                                                                       │
- peers/trackers  │  ┌──────────────┐  pieces   ┌─────────────────┐   seekable reads      │
- ◄──────────────►│  │ torrentplayer-torrent│◄─────────►│ torrentplayer-prioritize│◄──────────┐           │
-  (via torrentplayer-net)│  │  (librqbit)  │ priorities│  (pure logic)   │  playhead │           │
-                 │  └──────┬───────┘           └─────────────────┘  + seeks  │           │
-                 │         │ file streams                                    │           │
-                 │         ▼                                                 │           │
-                 │  ┌──────────────────────────┐   bytes    ┌───────────────┴────────┐  │
-                 │  │ torrentplayer-stream             │───────────►│ torrentplayer-player           │  │
-                 │  │ stream_cb adapter        │            │ libmpv (primary)       │  │
-                 │  │ 127.0.0.1 HTTP range srv │───────────►│ <video> fallback       │  │
-                 │  └──────────────────────────┘            └──────────┬─────────────┘  │
-                 │         ▲ header pieces                             │ events/props   │
-                 │  ┌──────┴───────┐   ┌──────────────┐   ┌────────────┴──────────────┐  │
-                 │  │ torrentplayer-media  │   │ torrentplayer-course │   │ torrentplayer-app (Tauri shell)   │  │
-                 │  │ ffprobe      │   │ file select  │   │ IPC commands + events     │  │
-                 │  └──────────────┘   └──────────────┘   └────────────┬──────────────┘  │
-                 │                        ┌──────────────┐             │                │
-                 │                        │torrentplayer-library │◄────────────┤                │
-                 │                        │  (SQLite)    │             │                │
-                 │                        └──────────────┘             │                │
-                 └─────────────────────────────────────────────────────┼────────────────┘
-                                                                       │ IPC (docs/ipc.md)
-                                                         ┌─────────────▼──────────────┐
-                                                         │ Svelte webview UI          │
-                                                         │ controls, status bars, ... │
-                                                         └────────────────────────────┘
+ peers, trackers, DHT, web seeds, search
+        ▲
+        │ every connection asks torrentplayer-net (mode, kill switch, leases)
+        ▼
+ torrentplayer-torrent: StreamEngine ── torrentplayer-swarm (default engine: deadline
+        │                                 scheduler, persistent piece cache)
+        │                            └─ librqbit (magnet metadata, or the engine when chosen;
+        │                                 plans from torrentplayer-prioritize)
+        │ seekable file readers
+        ▼
+ torrentplayer-stream: 127.0.0.1 HTTP range server (token per session or per stream)
+        │                       │
+        │                       └─► torrentplayer-media (container probe, user's ffprobe/ffmpeg)
+        │                       └─► FFmpeg sidecar (Dolby/DTS → AAC; reads a loopback server of
+        │                           its own, its fMP4 output is served here)
+        ▼
+ Svelte webview: <video> (built-in player), Media Source Extensions for converted audio
+        ▲
+        │ IPC commands and events (docs/ipc.md)
+        ▼
+ torrentplayer-app (src-tauri): commands, downloads planner, queue (torrentplayer-library),
+ library.sqlite3, settings (torrentplayer-settings), search (torrentplayer-search)
 ```
 
-1. The user adds a torrent or magnet link. **torrentplayer-course** inspects the file list and picks the
-   lecture videos; **torrentplayer-torrent**'s `StreamEngine` routes the torrent to an engine (below)
-   and selects only the files being watched or queued.
-2. When playback starts, **torrentplayer-prioritize** asks for the file head and tail first (container
+1. The user adds a torrent or magnet link. **torrentplayer-torrent**'s `StreamEngine` routes the
+   torrent to an engine (below) and selects only the files being watched or queued; the UI
+   orders the videos in lecture order (`ui/src/lib/files.ts`).
+2. When playback starts, the engine asks for the file head and tail first (container
    metadata), then a read-ahead window sized from the media's average bitrate (its length over
    the duration the player reports, or that **torrentplayer-media** read from the container header or,
-   with FFmpeg installed, `ffprobe`).
-3. **torrentplayer-player** reads bytes through **torrentplayer-stream**: directly via libmpv's `stream_cb`
-   callback, or through the loopback HTTP range server for the fallback player. Every read and
-   seek is reported back to the prioritizer, so a seek immediately reprioritizes pieces.
-4. libmpv events (`time-pos`, `paused-for-cache`, `demuxer-cache-state`, ...) and torrent stats
-   flow to the UI as Tauri events about once per second.
-5. All peer, tracker, and DHT traffic goes through **torrentplayer-net**, which enforces the selected
-   network mode and the kill switch.
+   with FFmpeg installed, `ffprobe`). See [Streaming](streaming.md).
+3. The built-in player (the system web engine's `<video>`) reads bytes from the loopback HTTP
+   range server in **torrentplayer-stream**. Every read and seek moves the engine's deadlines, and
+   the player reports its position (`report_playback`), so a seek immediately reprioritizes
+   pieces. Dolby and DTS audio is converted by the bundled FFmpeg sidecar and fed to Media Source
+   Extensions ([ADR 0007](adr/0007-dolby-and-dts-audio.md)).
+4. Torrent and stream statistics are polled by the UI about once a second; settings, network,
+   and library changes arrive as Tauri events.
+5. All peer, tracker, DHT, search, and `.torrent` download traffic goes through
+   **torrentplayer-net**, which enforces the selected network mode and the kill switch.
 
 ## Crates
 
 | Crate                              | Responsibility                                                                                                                                                                      | Depends on Tauri/FFI? | Phase |
 | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- | ----- |
-| `torrentplayer-torrent`            | `StreamEngine` facade over both engines; librqbit session, file selection, path validation, source limits                                                                           | No                    | 1     |
-| `torrentplayer-swarm`              | TorrentPlayer's streaming-first BitTorrent engine: deadline scheduler, adaptive queues, cancel on seek, piece store                                                                 | No                    | 1     |
-| `torrentplayer-prioritize`         | Piece prioritization decisions; no I/O                                                                                                                                              | No                    | 1     |
-| `torrentplayer-stream`             | `stream_cb` adapter and loopback HTTP range server                                                                                                                                  | No                    | 1     |
+| `torrentplayer-torrent`            | `StreamEngine` facade over both engines; librqbit session, file selection, path validation, source limits, preload, metadata prefetch, bandwidth planner                            | No                    | 1     |
+| `torrentplayer-swarm`              | TorrentPlayer's streaming-first BitTorrent engine: deadline scheduler, adaptive queues, cancel on seek, persistent piece cache, DHT, PEX, web seeds, uploads, smart ban             | No                    | 1     |
+| `torrentplayer-prioritize`         | Piece prioritization plans (anchors for the librqbit engine) and piece geometry; no I/O                                                                                             | No                    | 1     |
+| `torrentplayer-stream`             | Loopback HTTP range server (a `stream_cb` adapter for libmpv is planned)                                                                                                            | No                    | 1     |
 | `torrentplayer-media`              | Track and duration probe of container headers; subtitle matching and parsing (pure Rust); the user's optional `ffprobe` (durations) and `ffmpeg` (seek-bar thumbnails), locked down | No                    | 1, 2  |
-| `torrentplayer-player`             | libmpv wrapper and fallback player; **only crate with `unsafe`**                                                                                                                    | FFI                   | 2     |
-| `torrentplayer-course`             | Video detection, filtering, natural sort, course grouping; no I/O                                                                                                                   | No                    | 3     |
+| `torrentplayer-player`             | Placeholder for the planned libmpv wrapper; the only crate meant to hold FFI `unsafe`; not used by the app yet                                                                      | FFI (planned)         | 2     |
+| `torrentplayer-course`             | Video detection, filtering, natural sort, course grouping; no I/O; placeholder, not used by the app yet                                                                             | No                    | 3     |
 | `torrentplayer-library`            | Play queue (versioned JSON, atomic writes); SQLite library, progress, resume positions                                                                                              | No                    | 1, 4  |
 | `torrentplayer-search`             | Search: emberglow event stream (fan-out fallback), strict parsing, merging, relevance and watch-score ranking, best pick                                                            | No                    | 4     |
-| `torrentplayer-net`                | Network modes, WireGuard, SOCKS5, kill switch                                                                                                                                       | No                    | 5     |
-| `torrentplayer-app` (`src-tauri/`) | Tauri shell: IPC commands, events, app state                                                                                                                                        | Tauri                 | 0     |
+| `torrentplayer-settings`           | Settings model, defaults and ranges, validated patches, migrations, versioned JSON store (schema 5), OS credential store                                                            | No                    | 5     |
+| `torrentplayer-net`                | Network modes, WireGuard, SOCKS5, kill switch, incoming peers and UPnP                                                                                                              | No                    | 5     |
+| `torrentplayer-bench`              | Streaming benchmarks: local seeders with link emulation, public swarms, suites and reports (see [Performance](performance.md))                                                      | No                    | –     |
+| `torrentplayer-app` (`src-tauri/`) | Tauri shell: IPC commands, events, app state, downloads planner, FFmpeg sidecar                                                                                                     | Tauri                 | 0     |
 
 ### Engine choice
 
@@ -74,9 +72,26 @@ including the player controls overlaid on the video.
 safety checks on every path. For a magnet link, librqbit starts lazily as a metadata-only
 resolver and hands its metadata and discovered peers to torrentplayer-swarm. Its session (DHT
 node, trackers, listener) stops after a minute with no torrents and nothing in flight, and the
-next magnet link starts a new one. `TORRENTPLAYER_ENGINE=auto|swarm|rqbit`
-overrides the choice. Downloads go to separate
-`torrentplayer-swarm/` and `librqbit/` sub-folders. See [ADR 0006](adr/0006-streaming-engine.md).
+next magnet link starts a new one. The `advanced.engine` setting (`auto`, `swarm`, or `rqbit`)
+changes the choice, and `TORRENTPLAYER_ENGINE=auto|swarm|rqbit` overrides the setting. Downloads
+go to separate `torrentplayer-swarm/` and `librqbit/` sub-folders. See
+[ADR 0006](adr/0006-streaming-engine.md).
+
+### Piece cache and memory
+
+torrentplayer-swarm keeps each torrent's verified pieces in an append-only cache with an index
+(`pieces.dat`, `pieces.idx`), so queued torrents are not downloaded again after a restart; after
+a clean quit the pieces are checked when first read, after a crash by one engine-wide rechecker
+on at most two threads (see [Streaming](streaming.md#downloaded-once)). Partly downloaded
+pieces share one 256 MiB budget across all of the engine's torrents
+(`SchedulerConfig::max_in_progress_bytes`, `sched::PieceBudget`): torrents nobody is playing or
+reading stop starting pieces at three quarters of it, urgent pieces are never held back, and a
+paused torrent, or a stalled one while the budget is contended, gives its partial pieces back.
+A torrent added to the engine uploads nothing until the app turns uploading on for it; peers
+that sent data which failed a piece's hash check are banned once the piece verifies ("smart
+ban", see [Threat model](threat-model.md#network-privacy)). On Windows, the webview is asked
+for a low memory target while the window is minimized (`src-tauri/src/window.rs`) and for the
+normal one when it is restored.
 
 ### Search, preload, and prefetch
 
@@ -103,9 +118,11 @@ request; download links count against the search rate limiter.
 
 See [IPC](ipc.md#search_torrents_progressive) for the limits and the network rules.
 
-Keeping logic out of `torrentplayer-app` means it can be unit-tested without a webview, and keeping
-`unsafe` inside `torrentplayer-player` means only one crate needs FFI-level review.
-See [ADR 0002](adr/0002-workspace-layout.md).
+Keeping logic out of `torrentplayer-app` means it can be unit-tested without a webview. Every
+library crate declares `#![forbid(unsafe_code)]` except `torrentplayer-player` (`deny`, for its
+planned FFI). `torrentplayer-app` denies `unsafe_code` and allows it only in
+`set_memory_target` in `src-tauri/src/window.rs`, two WebView2 COM calls with `// SAFETY:`
+comments; its binary forbids it. See [ADR 0002](adr/0002-workspace-layout.md).
 
 ## Frontend
 
@@ -120,20 +137,20 @@ scripts, and a strict Content Security Policy (see [Threat model](threat-model.m
 time. Every view stays reachable from the rail.
 
 ```text
-┌──────┬────────────────────────────────────────────────┐
-│ ‹  › │                                                │  ‹ › Back / Forward
-│      │   Search · Open · Files · Playing · Settings   │      (Alt+←/→, mouse side buttons)
-│  ⌕   │                                                │  ⌕  Search box and results (Ctrl+F)
-│  ▢   │   Playing (the one queue):                     │  ▢  Open: link, .torrent file, torrents
-│  ≡   │   ┌──────────────────┬─────────────────────┐   │     opened this session (Ctrl+O)
-│  ▶³  │   │ Queue        ⋯ ‹ │                     │   │  ≡  Files: the file explorer
-│      │   │ ▾ Course (3/12)  │      <video>        │   │  ▶  Playing: the video and the queue,
-│      │   │ ├ ☑ Lecture 1 ▶  │   (or "Pick some-   │   │     with its upcoming count
-│      │   │ ├ ☑ Lecture 2    │    thing from the   │   │
-│      │   │ └ ☐ Lecture 3    │    queue or search")│   │
-│  ⚙   │   │   Single video   │                     │   │  ⚙  Settings (Ctrl+,)
-│      │   └──────────────────┴─────────────────────┘   │
-└──────┴────────────────────────────────────────────────┘
+┌──────┬─────────────────────────────────────────────────┐
+│ ‹  › │                                                 │  ‹ › Back / Forward
+│      │  Search · Open · Library · Files · Queue · ⚙    │      (Alt+←/→, mouse side buttons)
+│  ⌕   │                                                 │  ⌕  Search box and results (Ctrl+F)
+│  ▢   │   Queue (the video and the one queue):          │  ▢  Open: link, .torrent file, torrents
+│  ▤   │   ┌──────────────────┬─────────────────────┐    │     opened this session (Ctrl+O)
+│  ≡   │   │ Queue        ⋯ ‹ │                     │    │  ▤  Library: watch history, resume
+│  ▶³  │   │ ▾ Course (3/12)  │      <video>        │    │  ≡  Files: the file explorer
+│      │   │ ├ ☑ Lecture 1 ▶  │   (or "Pick some-   │    │  ▶  Queue: the video and the queue,
+│      │   │ ├ ☑ Lecture 2    │    thing from the   │    │     with its upcoming count
+│      │   │ └ ☐ Lecture 3    │    queue or search")│    │
+│  ⚙   │   │   Single video   │                     │    │  ⚙  Settings (Ctrl+,)
+│      │   └──────────────────┴─────────────────────┘    │
+└──────┴─────────────────────────────────────────────────┘
 ```
 
 - **History** (`ui/src/lib/nav.ts`) is browser-style back and forward over small view

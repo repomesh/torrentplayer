@@ -15,14 +15,18 @@ distribution.
 1. Make sure `main` is green.
 2. Move the `## [Unreleased]` entries in `CHANGELOG.md` under a new `## [x.y.z] - YYYY-MM-DD`
    heading, following [Semantic Versioning](https://semver.org).
-3. Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and `ui/package.json`.
+3. Bump `version` in the root `Cargo.toml` (`[workspace.package]`), `ui/package.json`, and
+   `ui/package-lock.json` (its two top-level entries), and commit the updated `Cargo.lock`. The
+   app's version comes from `Cargo.toml`; `src-tauri/tauri.conf.json` sets none.
 4. Open a PR titled `chore(release): vx.y.z`, get it reviewed, and merge it.
 5. Tag the merge commit and push the tag:
    ```sh
    git tag -s vx.y.z -m "TorrentPlayer vx.y.z"
    git push origin vx.y.z
    ```
-6. The workflow creates one **draft** GitHub release for the tag, builds and signs installers
+6. The workflow (run for tags matching `v*.*.*`; a tag with a `-` suffix, such as
+   `v1.0.0-rc.1`, becomes a pre-release) creates one **draft** GitHub release for the tag,
+   builds and signs installers
    for Windows, macOS, and Linux, then uploads them to the draft with `SHA256SUMS.txt`, a
    CycloneDX SBOM, the FFmpeg source, and build provenance attestations. Every file on the
    release, the macOS `.app.tar.gz` archives included, is listed in `SHA256SUMS.txt` and

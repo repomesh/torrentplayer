@@ -4,6 +4,16 @@
   benchmarks justify switching)
 - **Date:** 2026-10-17
 
+> **Update (2026-10-26, 0.3.1):** torrentplayer-swarm has been the automatic engine for every
+> source since 0.2.0; librqbit is an explicit choice (`advanced.engine = "rqbit"`) and fetches
+> magnet metadata for torrentplayer-swarm, which does not implement BEP 9 itself. Since built:
+> web seeds (BEP 19), DHT (through the vendored `librqbit-dht`, read-only per BEP 43 unless the
+> listening port is reachable), peer exchange, uploading (off for each torrent until the app
+> turns it on), incoming peers, rate limits, `torrentplayer-net` socket hooks, smart ban, a
+> persistent piece cache, and one 256 MiB partial-piece budget shared by all torrents. Not
+> built: protocol encryption and uTP. See [Streaming](../streaming.md) and
+> [Network](../network.md).
+
 ## Context
 
 Phase 1 wrapped librqbit 9. Measured on public swarms, start-up and seek latency missed the

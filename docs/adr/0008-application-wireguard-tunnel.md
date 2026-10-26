@@ -10,6 +10,10 @@
 > **Amended in 0.3.1:** librqbit contacts no trackers in protected modes. TorrentPlayer announces
 > to them for it, with host names resolved by the tunnel or proxy (see
 > [Network modes](../network.md)), so tracker names are no longer looked up outside the tunnel.
+> A tunnel also counts as connected only while the server answers traffic within 20 s (idle
+> tunnels are probed inside the tunnel), not merely while its handshake is under 180 s old, and
+> one left unanswered for 6 minutes is replaced (see
+> [WireGuard health](../network.md#wireguard-health)).
 
 ## Context
 

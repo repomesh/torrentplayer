@@ -1,9 +1,11 @@
 # Streaming and prioritization
 
-> **Status: Implemented.** The piece policy is in `torrentplayer-prioritize`, used by
-> TorrentPlayer's engine (`torrentplayer-swarm`); measured start-up and seek times are in
-> [Performance and benchmarking](performance.md). Where this page and the code differ, the code
-> is authoritative.
+> **Status: Implemented.** TorrentPlayer's engine (`torrentplayer-swarm`, the default) applies
+> this policy in its deadline scheduler (`crates/torrentplayer-swarm/src/sched.rs`); for the
+> librqbit engine, `torrentplayer-prioritize` plans it as anchors
+> ([ADR 0005](adr/0005-prioritization-with-anchor-streams.md)). Measured start-up and seek times
+> are in [Performance and benchmarking](performance.md). Where this page and the code differ,
+> the code is authoritative.
 
 ## Goals
 
@@ -11,7 +13,7 @@
 | ---------------------------- | ---------------------- |
 | Time to first frame          | < 3 s                  |
 | Seek to playback             | < 1.5 s                |
-| Buffer ahead during playback | ≈ 30 s (configurable)  |
+| Buffer ahead during playback | ≈ 30 s                 |
 
 ## Download only what is watched
 
@@ -50,11 +52,22 @@ A torrent with nothing to download (paused, complete, or with every selected fil
 nothing playing) re-plans once a second instead of ten times; selecting a file, playing, seeking, or
 resuming re-plans at once.
 
+## Memory for partial pieces
+
+Pieces being downloaded are held in memory until they verify. All torrents of the engine share
+one budget of 256 MiB for them (`SchedulerConfig::max_in_progress_bytes`), not one each. Torrents
+that nobody is playing or reading stop starting new pieces at three quarters of it, so the video
+being played always has a quarter to itself; urgent pieces are never held back, and every
+torrent may always work on at least one piece. A paused torrent gives its partial pieces back at
+once, and while the budget is contended so does a stalled one, for each piece that has had no
+block requested or received for 60 s.
+
 ## Piece priorities
 
-Priorities are computed by `torrentplayer-prioritize`, which is pure logic: given the file layout, piece
-availability, the playhead, and the bitrate, it returns an ordered set of piece requests. That
-makes the policy exhaustively testable.
+The scheduler's policy is pure logic, unit-tested without a network: given the file layout,
+piece availability, the playhead, readers, and the bitrate, it decides which blocks to request
+from which peers (`sched.rs`). `torrentplayer-prioritize` turns the same goals into anchor
+positions for librqbit.
 
 1. **Metadata first.** On play, request the first and last pieces of the file at once. Container
    indexes (the MP4 `moov` atom, MKV cues) are often at the end of the file, and seeking is
@@ -77,7 +90,8 @@ makes the policy exhaustively testable.
   presented the token are kept apart from the player's (at most 8, closed after 10 seconds or
   once refused); of the 16 connections the player may hold, one that has read and written
   nothing for 30 seconds (a player paused with a full buffer) is closed only when another
-  connection needs its place.
+  connection needs its place, and when all 16 are busy a request is answered
+  `503 Service Unavailable`.
 - **`stream_cb`** (for the libmpv player, Phase 2, see [Player integration](player.md)): libmpv
   would call back into Rust for reads and seeks with no HTTP overhead. Whether it or the HTTP
   server feeds libmpv will be measured and recorded in an ADR.
