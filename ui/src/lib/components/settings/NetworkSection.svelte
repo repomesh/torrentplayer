@@ -271,7 +271,7 @@
             ? ' · DHT and UDP off in this mode'
             : ''}{status.trafficAllowed && status.udpAllowed && status.mode === 'wireGuard'
             ? ' · DHT and UDP trackers through WireGuard'
-            : status.trafficAllowed && status.mode === 'socks5'
+            : status.trafficAllowed && status.udpAllowed && status.mode === 'socks5'
               ? ' · UDP relay when supported by the proxy'
               : ''}
         </dd>
