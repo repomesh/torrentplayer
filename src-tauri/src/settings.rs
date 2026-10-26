@@ -163,7 +163,13 @@ impl SettingsState {
 
     /// Applies the storage policy before the engine starts. A clear marker from an older version
     /// is treated as "clear finished downloads" and then retired; queued hashes stay protected.
-    pub(crate) fn run_startup_maintenance(&self, queue: &torrentplayer_library::Queue) {
+    /// `queue` is `None` when the saved queue could not be read in full: then nothing is removed
+    /// (and the marker is kept), since a download that looks unqueued may belong to it.
+    pub(crate) fn run_startup_maintenance(&self, queue: Option<&torrentplayer_library::Queue>) {
+        let Some(queue) = queue else {
+            tracing::warn!("the queue did not load in full, so no downloads are cleaned up");
+            return;
+        };
         let marker = self.store.dir().join(CLEAR_PENDING);
         let legacy_clear = fs::read_to_string(&marker).ok().is_some_and(|value| {
             let target = PathBuf::from(value.trim());
@@ -622,6 +628,11 @@ pub(crate) async fn clear_cache(app: AppHandle) -> Result<ClearCacheOutcome, Ipc
 pub(crate) async fn enforce_cache_policy(app: &AppHandle) {
     let settings = app.state::<SettingsState>().current();
     if settings.storage.cache_limit_gb.is_none() && settings.storage.cleanup_after_days.is_none() {
+        return;
+    }
+    // A queue that did not load in full may have lost items whose downloads look unqueued.
+    if app.state::<crate::queue::QueueState>().degraded() {
+        tracing::debug!("the cache policy waits for the next start: the queue loaded with errors");
         return;
     }
     if let Err(error) = run_cache_cleanup(app, cleanup_mode(&settings)).await {
@@ -1164,14 +1175,42 @@ mod tests {
         let marker = dir.path().join("config").join(CLEAR_PENDING);
 
         fs::write(&marker, dir.path().join("other").display().to_string()).unwrap();
-        state.run_startup_maintenance(&torrentplayer_library::Queue::default());
+        state.run_startup_maintenance(Some(&torrentplayer_library::Queue::default()));
         assert!(other.exists(), "an unknown folder is never cleared");
         assert!(!marker.exists());
 
         fs::write(&marker, dir.path().join("downloads").display().to_string()).unwrap();
-        state.run_startup_maintenance(&torrentplayer_library::Queue::default());
+        state.run_startup_maintenance(Some(&torrentplayer_library::Queue::default()));
         // Old unmarked layouts are not identifiable as finished and remain untouched.
         assert!(cache.exists());
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn nothing_is_cleaned_up_when_the_queue_did_not_load_in_full() {
+        const HASH: &str = "1111111111111111111111111111111111111111";
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(dir.path());
+        let root = dir.path().join("downloads");
+        let finished = root.join(crate::cache::CACHE_DIRS[0]).join(HASH);
+        fs::create_dir_all(&finished).unwrap();
+        fs::write(finished.join("pieces"), b"data").unwrap();
+        crate::cache::mark_finished(&root, torrentplayer_torrent::BackendKind::Swarm, HASH)
+            .unwrap();
+        fs::create_dir_all(dir.path().join("config")).unwrap();
+        let marker = dir.path().join("config").join(CLEAR_PENDING);
+        fs::write(&marker, root.display().to_string()).unwrap();
+
+        // A damaged or unreadable queue loads empty: its finished downloads must survive.
+        state.run_startup_maintenance(None);
+        assert!(finished.exists());
+        assert!(marker.exists(), "the clear is still pending");
+
+        state.run_startup_maintenance(Some(&torrentplayer_library::Queue::default()));
+        assert!(
+            !finished.exists(),
+            "the control: an unqueued finished download is cleared"
+        );
         assert!(!marker.exists());
     }
 

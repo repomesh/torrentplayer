@@ -20,6 +20,8 @@ const MAIN: &str = "main";
 const FALLBACK: Duration = Duration::from_secs(3);
 
 static SHOWN: AtomicBool = AtomicBool::new(false);
+/// Whether the main page has started loading before: later loads are reloads.
+static LOADED: AtomicBool = AtomicBool::new(false);
 
 /// Centers and shows the main window, once.
 fn show<R: Runtime>(window: &WebviewWindow<R>) {
@@ -35,14 +37,39 @@ fn show<R: Runtime>(window: &WebviewWindow<R>) {
     let _ = window.set_focus();
 }
 
-/// Shows the main window when its page has finished loading.
-pub(crate) fn on_page_load<R: Runtime>(webview: &Webview<R>, payload: &PageLoadPayload<'_>) {
+/// Shows the main window when its page has finished loading. When the main page loads again (a
+/// reload, or after its renderer crashed), ends what the previous page left running: its streams
+/// (saving their progress), the explorer's preview, and the best pick's frame. The first load
+/// has nothing to end.
+pub(crate) fn on_page_load(webview: &Webview, payload: &PageLoadPayload<'_>) {
+    if reloading(payload.event(), webview.label(), &LOADED) {
+        close_previous_page(webview.app_handle());
+    }
     if payload.event() == PageLoadEvent::Finished
         && webview.label() == MAIN
         && let Some(window) = webview.app_handle().get_webview_window(MAIN)
     {
         show(&window);
     }
+}
+
+/// Whether this page load event starts a reload of the main page, given whether it `loaded`
+/// before (updated).
+fn reloading(event: PageLoadEvent, label: &str, loaded: &AtomicBool) -> bool {
+    event == PageLoadEvent::Started && label == MAIN && loaded.swap(true, Ordering::SeqCst)
+}
+
+/// Ends what a page that is gone left running (see [`on_page_load`]).
+fn close_previous_page(app: &AppHandle) {
+    tracing::info!("the main page reloaded; stopping what it left running");
+    crate::commands::stop_all_streams(app);
+    let core = app.state::<crate::core::AppState>().started().cloned();
+    crate::preview::stop_preview_of_closed_page(
+        &app.state::<crate::preview::PreviewState>(),
+        core.as_deref(),
+    );
+    app.state::<crate::thumbnails::ThumbnailState>()
+        .close_page(core.as_deref().map(|core| &core.server));
 }
 
 /// Shows the main window after a while even if its page never reports that it loaded, so a
@@ -111,3 +138,22 @@ fn set_memory_target<R: Runtime>(window: &WebviewWindow<R>, low: bool) {
 
 #[cfg(not(windows))]
 fn set_memory_target<R: Runtime>(_window: &WebviewWindow<R>, _low: bool) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_later_loads_of_the_main_page_are_reloads() {
+        let loaded = AtomicBool::new(false);
+        assert!(
+            !reloading(PageLoadEvent::Started, MAIN, &loaded),
+            "the first load"
+        );
+        assert!(!reloading(PageLoadEvent::Finished, MAIN, &loaded));
+        assert!(!reloading(PageLoadEvent::Started, "other", &loaded));
+        assert!(reloading(PageLoadEvent::Started, MAIN, &loaded));
+        assert!(!reloading(PageLoadEvent::Finished, MAIN, &loaded));
+        assert!(reloading(PageLoadEvent::Started, MAIN, &loaded));
+    }
+}

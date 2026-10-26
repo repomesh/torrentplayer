@@ -161,6 +161,42 @@ impl Core {
         })
     }
 
+    /// Ends a stream: unpublishes it and its converted audio, stops its conversion (see
+    /// [`crate::convert::Converter`]), and returns it, so its final progress can be saved.
+    /// Dropping it ends its prioritization. `None` if it is not active.
+    pub(crate) fn close_stream(&self, id: StreamId) -> Option<ActiveStream> {
+        self.server.unpublish(id);
+        self.first_bytes.forget(id);
+        let mut removed = self
+            .streams
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id)?;
+        removed.conversion_request.cancel();
+        // Stops the audio conversion, if any: its output, then (dropped) FFmpeg and its input.
+        if let Some(converter) = removed.converter.take() {
+            if let Some(output) = converter.output {
+                self.server.unpublish(output);
+            }
+            drop(converter);
+        }
+        Some(removed)
+    }
+
+    /// Ends every stream (see [`Core::close_stream`]).
+    pub(crate) fn close_all_streams(&self) -> Vec<ActiveStream> {
+        let ids: Vec<StreamId> = self
+            .streams
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect();
+        ids.into_iter()
+            .filter_map(|id| self.close_stream(id))
+            .collect()
+    }
+
     /// Runs `f` on an active stream.
     pub(crate) fn with_stream<R>(
         &self,
@@ -190,10 +226,12 @@ fn app_origins() -> Vec<String> {
     origins
 }
 
-/// Records how long the stream server waited for the first bytes of each request.
+/// Records how long the stream server waited for the first bytes of each request to a player
+/// stream. Only streams [`FirstByteObserver::watch`]ed are recorded, until
+/// [`FirstByteObserver::forget`], so previews and converted audio leave nothing behind.
 #[derive(Debug, Default)]
 pub(crate) struct FirstByteObserver {
-    last: Mutex<HashMap<StreamId, f64>>,
+    last: Mutex<HashMap<StreamId, Option<f64>>>,
 }
 
 impl FirstByteObserver {
@@ -203,6 +241,15 @@ impl FirstByteObserver {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&id)
             .copied()
+            .flatten()
+    }
+
+    /// Starts recording a player stream; call before its URL is handed out.
+    pub(crate) fn watch(&self, id: StreamId) {
+        self.last
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id, None);
     }
 
     pub(crate) fn forget(&self, id: StreamId) {
@@ -226,16 +273,45 @@ impl RequestObserver for FirstByteObserver {
     fn on_first_byte(&self, stream: StreamId, offset: u64, waited: Duration) {
         let ms = waited.as_secs_f64() * 1000.0;
         tracing::debug!(stream, offset, ms, "first bytes served");
-        self.last
+        if let Some(last) = self
+            .last
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .insert(stream, ms);
+            .get_mut(&stream)
+        {
+            *last = Some(ms);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn first_bytes_are_kept_only_for_watched_streams_until_forgotten() {
+        let observer = FirstByteObserver::default();
+        let wait = Duration::from_millis(12);
+        observer.on_first_byte(1, 0, wait);
+        assert_eq!(
+            observer.last_ms(1),
+            None,
+            "a preview's stream is not recorded"
+        );
+        assert!(observer.last.lock().unwrap().is_empty());
+        observer.watch(2);
+        assert_eq!(observer.last_ms(2), None);
+        observer.on_first_byte(2, 0, wait);
+        assert_eq!(observer.last_ms(2), Some(12.0));
+        observer.forget(2);
+        observer.on_first_byte(2, 0, wait);
+        assert_eq!(
+            observer.last_ms(2),
+            None,
+            "nothing comes back after the stream stopped"
+        );
+        assert!(observer.last.lock().unwrap().is_empty());
+    }
 
     #[test]
     fn progress_is_saved_on_first_report_seek_and_completion() {

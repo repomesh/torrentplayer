@@ -116,6 +116,36 @@ pub(crate) fn migrate(old: &Path, new: &Path) -> usize {
     moved
 }
 
+/// Moves the download folder `old` to `new` like [`migrate`], and then the downloads inside
+/// each engine cache folder (`crate::cache::CACHE_DIRS`) that both have, which [`migrate`] skips
+/// as a whole: otherwise an old cache next to a new one would never move and the old folder
+/// never empty. A download (an info-hash folder) the new cache already has stays in the old
+/// one, untouched: two copies of a torrent's data are never mixed. Returns how many entries
+/// moved.
+pub(crate) fn downloads(old: &Path, new: &Path) -> usize {
+    let mut moved = migrate(old, new);
+    if !old.exists() {
+        return moved;
+    }
+    for name in crate::cache::CACHE_DIRS {
+        let (old_cache, new_cache) = (old.join(name), new.join(name));
+        if is_real_dir(&old_cache) && is_real_dir(&new_cache) {
+            moved += migrate(&old_cache, &new_cache);
+        }
+    }
+    // Removed only once empty, so nothing that failed to move is lost.
+    let _ = fs::remove_dir(old);
+    if old.exists() {
+        tracing::info!("some downloads stayed in the old download folder");
+    }
+    moved
+}
+
+/// Whether `path` is a folder, not a link to one.
+fn is_real_dir(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_dir())
+}
+
 /// Where a chosen download folder is now, if it was inside an old-identifier folder that
 /// [`from_old_identifier`] moved into one of `folders` (for example
 /// `%LOCALAPPDATA%\io.torrentstream.desktop\downloads`). `None` if it was elsewhere, or is
@@ -265,5 +295,43 @@ mod tests {
             old.join("EBWebView/old").exists(),
             "what could not move is not lost"
         );
+    }
+
+    #[test]
+    fn an_old_cache_beside_a_new_one_is_merged_without_mixing_downloads() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join(OLD_DOWNLOADS_NAME);
+        let new = root.path().join("TorrentPlayer");
+        let cache = crate::cache::CACHE_DIRS[0];
+        for (dir, hash, data) in [
+            (&old, "aa", "old a"),
+            (&old, "bb", "old b"),
+            (&new, "bb", "new b"),
+        ] {
+            fs::create_dir_all(dir.join(cache).join(hash)).unwrap();
+            fs::write(dir.join(cache).join(hash).join("data"), data).unwrap();
+        }
+        fs::write(old.join("notes.txt"), "mine").unwrap();
+
+        assert_eq!(downloads(&old, &new), 2, "notes.txt and download aa");
+        assert_eq!(
+            fs::read_to_string(new.join(cache).join("aa").join("data")).unwrap(),
+            "old a"
+        );
+        assert_eq!(
+            fs::read_to_string(new.join(cache).join("bb").join("data")).unwrap(),
+            "new b"
+        );
+        assert_eq!(fs::read_to_string(new.join("notes.txt")).unwrap(), "mine");
+        // The duplicate download stays where it was, whole.
+        assert_eq!(
+            fs::read_to_string(old.join(cache).join("bb").join("data")).unwrap(),
+            "old b"
+        );
+
+        // Once nothing is left behind, the old folder goes.
+        fs::remove_dir_all(old.join(cache).join("bb")).unwrap();
+        assert_eq!(downloads(&old, &new), 0);
+        assert!(!old.exists());
     }
 }

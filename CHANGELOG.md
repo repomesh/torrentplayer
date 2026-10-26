@@ -337,6 +337,20 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Web seeds no longer count towards the thin-swarm limit (four peers), so a slow BitTorrent
   peer in a small swarm is kept, and retried after it disconnects, even while web seeds are in
   use.
+- A queue file that could not be read (for example while an antivirus scanner held it) or was
+  damaged no longer loses the queue: it is retried briefly, copied aside to
+  `queue.invalid-<time>.json` without replacing earlier copies, and never overwritten before a
+  copy exists. While the queue loaded with problems, finished downloads are not cleaned up, so
+  the lost queue's downloads are no longer deleted at startup. Queue files from a newer version
+  are copied to `queue.newer-<time>.json` before they are first replaced.
+- Seeking in a video whose audio is converted stops the previous FFmpeg conversion at once,
+  instead of when the player stops reading it, and a conversion whose input stops answering
+  gives up after a minute.
+- When the window's page reloads or recovers from a crash, the videos it was playing stop
+  streaming (their progress is saved), and the explorer preview and best-pick frame are
+  withdrawn, instead of staying open until TorrentPlayer quits.
+- Downloads in the old `Downloads\TorrentStream` cache now move to `Downloads\TorrentPlayer` even
+  when its cache folder already exists. A torrent cached in both stays in the old folder.
 
 ### Known limitations
 

@@ -6,14 +6,22 @@
 //! an http(s) link to a `.torrent` file), the file index, a title, and a size. Never a stream
 //! URL: those carry a session token, and links to loopback hosts are refused for that reason.
 //!
-//! Loading never fails: a missing file gives an empty queue, invalid items are dropped, and a
-//! damaged file is set aside as `queue.invalid.json`. Saving validates the whole queue first
-//! and is atomic (write a temporary file, flush it, rename it over the old one).
+//! Loading never fails: a missing file gives an empty queue and invalid items are dropped. A
+//! file that cannot be read or is damaged is copied aside to `queue.invalid-<time>.json` and left
+//! in place, so nothing the user queued is lost; [`Loaded::degraded`] tells the app not to clean
+//! up downloads on the strength of such a queue. A file that loaded only in part (items dropped,
+//! or written by a newer version) is copied aside the same way before it is first replaced. If a
+//! copy cannot be made, [`QueueStore::save`] refuses to replace the file until one succeeds.
+//!
+//! Saving validates the whole queue first and is atomic (write a temporary file, flush it, rename
+//! it over the old one).
 
 use std::collections::HashSet;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -21,8 +29,12 @@ use ts_rs::TS;
 
 /// The queue file's name inside the app data folder.
 pub const QUEUE_FILE_NAME: &str = "queue.json";
-/// A damaged queue file is renamed to this so it can be recovered.
-pub const QUEUE_INVALID_FILE_NAME: &str = "queue.invalid.json";
+/// A queue file that could not be read or used is copied to `queue.invalid-<time>.json` (Unix
+/// seconds; an existing copy is never replaced) so it can be recovered.
+pub const QUEUE_INVALID_STEM: &str = "queue.invalid";
+/// A queue file written by a newer TorrentPlayer is copied to `queue.newer-<time>.json` before it
+/// is first replaced, since saving drops what this version does not know.
+pub const QUEUE_NEWER_STEM: &str = "queue.newer";
 /// Version of the file format. Bump it, and add a migration to [`QueueStore::load`], when the
 /// format changes.
 pub const QUEUE_VERSION: u32 = 2;
@@ -124,6 +136,10 @@ pub enum StoreError {
     /// The queue could not be encoded (should not happen).
     #[error("could not encode the queue: {0}")]
     Encode(#[from] serde_json::Error),
+    /// The existing file loaded only in part and still cannot be copied aside, so it is not
+    /// replaced.
+    #[error("the existing queue file could not be backed up, so it was not replaced: {0}")]
+    Unread(io::Error),
 }
 
 impl QueueItem {
@@ -264,19 +280,35 @@ pub struct Loaded {
     pub queue: Queue,
     /// Problems found while loading, for the log. Never contains paths.
     pub warnings: Vec<String>,
+    /// Whether the file could not be read in full (unreadable, damaged, invalid items, or a
+    /// newer version), so `queue` may miss items the user queued. Nothing should be deleted on
+    /// the assumption that it is not queued.
+    pub degraded: bool,
 }
 
 /// Reads and writes `queue.json` in one folder (the app data folder).
 #[derive(Debug, Clone)]
 pub struct QueueStore {
     dir: PathBuf,
+    /// Set by [`Self::load`] when the file loaded only in part and has no copy yet: the stem of
+    /// the copy [`Self::save`] makes before replacing it (refusing to save while it cannot).
+    /// Shared by clones.
+    unsaved_original: Arc<Mutex<Option<&'static str>>>,
 }
+
+/// Reading the queue file is retried this often when another program (an antivirus scanner,
+/// a backup tool) briefly holds it open.
+const READ_ATTEMPTS: u32 = 5;
+const READ_RETRY_DELAY: Duration = Duration::from_millis(50);
 
 impl QueueStore {
     /// A store for `dir/queue.json`.
     #[must_use]
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self {
+            dir: dir.into(),
+            unsaved_original: Arc::new(Mutex::new(None)),
+        }
     }
 
     /// The queue file's path.
@@ -286,45 +318,55 @@ impl QueueStore {
     }
 
     /// Loads the queue, dropping invalid items and falling back to an empty queue (with a
-    /// warning) if the file is damaged.
+    /// warning) if the file cannot be read or is damaged (see the module docs).
     #[must_use]
     pub fn load(&self) -> Loaded {
+        self.set_unsaved(None);
         let mut warnings = Vec::new();
-        let text = match read_limited(&self.path()) {
-            Ok(Some(text)) => text,
+        let bytes = match read_limited(&self.path()) {
+            Ok(Some(bytes)) => bytes,
             Ok(None) => {
                 return Loaded {
                     queue: Queue::default(),
                     warnings,
+                    degraded: false,
                 };
             }
             Err(error) => {
                 tracing::warn!(%error, "could not read the queue; starting empty");
-                warnings.push("The queue could not be read, so it starts empty.".to_owned());
+                let kept = self.keep_original(None);
+                warnings.push(unusable_warning("could not be read", kept));
                 return Loaded {
                     queue: Queue::default(),
                     warnings,
+                    degraded: true,
                 };
             }
         };
-        let Ok(Value::Object(mut doc)) = serde_json::from_str::<Value>(&text) else {
-            self.set_aside();
-            warnings.push(format!(
-                "{QUEUE_FILE_NAME} was damaged, so the queue starts empty. The old file was kept \
-                 as {QUEUE_INVALID_FILE_NAME}."
-            ));
+        let Ok(Value::Object(mut doc)) = serde_json::from_slice::<Value>(&bytes) else {
+            let kept = self.keep_original(Some(&bytes));
+            warnings.push(unusable_warning("was damaged", kept));
+            for warning in &warnings {
+                tracing::warn!(%warning, "queue loaded with a problem");
+            }
             return Loaded {
                 queue: Queue::default(),
                 warnings,
+                degraded: true,
             };
         };
         let version = doc
             .get("version")
             .and_then(Value::as_u64)
             .map_or(1, |v| u32::try_from(v).unwrap_or(u32::MAX));
-        if version > QUEUE_VERSION {
-            // Read what this version understands; unknown fields are ignored.
-            warnings.push("The queue was saved by a newer version of TorrentPlayer.".to_owned());
+        let newer = version > QUEUE_VERSION;
+        if newer {
+            // Read what this version understands; unknown fields are ignored, and the file is
+            // copied aside before it is first replaced.
+            warnings.push(format!(
+                "The queue was saved by a newer version of TorrentPlayer; it is copied to \
+                 {QUEUE_NEWER_STEM}-<time>.json before it is next saved."
+            ));
         }
         let raw = match doc.remove("items") {
             Some(Value::Array(items)) => items,
@@ -357,6 +399,11 @@ impl QueueStore {
                 if dropped == 1 { " was" } else { "s were" }
             ));
         }
+        if newer {
+            self.set_unsaved(Some(QUEUE_NEWER_STEM));
+        } else if dropped > 0 {
+            self.set_unsaved(Some(QUEUE_INVALID_STEM));
+        }
         queue.current = doc
             .get("current")
             .and_then(Value::as_str)
@@ -367,7 +414,12 @@ impl QueueStore {
         for warning in &warnings {
             tracing::warn!(%warning, "queue loaded with a problem");
         }
-        Loaded { queue, warnings }
+        let degraded = !warnings.is_empty();
+        Loaded {
+            queue,
+            warnings,
+            degraded,
+        }
     }
 
     /// Validates and saves the queue atomically, readable only by the current user where the
@@ -375,10 +427,20 @@ impl QueueStore {
     ///
     /// # Errors
     ///
-    /// Returns [`StoreError::Invalid`] (writing nothing) if the queue is invalid, or an I/O
-    /// error if the folder or file cannot be written.
+    /// Returns [`StoreError::Invalid`] (writing nothing) if the queue is invalid,
+    /// [`StoreError::Unread`] if the file loaded only in part and still cannot be copied aside,
+    /// or an I/O error if the folder or file cannot be written.
     pub fn save(&self, queue: &Queue) -> Result<(), StoreError> {
         queue.validate()?;
+        let mut unsaved = self
+            .unsaved_original
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(stem) = *unsaved {
+            self.copy_original(stem).map_err(StoreError::Unread)?;
+            *unsaved = None;
+        }
+        drop(unsaved);
         let mut json = serde_json::to_vec_pretty(&QueueFileRef {
             version: QUEUE_VERSION,
             items: &queue.items,
@@ -395,25 +457,168 @@ impl QueueStore {
         Ok(result?)
     }
 
-    fn set_aside(&self) {
-        let target = self.dir.join(QUEUE_INVALID_FILE_NAME);
-        if let Err(error) = fs::rename(self.path(), target) {
-            tracing::warn!(%error, "could not set the damaged queue file aside");
+    fn set_unsaved(&self, stem: Option<&'static str>) {
+        *self
+            .unsaved_original
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = stem;
+    }
+
+    /// Copies a file that could not be used aside, from `bytes` if it was read. Returns the
+    /// copy's file name; if there is none, saving is refused until a copy can be made.
+    fn keep_original(&self, bytes: Option<&[u8]>) -> Option<String> {
+        let result = match bytes {
+            Some(bytes) => write_aside(&self.dir, QUEUE_INVALID_STEM, bytes).map(Some),
+            None => self.copy_original(QUEUE_INVALID_STEM),
+        };
+        match result {
+            Ok(name) => name,
+            Err(error) => {
+                tracing::warn!(%error, "could not copy the unusable queue file aside");
+                self.set_unsaved(Some(QUEUE_INVALID_STEM));
+                None
+            }
+        }
+    }
+
+    /// Copies `queue.json` to a new `<stem>-<time>.json` and returns its name; a file that is
+    /// gone needs no copy.
+    fn copy_original(&self, stem: &str) -> io::Result<Option<String>> {
+        let bytes = read_retrying(&self.path(), |path| {
+            if fs::metadata(path)?.len() > MAX_FILE_BYTES {
+                // Too large to hold in memory: copied as it is, without looking for a twin.
+                return Ok(None);
+            }
+            fs::read(path).map(Some)
+        });
+        let bytes = match bytes {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        if let Some(bytes) = bytes {
+            return write_aside(&self.dir, stem, &bytes).map(Some);
+        }
+        let (target, file) = new_aside_file(&self.dir, stem)?;
+        drop(file);
+        if let Err(error) = fs::copy(self.path(), &target) {
+            let _ = fs::remove_file(&target);
+            return Err(error);
+        }
+        Ok(Some(file_name(&target)))
+    }
+}
+
+/// The warning for a queue file that could not be used; `kept` is the copy's name, if one was
+/// made.
+fn unusable_warning(problem: &str, kept: Option<String>) -> String {
+    let kept = match kept {
+        Some(name) => format!("The old file was kept as {name}."),
+        None => format!("{QUEUE_FILE_NAME} is not replaced until it can be read or backed up."),
+    };
+    format!("{QUEUE_FILE_NAME} {problem}, so the queue starts empty. {kept}")
+}
+
+/// Writes `bytes` to a new `<stem>-<time>.json` in `dir`, or reuses an earlier copy with the
+/// same contents (so a file that stays damaged is not copied again on every start). Returns the
+/// copy's file name.
+fn write_aside(dir: &Path, stem: &str, bytes: &[u8]) -> io::Result<String> {
+    if let Some(name) = same_copy(dir, stem, bytes) {
+        return Ok(name);
+    }
+    let (path, mut file) = new_aside_file(dir, stem)?;
+    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        drop(file);
+        let _ = fs::remove_file(&path);
+        return Err(error);
+    }
+    Ok(file_name(&path))
+}
+
+/// An earlier `<stem>-*.json` copy in `dir` holding exactly `bytes`.
+fn same_copy(dir: &Path, stem: &str, bytes: &[u8]) -> Option<String> {
+    let prefix = format!("{stem}-");
+    fs::read_dir(dir).ok()?.flatten().find_map(|entry| {
+        let name = entry.file_name().into_string().ok()?;
+        let same = name.starts_with(&prefix)
+            && entry
+                .metadata()
+                .is_ok_and(|m| usize::try_from(m.len()).is_ok_and(|len| len == bytes.len()))
+            && fs::read(entry.path()).is_ok_and(|b| b == bytes);
+        same.then_some(name)
+    })
+}
+
+/// Creates a new, empty `<stem>-<time>[-n].json` in `dir`, never replacing an existing file.
+fn new_aside_file(dir: &Path, stem: &str) -> io::Result<(PathBuf, fs::File)> {
+    create_private_dir(dir)?;
+    let secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    for n in 1..=100_u32 {
+        let name = if n == 1 {
+            format!("{stem}-{secs}.json")
+        } else {
+            format!("{stem}-{secs}-{n}.json")
+        };
+        let path = dir.join(name);
+        match open_private(&path, true) {
+            Ok(file) => return Ok((path, file)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "too many copies of the queue file",
+    ))
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Whether a read error is likely to pass soon: on Windows, another program (typically an
+/// antivirus scanner) holding the file open without sharing it.
+fn is_transient(error: &io::Error) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+    error.kind() == io::ErrorKind::Interrupted
+        || (cfg!(windows)
+            && matches!(
+                error.raw_os_error(),
+                Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION)
+            ))
+}
+
+/// Runs `read`, retrying briefly while its error is transient.
+fn read_retrying<T>(path: &Path, read: impl Fn(&Path) -> io::Result<T>) -> io::Result<T> {
+    let mut attempt = 1;
+    loop {
+        match read(path) {
+            Err(e) if attempt < READ_ATTEMPTS && is_transient(&e) => {
+                std::thread::sleep(READ_RETRY_DELAY);
+                attempt += 1;
+            }
+            result => return result,
         }
     }
 }
 
-/// Reads a file of at most [`MAX_FILE_BYTES`]; `Ok(None)` if it does not exist.
-fn read_limited(path: &Path) -> io::Result<Option<String>> {
-    match fs::metadata(path) {
+/// Reads a file of at most [`MAX_FILE_BYTES`], retrying transient errors; `Ok(None)` if it
+/// does not exist.
+fn read_limited(path: &Path) -> io::Result<Option<Vec<u8>>> {
+    read_retrying(path, |path| match fs::metadata(path) {
         Ok(meta) if meta.len() > MAX_FILE_BYTES => Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "queue file is too large",
         )),
-        Ok(_) => fs::read_to_string(path).map(Some),
+        Ok(_) => fs::read(path).map(Some),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(e),
-    }
+    })
 }
 
 fn create_private_dir(dir: &Path) -> io::Result<()> {
@@ -433,16 +638,27 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
 
 /// Writes `bytes` to a new file only the current user can read, and flushes it to disk.
 fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = open_private(path, false)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// Opens `path` for writing, readable only by the current user where the OS supports it:
+/// truncating it, or failing with `AlreadyExists` if `new` and it exists.
+fn open_private(path: &Path, new: bool) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true);
+    if new {
+        options.create_new(true);
+    } else {
+        options.create(true).truncate(true);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    file.sync_all()
+    options.open(path)
 }
 
 #[cfg(test)]
@@ -689,17 +905,170 @@ mod tests {
         assert_eq!(loaded.warnings, vec!["3 invalid queue items were dropped."]);
     }
 
+    /// The names of the copies set aside in `dir` with `stem`.
+    fn copies(dir: &Path, stem: &str) -> Vec<String> {
+        let mut names: Vec<String> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.starts_with(&format!("{stem}-")))
+            .collect();
+        names.sort();
+        names
+    }
+
     #[test]
-    fn damaged_files_are_set_aside() {
+    fn damaged_files_are_copied_aside_and_kept() {
         let dir = tempfile::tempdir().unwrap();
         let store = QueueStore::new(dir.path());
         fs::write(store.path(), "{ not json").unwrap();
         let loaded = store.load();
         assert_eq!(loaded.queue, Queue::default());
+        assert!(loaded.degraded);
         assert_eq!(loaded.warnings.len(), 1);
         assert!(!loaded.warnings[0].contains(&dir.path().display().to_string()));
-        assert!(dir.path().join(QUEUE_INVALID_FILE_NAME).exists());
-        assert!(!store.path().exists());
+        let kept = copies(dir.path(), QUEUE_INVALID_STEM);
+        assert_eq!(kept.len(), 1);
+        assert!(
+            loaded.warnings[0].contains(&kept[0]),
+            "{:?}",
+            loaded.warnings
+        );
+        assert_eq!(fs::read(dir.path().join(&kept[0])).unwrap(), b"{ not json");
+        assert_eq!(
+            fs::read(store.path()).unwrap(),
+            b"{ not json",
+            "left in place"
+        );
+
+        // Still damaged at the next start: degraded again, but not copied twice.
+        assert!(store.load().degraded);
+        assert_eq!(copies(dir.path(), QUEUE_INVALID_STEM), kept);
+
+        // A different damaged file gets a copy of its own; the first is never replaced.
+        fs::write(store.path(), "[1, 2").unwrap();
+        assert!(store.load().degraded);
+        let both = copies(dir.path(), QUEUE_INVALID_STEM);
+        assert_eq!(both.len(), 2);
+        assert_eq!(fs::read(dir.path().join(&kept[0])).unwrap(), b"{ not json");
+
+        store.save(&queue(&["a"], None)).unwrap();
+        assert_eq!(copies(dir.path(), QUEUE_INVALID_STEM), both);
+        assert!(!store.load().degraded);
+    }
+
+    #[test]
+    fn files_that_are_not_utf8_are_damaged_not_lost() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::new(dir.path());
+        let bytes = b"{\"version\": 2, \"items\": [\"\xff\xfe\"]}";
+        fs::write(store.path(), bytes).unwrap();
+        let loaded = store.load();
+        assert!(loaded.degraded);
+        let kept = copies(dir.path(), QUEUE_INVALID_STEM);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(fs::read(dir.path().join(&kept[0])).unwrap(), bytes);
+    }
+
+    #[test]
+    fn unreadable_files_are_never_replaced_without_a_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::new(dir.path());
+        // A folder in the file's place cannot be read or copied on any platform.
+        fs::create_dir(store.path()).unwrap();
+        let loaded = store.load();
+        assert_eq!(loaded.queue, Queue::default());
+        assert!(loaded.degraded);
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            loaded.warnings[0].contains("not replaced"),
+            "{:?}",
+            loaded.warnings
+        );
+        assert!(copies(dir.path(), QUEUE_INVALID_STEM).is_empty());
+        assert!(matches!(
+            store.clone().save(&queue(&["a"], None)),
+            Err(StoreError::Unread(_))
+        ));
+        assert!(store.path().is_dir(), "nothing was replaced");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn briefly_locked_files_are_read_after_a_retry() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::new(dir.path());
+        store.save(&queue(&["a"], None)).unwrap();
+        // Held without sharing, as antivirus scanners do while they look at a new file.
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(store.path())
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(60));
+            drop(lock);
+        });
+        let loaded = store.load();
+        release.join().unwrap();
+        assert_eq!(loaded.queue, queue(&["a"], None));
+        assert!(!loaded.degraded);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_files_are_kept_until_they_can_be_copied() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::new(dir.path());
+        store.save(&queue(&["a", "b"], None)).unwrap();
+        let original = fs::read(store.path()).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(store.path())
+            .unwrap();
+        let loaded = store.load();
+        assert!(loaded.degraded);
+        assert_eq!(loaded.queue, Queue::default());
+        assert!(matches!(
+            store.save(&Queue::default()),
+            Err(StoreError::Unread(_))
+        ));
+        drop(lock);
+        // Once the file can be read, it is copied before it is replaced.
+        store.save(&Queue::default()).unwrap();
+        let kept = copies(dir.path(), QUEUE_INVALID_STEM);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(fs::read(dir.path().join(&kept[0])).unwrap(), original);
+    }
+
+    #[test]
+    fn files_with_dropped_items_are_copied_before_they_are_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = QueueStore::new(dir.path());
+        let doc = serde_json::json!({
+            "version": 2,
+            "items": [serde_json::to_value(item("a")).unwrap(), {"id": 5}],
+        });
+        fs::write(store.path(), doc.to_string()).unwrap();
+        let loaded = store.load();
+        assert!(loaded.degraded);
+        assert!(
+            copies(dir.path(), QUEUE_INVALID_STEM).is_empty(),
+            "copied when saved"
+        );
+        store.save(&loaded.queue).unwrap();
+        let kept = copies(dir.path(), QUEUE_INVALID_STEM);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(&kept[0])).unwrap(),
+            doc.to_string()
+        );
+        store.save(&loaded.queue).unwrap();
+        assert_eq!(copies(dir.path(), QUEUE_INVALID_STEM), kept, "copied once");
     }
 
     #[test]
@@ -713,5 +1082,17 @@ mod tests {
         let loaded = store.load();
         assert_eq!(loaded.queue.items, vec![item("a")]);
         assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.degraded);
+
+        // Its unknown fields are kept in a copy before it is first replaced.
+        assert!(copies(dir.path(), QUEUE_NEWER_STEM).is_empty());
+        store.save(&loaded.queue).unwrap();
+        let kept = copies(dir.path(), QUEUE_NEWER_STEM);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(&kept[0])).unwrap(),
+            doc.to_string()
+        );
+        assert!(!store.load().degraded);
     }
 }

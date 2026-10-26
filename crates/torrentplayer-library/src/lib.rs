@@ -19,6 +19,6 @@ pub use progress::{
 };
 pub use queue::{
     Loaded, MAX_ID_BYTES, MAX_MAGNET_TRACKERS, MAX_QUEUE_ITEMS, MAX_SOURCE_BYTES, MAX_TITLE_CHARS,
-    QUEUE_FILE_NAME, QUEUE_INVALID_FILE_NAME, QUEUE_VERSION, Queue, QueueError, QueueItem,
-    QueueStore, StoreError,
+    QUEUE_FILE_NAME, QUEUE_INVALID_STEM, QUEUE_NEWER_STEM, QUEUE_VERSION, Queue, QueueError,
+    QueueItem, QueueStore, StoreError,
 };

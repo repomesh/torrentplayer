@@ -155,7 +155,7 @@ pub fn run() -> anyhow::Result<()> {
                 && earlier_default != folders.downloads
                 && earlier_default.is_dir()
             {
-                migrate::migrate(&earlier_default, &folders.downloads);
+                migrate::downloads(&earlier_default, &folders.downloads);
             }
             // Renamed with the app: the default download folder and the engine cache inside it.
             if settings.current().storage.download_dir.is_none() {
@@ -163,7 +163,7 @@ pub fn run() -> anyhow::Result<()> {
                     .downloads
                     .with_file_name(migrate::OLD_DOWNLOADS_NAME);
                 if renamed != folders.downloads && renamed.is_dir() {
-                    migrate::migrate(&renamed, &folders.downloads);
+                    migrate::downloads(&renamed, &folders.downloads);
                 }
             }
             let download_dir = settings
@@ -177,8 +177,10 @@ pub fn run() -> anyhow::Result<()> {
             }
             let library = library::LibraryState::new(folders.data.clone());
             let queue = queue::QueueState::new(folders.data.clone());
-            let saved_queue = queue.load();
-            settings.run_startup_maintenance(&saved_queue);
+            let loaded_queue = queue.load();
+            settings
+                .run_startup_maintenance((!loaded_queue.degraded).then_some(&loaded_queue.queue));
+            let saved_queue = loaded_queue.queue;
             // The network manager starts before anything can connect, and then follows the
             // network settings, so no traffic ever leaves outside the selected mode.
             let network = network::start(&settings.current(), settings.secrets().as_ref())?;

@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 use tauri::ipc::{InvokeBody, Request};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager as _, State};
 use torrentplayer_prioritize::{Anchor, Config as PrioritizeConfig, Purpose};
 use torrentplayer_stream::StreamId;
 use torrentplayer_torrent::{FileKind, TorrentInfo, TorrentSource, TorrentState, magnet_link};
@@ -304,6 +304,7 @@ pub(crate) async fn start_stream(
     .await?;
     let engine = session.backend();
     let published = core.server.publish(std::sync::Arc::clone(&media));
+    core.first_bytes.watch(published.id);
     // Reads the container header alongside the player, so the player can say if the audio
     // will be silent and list embedded subtitles.
     let tracks = TrackProbe::start(published.id, std::sync::Arc::clone(&media));
@@ -621,24 +622,12 @@ pub(crate) async fn stop_stream(
     stream_id: StreamId,
 ) -> Result<(), IpcError> {
     let core = state.core().await?;
-    core.server.unpublish(stream_id);
-    core.first_bytes.forget(stream_id);
-    let removed = core
-        .streams
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .remove(&stream_id);
-    let Some(removed) = removed else {
+    let Some(removed) = core.close_stream(stream_id) else {
         return Err(IpcError::new(
             crate::error::ErrorKind::NotFound,
             "Unknown stream.",
         ));
     };
-    removed.conversion_request.cancel();
-    // Stops the audio conversion, if any: its output, then (dropped) its input.
-    if let Some(output) = removed.converter.and_then(|c| c.output) {
-        core.server.unpublish(output);
-    }
     if let Some(position) = removed.progress.position_secs
         && let Err(error) = library
             .record(
@@ -653,6 +642,46 @@ pub(crate) async fn stop_stream(
         tracing::warn!(%error, "could not save final playback progress");
     }
     Ok(())
+}
+
+/// Stops every stream after the page reloaded or its renderer crashed: the player that read them
+/// is gone and nothing would stop them otherwise. Their final progress is saved, as by
+/// [`stop_stream`].
+pub(crate) fn stop_all_streams(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let Some(core) = state.started() else {
+        return;
+    };
+    let removed = core.close_all_streams();
+    if removed.is_empty() {
+        return;
+    }
+    tracing::info!(
+        streams = removed.len(),
+        "stopped the streams of the previous page"
+    );
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let library = app.state::<crate::library::LibraryState>();
+        for stream in removed {
+            let Some(position) = stream.progress.position_secs else {
+                continue;
+            };
+            let revision = library.revision();
+            if let Err(error) = library
+                .record(
+                    &app,
+                    stream.media.clone(),
+                    position,
+                    stream.progress.duration_secs,
+                    revision,
+                )
+                .await
+            {
+                tracing::warn!(%error, "could not save final playback progress");
+            }
+        }
+    });
 }
 
 /// The connection totals from the downloader's latest snapshot, for the status bar, without

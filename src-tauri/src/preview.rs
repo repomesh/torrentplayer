@@ -5,7 +5,10 @@
 //! - Pictures (JPEG, PNG, WebP by their bytes, within the thumbnail size limits) as `data:` URLs.
 //! - Text and subtitles (`.txt`, `.nfo`, `.md`, `.srt`, …) as plain text, at most 64 KiB.
 //! - Videos as a stream URL for a still frame, only when the file's start and end are already
-//!   downloaded, so showing it downloads nothing new.
+//!   downloaded, so the frame comes from stored data. The URL serves the whole file like the
+//!   player's (`StreamEngine::media_source`): the webview's read-ahead past the downloaded start
+//!   can download a little more of it. A stored-only source (`StreamEngine::stored_media`) would
+//!   abort that read mid-response instead, which the webview can report as a media error.
 //! - Everything else (PDFs, archives, HTML) as metadata only: nothing is rendered, executed, or
 //!   opened.
 //!
@@ -143,9 +146,15 @@ impl PreviewState {
     reason = "Tauri passes managed state by value"
 )]
 pub(crate) fn stop_preview(state: State<'_, PreviewState>, app: State<'_, AppState>) {
+    stop_preview_of_closed_page(&state, app.started().map(|core| &**core));
+}
+
+/// Ends the preview of a page that is gone (reloaded, or its renderer crashed), like
+/// [`stop_preview`].
+pub(crate) fn stop_preview_of_closed_page(state: &PreviewState, core: Option<&Core>) {
     state.latest.cancel();
     if let Some(id) = state.take()
-        && let Some(core) = app.started()
+        && let Some(core) = core
     {
         core.server.unpublish(id);
     }
@@ -195,8 +204,7 @@ pub(crate) async fn preview_file(
     torrent_id: usize,
     file_index: usize,
 ) -> Result<FilePreviewDto, IpcError> {
-    let stopped = state.latest.begin();
-    let generation = state.latest.generation();
+    let (generation, stopped) = state.latest.begin_numbered();
     let core = Arc::clone(
         app.started()
             .ok_or_else(|| IpcError::new(ErrorKind::NotFound, "Unknown torrent."))?,
@@ -333,18 +341,15 @@ mod tests {
     #[test]
     fn a_preview_stopped_while_it_waited_is_not_recorded() {
         let state = PreviewState::default();
-        drop(state.latest.begin());
-        let first = state.latest.generation();
+        let first = state.latest.begin_numbered().0;
         // The explorer closed (stop_preview) before the video was ready.
         state.latest.cancel();
         assert_eq!(state.publish_current(first, 7, "ABCDEF"), Err(7));
         assert_eq!(state.previewed_hash(), None, "nothing kept from clean-up");
 
         // An older preview finishing after a newer one began is withdrawn, not shown.
-        drop(state.latest.begin());
-        let older = state.latest.generation();
-        drop(state.latest.begin());
-        let newer = state.latest.generation();
+        let older = state.latest.begin_numbered().0;
+        let newer = state.latest.begin_numbered().0;
         assert_eq!(state.publish_current(newer, 9, "123456"), Ok(None));
         assert_eq!(state.publish_current(older, 8, "ABCDEF"), Err(8));
         assert_eq!(state.previewed_hash().as_deref(), Some("123456"));

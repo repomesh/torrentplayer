@@ -12,11 +12,12 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::{Deserialize, Serialize};
 use tauri::State;
-use torrentplayer_library::{MAX_ID_BYTES, MAX_QUEUE_ITEMS, Queue, QueueStore, StoreError};
+use torrentplayer_library::{Loaded, MAX_ID_BYTES, MAX_QUEUE_ITEMS, Queue, QueueStore, StoreError};
 use torrentplayer_torrent::{FileReadiness, TorrentSource};
 use ts_rs::TS;
 
@@ -28,6 +29,9 @@ use crate::preload::PreloadState;
 #[derive(Debug, Clone)]
 pub(crate) struct QueueState {
     store: Arc<Mutex<QueueStore>>,
+    /// Whether the file failed to load in full at any point this session (see
+    /// [`Loaded::degraded`]): downloads are not cleaned up by policy until the next start.
+    degraded: Arc<AtomicBool>,
 }
 
 impl QueueState {
@@ -35,15 +39,26 @@ impl QueueState {
     pub(crate) fn new(data_dir: PathBuf) -> Self {
         Self {
             store: Arc::new(Mutex::new(QueueStore::new(data_dir))),
+            degraded: Arc::new(AtomicBool::new(false)),
         }
     }
 
-    pub(crate) fn load(&self) -> Queue {
-        self.store
+    /// Loads the queue file (see [`QueueStore::load`]).
+    pub(crate) fn load(&self) -> Loaded {
+        let loaded = self
+            .store
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .load()
-            .queue
+            .load();
+        if loaded.degraded {
+            self.degraded.store(true, Ordering::Release);
+        }
+        loaded
+    }
+
+    /// Whether the queue file failed to load in full this session.
+    pub(crate) fn degraded(&self) -> bool {
+        self.degraded.load(Ordering::Acquire)
     }
 
     fn save(&self, queue: &Queue) -> Result<(), StoreError> {
@@ -58,7 +73,7 @@ impl QueueState {
 #[tauri::command]
 pub(crate) async fn load_queue(state: State<'_, QueueState>) -> Result<Queue, IpcError> {
     let state = state.inner().clone();
-    tokio::task::spawn_blocking(move || state.load())
+    tokio::task::spawn_blocking(move || state.load().queue)
         .await
         .map_err(|e| IpcError::internal(&e))
 }
@@ -87,6 +102,12 @@ pub(crate) async fn save_queue(
                 StoreError::Io(_) | StoreError::Encode(_) => IpcError::new(
                     crate::error::ErrorKind::Internal,
                     "The queue could not be saved.",
+                ),
+                StoreError::Unread(_) => IpcError::new(
+                    crate::error::ErrorKind::Internal,
+                    "The queue could not be saved: the saved queue could not be read or backed \
+                     up, so it was not replaced. Close any program using queue.json and try \
+                     again.",
                 ),
             }
         })
@@ -249,7 +270,7 @@ mod tests {
     fn saves_and_loads_through_the_state() {
         let dir = tempfile::tempdir().unwrap();
         let state = QueueState::new(dir.path().to_path_buf());
-        assert_eq!(state.load(), Queue::default());
+        assert_eq!(state.load().queue, Queue::default());
         let queue = Queue {
             items: vec![QueueItem {
                 id: "a".into(),
@@ -266,7 +287,19 @@ mod tests {
             current: Some("a".into()),
         };
         state.save(&queue).unwrap();
-        assert_eq!(state.load(), queue);
+        assert_eq!(state.load().queue, queue);
+        assert!(!state.degraded());
+    }
+
+    #[test]
+    fn a_queue_that_failed_to_load_stays_degraded_for_the_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = QueueState::new(dir.path().to_path_buf());
+        std::fs::write(dir.path().join("queue.json"), "{ damaged").unwrap();
+        assert!(state.load().degraded);
+        state.save(&Queue::default()).unwrap();
+        assert!(!state.load().degraded);
+        assert!(state.degraded(), "policy cleanup waits for the next start");
     }
 
     #[test]
