@@ -1,6 +1,6 @@
 use std::{
     io,
-    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6},
+    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6},
     sync::Arc,
     time::Instant,
 };
@@ -26,6 +26,8 @@ pub struct Tunnel {
     rate_limiter: Arc<RateLimiter>,
     buffers: (Vec<u8>, Vec<u8>),
     socket: UdpSocket,
+    /// Added for TorrentPlayer: whether `socket` is an IPv4 socket (see `new`).
+    ipv4: bool,
 }
 
 pub trait IntoPacket<'a> {
@@ -41,20 +43,36 @@ impl Tunnel {
         let private_key = config.private_key.clone();
         let public_key = PublicKey::from(&private_key);
 
-        let socket = Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?;
+        // Modified for TorrentPlayer: bound to `bind_address` (see `Options::bind_address`),
+        // every interface by default. An IPv4 address gets an IPv4 socket: macOS and the BSDs
+        // pass no IPv4 traffic through a dual-stack socket bound to an IPv4-mapped address.
+        let (domain, address): (Domain, SockAddr) = match bind_address {
+            Some(IpAddr::V4(ip)) => (
+                Domain::IPV4,
+                SocketAddrV4::new(ip, config.listen_port.unwrap_or(0)).into(),
+            ),
+            ip => (
+                Domain::IPV6,
+                SocketAddrV6::new(
+                    match ip {
+                        Some(IpAddr::V6(ip)) => ip,
+                        _ => Ipv6Addr::UNSPECIFIED,
+                    },
+                    config.listen_port.unwrap_or(0),
+                    0,
+                    0,
+                )
+                .into(),
+            ),
+        };
+        let ipv4 = domain == Domain::IPV4;
+        let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
         socket.set_nonblocking(true)?;
-        socket.set_only_v6(false)?;
+        if !ipv4 {
+            socket.set_only_v6(false)?;
+        }
         #[cfg(not(windows))]
         socket.set_reuse_address(true)?;
-
-        // Modified for TorrentPlayer: bound to `bind_address` (see `Options::bind_address`),
-        // every interface by default.
-        let ip = match bind_address {
-            None => Ipv6Addr::UNSPECIFIED,
-            Some(IpAddr::V6(ip)) => ip,
-            Some(IpAddr::V4(ip)) => ip.to_ipv6_mapped(),
-        };
-        let address: SockAddr = SocketAddrV6::new(ip, config.listen_port.unwrap_or(0), 0, 0).into();
         socket.bind(&address)?;
 
         let socket = UdpSocket::from_std(socket.into())?;
@@ -68,6 +86,7 @@ impl Tunnel {
             rate_limiter: Arc::new(RateLimiter::new(&public_key, 128)),
             buffers: (vec![0; u16::MAX as usize], vec![0; u16::MAX as usize]),
             socket,
+            ipv4,
         };
 
         for peer_config in peer_configs {
@@ -105,7 +124,10 @@ impl Tunnel {
                     .tunnel
                     .format_handshake_initiation(&mut self.buffers.0, false)
                 {
-                    self.socket.send_to(packet, mapped(endpoint)).await.ok();
+                    self.socket
+                        .send_to(packet, mapped(endpoint, self.ipv4))
+                        .await
+                        .ok();
                 }
             }
         }
@@ -226,6 +248,7 @@ impl Tunnel {
             peers,
             buffers,
             socket,
+            ipv4,
             ..
         } = self;
 
@@ -247,21 +270,14 @@ impl Tunnel {
                     .any(|net| net.contains(&destination))
         })?;
 
-        let endpoint = match peer.config.endpoint? {
-            SocketAddr::V4(addr) => SocketAddr::V6(SocketAddrV6::new(
-                addr.ip().to_ipv6_mapped(),
-                addr.port(),
-                0,
-                0,
-            )),
-            e => e,
-        };
+        // Modified for TorrentPlayer: `mapped` below gives the endpoint the socket's form.
+        let endpoint = peer.config.endpoint?;
         // Added for TorrentPlayer: traffic now waits for an answer (see `liveness`); a packet
         // queued for a handshake that never completes waits too.
         peer.waiting_since.get_or_insert_with(Instant::now);
         let packet = peer.tunnel.encapsulate(packet, &mut buffers.1);
         if let TunnResult::WriteToNetwork(packet) = packet {
-            socket.send_to(packet, mapped(endpoint)).await.ok();
+            socket.send_to(packet, mapped(endpoint, *ipv4)).await.ok();
         }
 
         None
@@ -272,6 +288,7 @@ impl Tunnel {
             peers,
             buffers,
             socket,
+            ipv4,
             rate_limiter,
             ..
         } = self;
@@ -290,7 +307,7 @@ impl Tunnel {
             };
             let packet = peer.tunnel.update_timers(&mut buffers.0);
             if let TunnResult::WriteToNetwork(packet) = packet {
-                socket.send_to(packet, mapped(endpoint)).await.ok();
+                socket.send_to(packet, mapped(endpoint, *ipv4)).await.ok();
             }
         }
     }
@@ -375,14 +392,76 @@ impl Peer {
     }
 }
 
-fn mapped(endpoint: SocketAddr) -> SocketAddr {
+/// `endpoint` in the form the tunnel's socket sends to: IPv4-mapped on the dual-stack socket.
+/// Modified for TorrentPlayer: a plain IPv4 address on an IPv4 socket (see `Tunnel::new`), which
+/// cannot send to IPv6 endpoints.
+fn mapped(endpoint: SocketAddr, ipv4: bool) -> SocketAddr {
     match endpoint {
-        SocketAddr::V4(addr) => SocketAddr::V6(SocketAddrV6::new(
+        SocketAddr::V4(addr) if !ipv4 => SocketAddr::V6(SocketAddrV6::new(
             addr.ip().to_ipv6_mapped(),
             addr.port(),
             0,
             0,
         )),
+        SocketAddr::V6(addr) if ipv4 => match addr.ip().to_ipv4_mapped() {
+            Some(ip) => SocketAddr::V4(SocketAddrV4::new(ip, addr.port())),
+            None => endpoint,
+        },
         addr => addr,
+    }
+}
+
+/// Added for TorrentPlayer.
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::*;
+
+    #[test]
+    fn endpoints_take_the_form_of_the_socket() {
+        let v4: SocketAddr = "127.0.0.1:51820".parse().unwrap();
+        let v4_mapped: SocketAddr = "[::ffff:127.0.0.1]:51820".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::1]:51820".parse().unwrap();
+        assert_eq!(mapped(v4, false), v4_mapped);
+        assert_eq!(mapped(v4_mapped, false), v4_mapped);
+        assert_eq!(mapped(v6, false), v6);
+        assert_eq!(mapped(v4, true), v4);
+        assert_eq!(mapped(v4_mapped, true), v4);
+        assert_eq!(mapped(v6, true), v6, "left for the socket to refuse");
+    }
+
+    /// The tunnel bound to an IPv4 address sends from an IPv4 socket, which works on every
+    /// platform (a dual-stack socket bound to the IPv4-mapped address sends nothing on macOS).
+    #[tokio::test]
+    async fn a_tunnel_bound_to_ipv4_loopback_reaches_ipv4_endpoints() {
+        let server = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        server
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        let (private_key, _) = crate::x25519::keypair();
+        let (_, server_public) = crate::x25519::keypair();
+        let config = crate::config::Interface {
+            address: "10.0.0.2/32".parse().unwrap(),
+            listen_port: None,
+            private_key,
+            mtu: None,
+        };
+        let peer = crate::config::Peer {
+            endpoint: Some(server.local_addr().unwrap()),
+            allowed_ips: vec!["0.0.0.0/0".parse().unwrap()],
+            public_key: server_public,
+            preshared_key: None,
+            persistent_keepalive: None,
+        };
+        let mut tunnel =
+            Tunnel::new(&config, [peer], Some(IpAddr::V4(Ipv4Addr::LOCALHOST))).unwrap();
+        let local = tunnel.socket().local_addr().unwrap();
+        assert_eq!(local.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        tunnel.initiate().await;
+        let mut buf = [0; 256];
+        let (len, from) = server.recv_from(&mut buf).unwrap();
+        assert_eq!((len, buf[0]), (148, 1), "a handshake initiation");
+        assert_eq!(from, local);
     }
 }

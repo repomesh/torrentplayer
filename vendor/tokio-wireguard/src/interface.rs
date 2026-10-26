@@ -63,8 +63,9 @@ pub struct Options {
     /// UDP options
     pub udp: UdpOptions,
     /// Added for TorrentPlayer: the address the WireGuard UDP socket binds. `None` (the
-    /// default) binds every interface. The socket is dual-stack, so an IPv4 address is bound
-    /// in its IPv4-mapped form and still reaches IPv4 endpoints.
+    /// default) binds every interface, IPv6 and IPv4, on a dual-stack socket. An IPv4 address
+    /// gets an IPv4 socket, which reaches only IPv4 endpoints (macOS and the BSDs pass no IPv4
+    /// traffic through a dual-stack socket bound to an IPv4-mapped address).
     pub bind_address: Option<std::net::IpAddr>,
 }
 

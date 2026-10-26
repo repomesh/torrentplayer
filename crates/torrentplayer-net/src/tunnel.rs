@@ -855,7 +855,7 @@ mod tests {
         let (client_key, client_public) = x25519::keypair();
         let (psk, _) = x25519::keypair();
         // The port is free when reserved, but a socket in a test running alongside can take it
-        // before the server binds it (the server's socket is dual-stack): pick another then.
+        // before the server binds it: pick another then.
         let (server, port) = (0..20)
             .find_map(|_| {
                 let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();

@@ -66,5 +66,9 @@ torrentplayer-net sets a 2-minute timeout, 30-second keep-alives, and a listener
 Socket address option (`src/interface.rs` `Options::bind_address`, used by
 `src/interface/tunnel.rs` `Tunnel::new`, marked "Added/Modified for TorrentPlayer"): the
 WireGuard UDP socket always bound `[::]` (every interface). `bind_address` keeps that default
-and lets torrentplayer-net's tests bind loopback instead (an IPv4 address in its IPv4-mapped
-form on the dual-stack socket), so their newly built binaries never trigger a firewall prompt.
+and lets torrentplayer-net's tests bind loopback instead, so their newly built binaries never
+trigger a firewall prompt. An IPv4 address gets an IPv4 (`AF_INET`) socket, and `mapped` in
+`tunnel.rs` gives endpoints that socket's form (plain IPv4 instead of IPv4-mapped; it cannot
+reach IPv6 endpoints). Binding the dual-stack socket to the IPv4-mapped address instead worked
+on Linux and Windows, but macOS and the BSDs pass no IPv4 traffic through such a socket, so no
+handshake ever completed there.
