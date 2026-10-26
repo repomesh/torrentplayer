@@ -584,4 +584,7 @@ alternating runs, incoming off → on): the first live peer at 2048, 1229, 2451 
 1028 ms, live peers at 60 s 40, 39, 39 → 40, 40, 38, seen 359, 334, 369 → 342, 367, 352, and
 0.41, 0.41, 0.42 → 0.47, 0.44, 0.40 MiB/s. UPnP discovery found no gateway ("discovered 0
 endpoints") in every run, and no peer connected in (no inbound connection at 50 s), so the
-announcement could not help there; the differences are noise.
+announcement could not help there; the differences are noise. Since then the DHT announces and
+turns read-write only while the router confirms a UPnP mapping to a public address (see
+`docs/network.md`), so on that machine the node stays read-only with incoming peers on and
+sends no `announce_peer`: its DHT traffic is that of the incoming-off runs.

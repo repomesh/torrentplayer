@@ -7,6 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- TorrentPlayer announces its port in the DHT and answers as a read-write DHT node only while the
+  router confirms a UPnP mapping for it to a public address, not merely while it listens; when
+  the mapping lapses it is read-only (BEP 43) again at once. DHT lookups are unaffected.
+
 ### Fixed
 
 - Audio conversion retries temporary startup and stream-read failures twice before falling back
