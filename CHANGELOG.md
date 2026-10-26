@@ -313,6 +313,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   address stream exhausted"): the metadata lookup now gets up to 200 DHT peers instead of 20.
 - Videos with chapters whose Dolby or DTS audio needs converting, such as Sintel, now play with
   sound. The conversion used to fail at once with "The audio could not be converted".
+- A web seed that answers range requests with an empty `206` response (or one that ends before
+  a whole block) is now backed off like any failing server instead of being asked again at once,
+  in a tight loop.
 
 ### Known limitations
 
