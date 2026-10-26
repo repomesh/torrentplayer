@@ -13,7 +13,8 @@
 //!
 //! [`preview_frame`] serves the preloaded best pick's video from the local stream server, so the
 //! webview can show a frame from its start, which is already downloaded, without claiming the
-//! preload.
+//! preload. Like a file explorer preview (see [`crate::preview`]), the webview's read-ahead can
+//! download a little more of the file than the preload did.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
