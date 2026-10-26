@@ -31,9 +31,9 @@
 </p>
 
 <p align="center">
-  <a href="assets/demo/torrentplayer-demo.mp4"><img src="assets/demo/torrentplayer-demo.gif" alt="Demo: searching for Sintel, pressing Play on the best pick, and clicking around the seek bar; playback starts in half a second and each skip plays again within about a second, while the queue downloads in the background" width="720"></a>
+  <a href="assets/demo/torrentplayer-demo.mp4"><img src="assets/demo/torrentplayer-demo.gif" alt="Demo at normal speed: searching for Sintel, pressing Play on the best pick, and skipping around while the queue downloads in the background" width="720"></a>
   <br>
-  <sub>Search, play, skip. Recorded live in real time; nothing is sped up. <a href="assets/demo/torrentplayer-demo.mp4">Full demo with sound (MP4, 35 s)</a>.<br>
+  <sub>Search, play, skip. GIF shown at normal speed. <a href="assets/demo/torrentplayer-demo.mp4">Original real-time demo with sound (MP4, 35 s)</a>.<br>
   <em>Sintel</em> and <em>Tears of Steel</em> © Blender Foundation, CC BY 3.0.</sub>
 </p>
 
