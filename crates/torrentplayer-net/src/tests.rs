@@ -832,10 +832,22 @@ async fn unsupported_proxy_udp_is_refused_without_fallback_and_the_kill_switch_b
         .unwrap();
     net.settled(Duration::from_secs(5)).await;
     assert!(net.policy().bound_udp_allowed);
+    assert!(
+        net.status().udp_allowed,
+        "unknown until a UDP association is asked for"
+    );
+    let mut changes = net.status_changes();
+    changes.borrow_and_update();
     assert!(matches!(
         net.udp_socket(target).await,
         Err(NetError::Proxy(_))
     ));
+    assert!(changes.has_changed().unwrap(), "the refusal is announced");
+    assert!(!net.status().udp_allowed, "the status shows the refusal");
+    // Until the settings change.
+    net.apply(socks_mode(&proxy, Some(("alice", "pw"))))
+        .unwrap();
+    assert!(net.status().udp_allowed);
     net.shutdown();
 
     let net = Network::start(dead_proxy().await, fast_options())
@@ -873,6 +885,7 @@ async fn socks_udp_uses_only_the_relay_and_dies_with_its_control_connection() {
     let net = Network::start(cfg, fast_options()).await.unwrap();
     assert!(net.settled(Duration::from_secs(3)).await.traffic_allowed);
     let (socket, lease) = net.udp_socket(destination).await.unwrap();
+    assert!(net.status().udp_allowed);
     socket.send_to(b"via proxy", destination).await.unwrap();
     let mut bytes = [0; 64];
     let (n, from) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))

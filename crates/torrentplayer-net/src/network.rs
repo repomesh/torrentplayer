@@ -233,7 +233,9 @@ pub struct NetworkStatus {
     /// Whether the kill switch is blocking traffic (a protected mode that is not connected).
     pub kill_switch_engaged: bool,
     /// Whether scoped UDP is available: direct, through WireGuard, or via a SOCKS5 UDP
-    /// association. Proxy UDP support is negotiated per association, not by the health check.
+    /// association. Proxy UDP support is negotiated per association, not by the health check:
+    /// this turns false once the proxy refuses one (no UDP support, or an unusable relay), until
+    /// one succeeds or the settings change.
     pub udp_allowed: bool,
     /// Whether trackers may be contacted.
     pub trackers_allowed: bool,
@@ -383,6 +385,8 @@ pub(crate) struct State {
     /// Checks in a row that found the connected proxy working and unused: the gap before the
     /// next one doubles with each (see [`IDLE_CHECK_DOUBLINGS`]).
     idle_checks: u32,
+    /// The SOCKS5 proxy refused a UDP association in this epoch (see [`NetworkStatus::udp_allowed`]).
+    proxy_udp_refused: Option<u64>,
 }
 
 impl State {
@@ -524,6 +528,26 @@ impl Inner {
         true
     }
 
+    /// Records whether the SOCKS5 proxy accepted a UDP association opened in `epoch`, for
+    /// [`NetworkStatus::udp_allowed`]. A refusal counts (no UDP support, or a relay that cannot
+    /// be used); a proxy that is down or slow does not, as the kill switch covers that.
+    fn note_proxy_udp<T>(&self, epoch: u64, opened: &Result<T, NetError>) {
+        let refused = match opened {
+            Ok(_) => false,
+            Err(NetError::Proxy(socks5::Socks5Error::Refused(_)) | NetError::Unsupported(_)) => {
+                true
+            }
+            Err(_) => return,
+        };
+        let mut st = self.state();
+        if st.epoch != epoch || (st.proxy_udp_refused == Some(epoch)) == refused {
+            return;
+        }
+        st.proxy_udp_refused = refused.then_some(epoch);
+        drop(st);
+        self.status_changed();
+    }
+
     /// Tells [`Network::status_changes`] watchers that the status changed.
     pub(crate) fn status_changed(&self) {
         self.status_seq
@@ -660,6 +684,7 @@ impl Network {
             proxy_failed_once: None,
             proxy_used: false,
             idle_checks: 0,
+            proxy_udp_refused: None,
         };
         let message = format!("Network mode: {}", describe(&st.config.mode));
         st.log(EventLevel::Info, message);
@@ -767,7 +792,7 @@ impl Network {
             endpoint: st.config.mode.endpoint(),
             traffic_allowed: policy.traffic_allowed,
             kill_switch_engaged: policy.protected && !policy.traffic_allowed,
-            udp_allowed: policy.bound_udp_allowed,
+            udp_allowed: policy.bound_udp_allowed && st.proxy_udp_refused != Some(st.epoch),
             trackers_allowed: policy.trackers_allowed,
             last_check_ms: st.last_check.map(unix_ms),
             connected_since_ms: st
@@ -905,7 +930,7 @@ impl Network {
                 return Ok((socket.ipv4_only(ipv4_only).with_lease(lease.clone()), lease));
             }
             Route::Socks(cfg) => {
-                let socket = tokio::time::timeout(
+                let opened = tokio::time::timeout(
                     self.inner.options.connect_timeout,
                     crate::socks_udp::SocksUdp::open(
                         cfg,
@@ -914,7 +939,10 @@ impl Network {
                     ),
                 )
                 .await
-                .map_err(|_| NetError::Timeout)??;
+                .map_err(|_| NetError::Timeout)
+                .flatten();
+                self.inner.note_proxy_udp(lease.epoch, &opened);
+                let socket = opened?;
                 if !lease.is_valid() {
                     return Err(NetError::KillSwitch(
                         "the network settings changed while opening UDP".into(),

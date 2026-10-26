@@ -326,6 +326,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Teredo (`2001::/32`), IPv6 benchmarking (`2001:2::/48`), and the new IPv6 documentation range
   (`3fff::/20`) no longer count as public addresses, so web seeds and peers cannot use them to
   reach hosts that only public destinations should.
+- The network status now shows DHT and UDP as off once the SOCKS5 proxy refuses a UDP
+  association, instead of always reporting UDP as available.
 
 ### Known limitations
 
