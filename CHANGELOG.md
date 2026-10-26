@@ -323,6 +323,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A SOCKS5 proxy on the internet can no longer point DHT and UDP tracker traffic at your own
   computer or local network by naming a local UDP relay; such relays are refused. A proxy that
   is itself on your computer or network may still use one.
+- Teredo (`2001::/32`), IPv6 benchmarking (`2001:2::/48`), and the new IPv6 documentation range
+  (`3fff::/20`) no longer count as public addresses, so web seeds and peers cannot use them to
+  reach hosts that only public destinations should.
 
 ### Known limitations
 
