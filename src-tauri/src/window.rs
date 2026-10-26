@@ -5,12 +5,14 @@
 //! The window is created hidden (see `tauri.conf.json`) and shown once the page has loaded, so it
 //! never flashes white or half-drawn. It is centered at that point, when its final size at the
 //! display's scale is known, rather than from the configured size at creation.
+//!
+//! While the window is minimized, WebView2 is asked to keep its memory low.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tauri::webview::{PageLoadEvent, PageLoadPayload};
-use tauri::{AppHandle, Manager as _, Runtime, Webview, WebviewWindow};
+use tauri::{AppHandle, Manager as _, Runtime, Webview, WebviewWindow, Window, WindowEvent};
 
 /// The main window's label.
 const MAIN: &str = "main";
@@ -55,3 +57,57 @@ pub(crate) fn show_eventually<R: Runtime>(app: &AppHandle<R>) {
         }
     });
 }
+
+/// Whether the webview was last asked to use little memory (the window minimized).
+static LOW_MEMORY: AtomicBool = AtomicBool::new(false);
+
+/// Asks WebView2 to use little memory while the main window is minimized, and normal memory
+/// again once it is restored. A minimized window draws nothing, so WebView2 can drop caches it
+/// would otherwise keep (about 100 MB at idle); playback and downloads carry on.
+pub(crate) fn on_window_event<R: Runtime>(window: &Window<R>, event: &WindowEvent) {
+    if window.label() != MAIN || !matches!(event, WindowEvent::Resized(_)) {
+        return;
+    }
+    let low = window.is_minimized().unwrap_or(false);
+    if LOW_MEMORY.swap(low, Ordering::SeqCst) == low {
+        return;
+    }
+    if let Some(webview) = window.get_webview_window(MAIN) {
+        set_memory_target(&webview, low);
+    }
+}
+
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn set_memory_target<R: Runtime>(window: &WebviewWindow<R>, low: bool) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
+        ICoreWebView2_19,
+    };
+    use windows_core::Interface as _;
+
+    let level = if low {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+    } else {
+        COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+    };
+    let result = window.with_webview(move |webview| {
+        // SAFETY: `with_webview` runs this on the main thread with a live controller, which is
+        // the thread WebView2's COM objects belong to.
+        let core = unsafe { webview.controller().CoreWebView2() };
+        // ICoreWebView2_19 needs WebView2 Runtime 114 or later; older ones keep their default.
+        let Ok(core) = core.and_then(|core| core.cast::<ICoreWebView2_19>()) else {
+            return;
+        };
+        // SAFETY: as above; `level` is one of the two documented values.
+        if let Err(e) = unsafe { core.SetMemoryUsageTargetLevel(level) } {
+            tracing::debug!(error = %e, "could not set the webview's memory target");
+        }
+    });
+    if let Err(e) = result {
+        tracing::debug!(error = %e, "could not reach the webview");
+    }
+}
+
+#[cfg(not(windows))]
+fn set_memory_target<R: Runtime>(_window: &WebviewWindow<R>, _low: bool) {}

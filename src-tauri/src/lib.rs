@@ -9,7 +9,9 @@
 //! Every IPC command validates its arguments on the Rust side; the frontend is never
 //! trusted. The full IPC contract is documented in `docs/ipc.md`.
 
-#![forbid(unsafe_code)]
+// `deny` rather than `forbid`: `window.rs` makes two WebView2 COM calls that need `unsafe`, each
+// allowed locally with a `// SAFETY:` comment. Nothing else in this crate may use it.
+#![deny(unsafe_code)]
 
 mod audio;
 mod cache;
@@ -206,6 +208,7 @@ pub fn run() -> anyhow::Result<()> {
             Ok(())
         })
         .on_page_load(window::on_page_load)
+        .on_window_event(window::on_window_event)
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::add_torrent_link,
