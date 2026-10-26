@@ -1283,10 +1283,19 @@ async fn the_port_is_reachable_only_while_the_router_confirms_a_public_mapping()
     gateway.set_external(Some(public));
     wait_for_reachable(&net, Some(port)).await;
 
-    // Closing the listener forgets the mapping at once.
+    // Closing the listener forgets the mapping at once, and asks the router to remove it.
+    assert!(gateway.unmapped_ports().is_empty());
     net.set_incoming(IncomingConfig::default());
     wait_for_incoming(&net, |s| *s == IncomingStatus::Off).await;
     assert_eq!(net.reachable_port(), None);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while gateway.unmapped_ports().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the mapping is removed");
+    assert_eq!(gateway.unmapped_ports(), [port]);
     net.shutdown();
 }
 

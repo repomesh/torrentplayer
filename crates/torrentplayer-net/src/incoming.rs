@@ -57,6 +57,9 @@ const UPNP_DISCOVER_TIMEOUT: Duration = Duration::from_secs(5);
 const UPNP_DISCOVER_EVERY: Duration = Duration::from_secs(60);
 /// Time limit for one request to the router.
 const UPNP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Time limit for removing a mapping once it is no longer wanted. The task that removes it is
+/// never waited for, so this only bounds how long it lingers.
+const UPNP_DELETE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Largest reply accepted from a router (a device description or a SOAP reply).
 const MAX_UPNP_REPLY: usize = 64 * 1024;
 /// The UPnP service that maps ports.
@@ -824,6 +827,7 @@ async fn expire_inbound(net: Weak<Inner>) {
 /// lapses within a lease after it stops, and counts as lost once a lease passes without a
 /// renewal. It counts only while the router's own address is public: behind a second NAT
 /// (carrier-grade NAT, or a router behind another one) peers cannot reach the port either.
+/// When cancelled, it asks the router to remove the mapping (see [`UPNP_DELETE_TIMEOUT`]).
 async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
     let Some((lease, fixed, id)) = net.upgrade().map(|net| {
         let mut st = net.state();
@@ -838,7 +842,11 @@ async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
     }) else {
         return;
     };
-    let mapping = Mapping { net, id, port };
+    let mapping = Mapping {
+        net: net.clone(),
+        id,
+        port,
+    };
     let client = match reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -857,6 +865,8 @@ async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
     // The public address of the last confirmed mapping, and when that mapping lapses.
     let mut confirmed: Option<(IpAddr, Instant)> = None;
     let mut last_external = None;
+    // The router that last accepted the mapping, to remove it from when done.
+    let mut mapped_on: Option<Gateway> = None;
     loop {
         let alive = confirmed.is_some_and(|(_, until)| until > Instant::now());
         if !alive && discovered.is_none_or(|at| at.elapsed() >= UPNP_DISCOVER_EVERY) {
@@ -866,18 +876,22 @@ async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
             } else {
                 // A mode change or a closed listener stops discovery at once.
                 tokio::select! {
-                    () = cancel.cancelled() => return,
+                    () = cancel.cancelled() => break,
                     gateways = discover_gateways(&client) => gateways,
                 }
             };
         }
-        let external = tokio::select! {
-            () = cancel.cancelled() => return,
-            external = map_any(&gateways, &client, port, lease) => external,
+        let mapped = tokio::select! {
+            () = cancel.cancelled() => break,
+            mapped = map_any(&gateways, &client, port, lease) => mapped,
         };
+        let external = mapped.map(|(ip, gateway)| {
+            mapped_on = Some(gateway.clone());
+            ip
+        });
         // Cancelled while the last reply arrived: never record a mapping afterwards.
         if cancel.is_cancelled() {
-            return;
+            break;
         }
         if let Some(ip) = external
             && last_external != external
@@ -901,22 +915,50 @@ async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
                 .map(|(ip, _)| ip),
         );
         tokio::select! {
-            () = cancel.cancelled() => return,
+            () = cancel.cancelled() => break,
             () = tokio::time::sleep(lease / 2) => {}
+        }
+    }
+    drop(mapping);
+    if let Some(gateway) = mapped_on {
+        unmap(&net, id, &gateway, &client, port).await;
+    }
+}
+
+/// Asks `gateway` to remove the mapping of `port` made by the [`forward_port`] task `id`.
+async fn unmap(net: &Weak<Inner>, id: u64, gateway: &Gateway, client: &reqwest::Client, port: u16) {
+    // A newer task maps the same port (the listener reopened at once): leave its mapping be.
+    let superseded = net
+        .upgrade()
+        .is_some_and(|net| net.state().incoming.mapping_id != id);
+    if superseded {
+        return;
+    }
+    // Best effort, and brief: the mapping lapses with its lease anyway.
+    match tokio::time::timeout(UPNP_DELETE_TIMEOUT, gateway.unmap(client, port)).await {
+        Ok(Ok(())) => {
+            tracing::debug!(target: "torrentplayer_net", port, "UPnP port mapping removed");
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(target: "torrentplayer_net", port, %error, "could not remove the UPnP port mapping");
+        }
+        Err(_) => {
+            tracing::debug!(target: "torrentplayer_net", port, "the router did not confirm removing the UPnP port mapping in time");
         }
     }
 }
 
-/// Maps `port` on the first of `gateways` that accepts, and returns its external address.
-async fn map_any(
-    gateways: &[Gateway],
+/// Maps `port` on the first of `gateways` that accepts, and returns its external address and
+/// the router.
+async fn map_any<'a>(
+    gateways: &'a [Gateway],
     client: &reqwest::Client,
     port: u16,
     lease: Duration,
-) -> Option<IpAddr> {
+) -> Option<(IpAddr, &'a Gateway)> {
     for gateway in gateways {
         match gateway.map(client, port, lease).await {
-            Ok(ip) => return Some(ip),
+            Ok(ip) => return Some((ip, gateway)),
             Err(error) => {
                 tracing::debug!(target: "torrentplayer_net", url = %gateway.control_url, %error, "UPnP port mapping failed");
             }
@@ -981,6 +1023,7 @@ impl Drop for Mapping {
 }
 
 /// A router's UPnP `WANIPConnection` service, and this computer's address towards it.
+#[derive(Clone)]
 struct Gateway {
     control_url: url::Url,
     local_ip: IpAddr,
@@ -1009,6 +1052,17 @@ impl Gateway {
         xml_value(&reply, "NewExternalIPAddress")
             .and_then(|ip| ip.trim().parse().ok())
             .ok_or_else(|| "the router did not say its external address".to_owned())
+    }
+
+    /// Removes the mapping of TCP `port`.
+    async fn unmap(&self, client: &reqwest::Client, port: u16) -> Result<(), String> {
+        let arguments = format!(
+            "<NewRemoteHost></NewRemoteHost><NewExternalPort>{port}</NewExternalPort>\
+             <NewProtocol>TCP</NewProtocol>"
+        );
+        self.call(client, "DeletePortMapping", &arguments)
+            .await
+            .map(|_| ())
     }
 
     /// Calls `action` on the service (SOAP) and returns the reply.

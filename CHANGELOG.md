@@ -328,6 +328,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   reach hosts that only public destinations should.
 - The network status now shows DHT and UDP as off once the SOCKS5 proxy refuses a UDP
   association, instead of always reporting UDP as available.
+- Turning off incoming connections or UPnP, or leaving direct mode, now asks the router to remove
+  TorrentPlayer's UPnP port mapping (for up to two seconds, never delaying quitting) instead of
+  leaving it open until its lease ran out.
 
 ### Known limitations
 

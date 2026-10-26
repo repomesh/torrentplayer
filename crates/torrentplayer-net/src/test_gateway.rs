@@ -16,10 +16,13 @@ struct Shared {
     external: Mutex<Option<IpAddr>>,
     /// The external port of every `AddPortMapping` request, in order.
     mapped: Mutex<Vec<u16>>,
+    /// The external port of every `DeletePortMapping` request, in order.
+    unmapped: Mutex<Vec<u16>>,
 }
 
 /// A router's UPnP `WANIPConnection` service on `127.0.0.1`: accepts every `AddPortMapping` and
-/// reports a fixed public address, until told to refuse. Stops when dropped.
+/// `DeletePortMapping` and reports a fixed public address, until told to refuse. Stops when
+/// dropped.
 #[derive(Debug)]
 pub struct TestGateway {
     addr: SocketAddr,
@@ -40,6 +43,7 @@ impl TestGateway {
             shared: Arc::new(Shared {
                 external: Mutex::new(Some(external)),
                 mapped: Mutex::default(),
+                unmapped: Mutex::default(),
             }),
             cancel: CancellationToken::new(),
         };
@@ -79,6 +83,16 @@ impl TestGateway {
     pub fn mapped_ports(&self) -> Vec<u16> {
         self.shared
             .mapped
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// The external port of every `DeletePortMapping` request so far, refused ones included.
+    #[must_use]
+    pub fn unmapped_ports(&self) -> Vec<u16> {
+        self.shared
+            .unmapped
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
@@ -128,6 +142,15 @@ async fn answer(mut stream: TcpStream, shared: Arc<Shared>) {
         if let Some(port) = value(&body, "NewExternalPort").and_then(|p| p.parse().ok()) {
             shared
                 .mapped
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(port);
+        }
+        external.map(|_| String::new())
+    } else if head.contains("#deleteportmapping") {
+        if let Some(port) = value(&body, "NewExternalPort").and_then(|p| p.parse().ok()) {
+            shared
+                .unmapped
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(port);
