@@ -322,6 +322,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Seeking in a video whose audio is converted stops the previous FFmpeg conversion at once,
   instead of when the player stops reading it, and a conversion whose input stops answering
   gives up after a minute.
+- When the window's page reloads or recovers from a crash, the videos it was playing stop
+  streaming (their progress is saved), and the explorer preview and best-pick frame are
+  withdrawn, instead of staying open until TorrentPlayer quits.
 
 ### Known limitations
 

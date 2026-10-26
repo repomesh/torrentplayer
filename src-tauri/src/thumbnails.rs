@@ -52,6 +52,22 @@ impl ThumbnailState {
     pub(crate) fn cancel(&self) {
         self.latest.cancel();
     }
+
+    /// Stops the running request and withdraws the best pick's frame, for a page that is gone
+    /// (reloaded, or its renderer crashed).
+    pub(crate) fn close_page(&self, server: Option<&torrentplayer_stream::StreamServer>) {
+        self.cancel();
+        let frame = self
+            .frame
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(frame) = frame
+            && let Some(server) = server
+        {
+            server.unpublish(frame);
+        }
+    }
 }
 
 /// A search result to find a thumbnail for.

@@ -146,9 +146,15 @@ impl PreviewState {
     reason = "Tauri passes managed state by value"
 )]
 pub(crate) fn stop_preview(state: State<'_, PreviewState>, app: State<'_, AppState>) {
+    stop_preview_of_closed_page(&state, app.started().map(|core| &**core));
+}
+
+/// Ends the preview of a page that is gone (reloaded, or its renderer crashed), like
+/// [`stop_preview`].
+pub(crate) fn stop_preview_of_closed_page(state: &PreviewState, core: Option<&Core>) {
     state.latest.cancel();
     if let Some(id) = state.take()
-        && let Some(core) = app.started()
+        && let Some(core) = core
     {
         core.server.unpublish(id);
     }
