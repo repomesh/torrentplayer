@@ -481,6 +481,11 @@ The Settings page (`torrentplayer-settings`) stores what the user chooses; the a
 - With the `rqbit` engine choice in the SOCKS5 and WireGuard modes, TorrentPlayer announces to a
   torrent's trackers for librqbit once, when it opens; it is not announced again, so a long
   session finds no new tracker peers.
+- The public-address checks (`.torrent` links, HTTP trackers, web seeds) apply to literal
+  addresses and to names TorrentPlayer resolves itself. In SOCKS5 mode with proxy DNS, names go
+  to the proxy unresolved and unchecked, so one that resolves to a private address (such as
+  `127.0.0.1.nip.io`) reaches the proxy host's own loopback or local network. This is an
+  accepted limitation: the proxy is trusted, as it is for the UDP relay address it supplies.
 - HTTP trackers on the local network or `localhost` are refused (also after a redirect, in every
   mode); UDP trackers at local addresses, and librqbit's own tracker requests with the `rqbit`
   engine in Direct mode, are not covered yet.
