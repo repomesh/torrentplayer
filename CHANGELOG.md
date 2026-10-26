@@ -121,8 +121,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- Play in a queue item's "Choose files…" dialog starts the file again; closing the dialog
-  cancelled the playback it had just started.
+- Play in a queue item's "Choose files…" dialog starts the file again; it closed the dialog
+  and played nothing.
 - "Start over" pressed before a video's length is known no longer jumps back to the saved
   position once it is.
 - Pressing Back (or Esc) twice in Settings while a change is still saving no longer leaves twice.

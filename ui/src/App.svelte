@@ -1634,8 +1634,11 @@
           }
         }}
         onPlay={(file: FileSummary) => {
+          // `torrent` is derived from `chooser`: read it before clearing `chooser`, after which
+          // it reads null.
+          const chosen = torrent;
           chooser = null;
-          void play(torrent, file, { queue: 'first' });
+          void play(chosen, file, { queue: 'first' });
         }}
         onClose={() => {
           // Closing the dialog on unmount fires `close` late: after Play it must not cancel the
