@@ -319,6 +319,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   copy exists. While the queue loaded with problems, finished downloads are not cleaned up, so
   the lost queue's downloads are no longer deleted at startup. Queue files from a newer version
   are copied to `queue.newer-<time>.json` before they are first replaced.
+- Seeking in a video whose audio is converted stops the previous FFmpeg conversion at once,
+  instead of when the player stops reading it, and a conversion whose input stops answering
+  gives up after a minute.
 
 ### Known limitations
 
