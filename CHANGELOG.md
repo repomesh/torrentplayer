@@ -331,6 +331,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Turning off incoming connections or UPnP, or leaving direct mode, now asks the router to remove
   TorrentPlayer's UPnP port mapping (for up to two seconds, never delaying quitting) instead of
   leaving it open until its lease ran out.
+- Clearing a proxy password or WireGuard key now reports an error if a copy filed under the old
+  Lumen name in the system credential store cannot be removed. Before, that copy was silently
+  kept and brought the cleared secret back on the next read.
 
 ### Known limitations
 
