@@ -313,6 +313,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   address stream exhausted"): the metadata lookup now gets up to 200 DHT peers instead of 20.
 - Videos with chapters whose Dolby or DTS audio needs converting, such as Sintel, now play with
   sound. The conversion used to fail at once with "The audio could not be converted".
+- Importing a WireGuard configuration with a malformed key line, such as `PresharedKey <key>`
+  without the `=`, showed most of the key in the import warnings and silently dropped it. Such
+  key lines are now refused, other unrecognized lines are ignored without being repeated, and no
+  warning or error quotes key material.
 
 ### Known limitations
 
