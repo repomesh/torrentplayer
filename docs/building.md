@@ -34,16 +34,24 @@ CI runs these on Windows, macOS, and Linux. Run them before pushing:
 
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo test --workspace --all-features
+for crate in librqbit-dht librqbit-tracker-comms tokio-wireguard; do   # vendored crates
+  cargo test --manifest-path "vendor/$crate/Cargo.toml" --target-dir target/vendor --lib --tests
+done
 git diff --exit-code ui/src/lib/bindings   # IPC bindings must be committed
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+cargo +1.90 check --workspace --all-targets --all-features   # minimum supported Rust
 cargo deny check                           # cargo install cargo-deny --locked
+cargo about generate --workspace --locked -c .cargo/about.toml .cargo/about.hbs   -o THIRD_PARTY_NOTICES.md && git diff --exit-code THIRD_PARTY_NOTICES.md
+mdbook build docs
+zizmor --offline .github                   # workflow security lint
 
 cd ui
 npm run format:check   # the whole repository, including Markdown and YAML
 npm run lint           # ui/ and scripts/
 npm run check
 npm test
+npm audit --omit=dev --audit-level=moderate
 ```
 
 ## Desktop queue regression
@@ -70,7 +78,7 @@ src-tauri/           Tauri app shell (torrentplayer-app): commands, capabilities
 ui/                  Svelte + TypeScript frontend, with its Vite, ESLint, and Prettier configs
 ui/src/lib/bindings/ TypeScript types generated from Rust by ts-rs (do not edit)
 docs/                This guide (mdBook) and Architecture Decision Records
-scripts/             FFmpeg sidecar build and benchmark helpers
+scripts/             FFmpeg sidecar build, benchmark helpers, and the desktop queue regression
 vendor/              Patched copies of third-party crates
 .cargo/              Cargo settings and the cargo-about config for THIRD_PARTY_NOTICES.md
 .github/             CI, release, and security workflows; issue and PR templates; the

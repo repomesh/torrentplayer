@@ -33,3 +33,5 @@
   - [0005: Prioritization on librqbit with anchor streams](adr/0005-prioritization-with-anchor-streams.md)
   - [0006: A streaming-first BitTorrent engine](adr/0006-streaming-engine.md)
   - [0007: Dolby and DTS audio in the built-in player](adr/0007-dolby-and-dts-audio.md)
+  - [0008: Application-local WireGuard tunnel](adr/0008-application-wireguard-tunnel.md)
+  - [0009: Remove the VPN adapter mode](adr/0009-remove-vpn-adapter-mode.md)

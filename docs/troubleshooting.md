@@ -45,5 +45,26 @@ RUST_LOG=debug npm run tauri dev   # in ui/
 - **Neither:** check the volume control and the system mixer. The log line `audio probed` (at the
   default `info` level) names the stream's codec and track count.
 
-Streaming, playback, and network issues will get their own sections here as those features
-land.
+### The queue says downloads are blocked
+
+In the WireGuard and SOCKS5 modes the kill switch holds all traffic while the tunnel or proxy is
+down, and downloads continue by themselves when it is back; Settings → Network & VPN shows why it
+is blocked. In Direct mode, traffic is held when `settings.json` could not be read ("Your network
+settings could not be read…"): choose your VPN or proxy again, or select **Connect directly**. See
+[Configuration](configuration.md#where-settings-are-stored).
+
+### A queued video says "Waiting for playback"
+
+The video you are watching needs the bandwidth, so background downloads wait for it to get ahead.
+They continue on their own; your own pauses are never changed.
+
+### A video does not start: "No one is sharing this file right now"
+
+No peer has connected for 30 seconds, so nobody seems to be sharing it. Pick another search result
+with more seeders, or keep waiting. Buffering otherwise shows how many peers were found and how
+fast the video downloads.
+
+### "May not play here (format: …)"
+
+The system web engine probably cannot play that container or codec (for example AVI or Xvid).
+Pick another release; a libmpv player for these is planned.

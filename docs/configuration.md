@@ -1,6 +1,6 @@
 # Configuration
 
-Every setting can be changed on the **Settings** page (the gear in the bottom bar, or
+Every setting can be changed on the **Settings** page (the gear at the bottom of the side rail, or
 <kbd>Ctrl</kbd>+<kbd>,</kbd>; <kbd>Esc</kbd> returns). Clicking the network indicator opens it
 at **Network & VPN**. During playback, the gear in the player's controls (or
 <kbd>Ctrl</kbd>+<kbd>,</kbd>) opens Settings over the video: the video pauses, and **Back to the
@@ -79,7 +79,7 @@ version 1 file loads normally and the field is dropped the next time settings ar
 added the optional seeding time target. 0.3.1 removed `bandwidth.seedAfterWatching`,
 `bandwidth.seedRatioTarget`, `bandwidth.seedTimeLimitMinutes`, `playback.autoplayNext`,
 `playback.optimizeQueue`, and `playback.keepCourseOrder` (the queue is manual now, see [Bandwidth
-and seeding](#bandwidth-and-seeding)) without a version change: unknown fields are ignored when
+and sharing](#bandwidth-and-sharing)) without a version change: unknown fields are ignored when
 loading, so older files load normally and the fields are dropped the next time settings are saved.
 `network.incomingPeers` was added later without a version change: files without it load with
 incoming connections off, and an out-of-range port is reset to 0 (random). Version 4 (0.3.0) removed
@@ -93,7 +93,8 @@ file of any version (a hand-edited one too) and is saved at once; see [Network](
 
 **When it applies:** _now_ means immediately; _next start_ means the next time TorrentPlayer starts;
 _later_ means the setting is saved now and takes effect when the feature ships (the Settings page
-tags these "Coming in a later milestone").
+tags these "Coming in a later milestone", and hides the hardware decoding and protocol encryption
+settings until a player or engine applies them).
 
 ### Playback
 
@@ -109,10 +110,11 @@ The speed menu in the player changes the current video only; the default applies
 as it starts. `subtitlesByDefault` ("Show subtitles automatically") turns on the video's own
 subtitles in the first of the system's languages that they have; whatever is chosen in the CC
 menu (or with C) is remembered for the rest of the session instead. When a video ends it is
-marked played and stays on its end; the next video plays only when you choose it (Shift+N plays
-the queue's next one). The queue downloads and plays in its own order, which changes only when
-you move items. With `resumePosition`, reopening an
-unfinished video at least 10 seconds in offers its saved position or a fresh start. Positions are
+marked played and stays on its end, with a card offering **Play next** (Shift+N) or **Replay**;
+the next video plays only when you choose it. The queue downloads and plays in its own order, which changes only when
+you move items or use **Sort by…** in its ⋯ menu. With `resumePosition` ("Resume where I left off"),
+reopening an unfinished video at least 10 seconds in continues from its saved position, and a chip
+over the video offers **Start over**. Positions are
 kept even while this preference is off, so the Library can still show watch progress.
 `seekThumbnails` ("Seek bar
 previews") shows a frame above the seek bar where the pointer is, for the parts already
@@ -151,7 +153,7 @@ folders inside TorrentPlayer's own `torrentplayer-swarm/` and `librqbit/` cache 
 legacy layouts count toward the displayed size but are not removed automatically because they
 cannot be associated safely with a finished torrent.
 
-### Bandwidth and seeding
+### Bandwidth and sharing
 
 | Setting                      | Default | Valid values                        | Applies    |
 | ---------------------------- | ------- | ----------------------------------- | ---------- |
@@ -203,6 +205,7 @@ The network layer (`torrentplayer-net`) applies these as soon as they are saved;
 | `network.wireguard`             | empty     | set by importing a `.conf` file (non-secret parts)                                     | now in WireGuard mode      |
 | `network.encryption`            | `prefer`  | `prefer`, `require`, `off`                                                             | later                      |
 | `network.ipv6`                  | `disable` | `disable`, `tunnel`                                                                    | now (protected modes only) |
+| `network.showPublicIp`          | `true`    | on: the status bar shows your public IPv4 and IPv6 addresses (asks icanhazip.com)      | now                        |
 | `network.incomingPeers.enabled` | `false`   | on: accept incoming peer connections                                                   | now (never in SOCKS5 mode) |
 | `network.incomingPeers.port`    | `0`       | 0 (random 10000–49151, kept per run), 1024–65535                                       | now                        |
 | `network.incomingPeers.upnp`    | `false`   | on: ask the router to forward the port (UPnP)                                          | now (direct mode only)     |
@@ -246,10 +249,12 @@ the tunnel. UDP trackers and DHT use the tunnel too. See [Network modes](network
 appears. Turned on, it listens on every interface in direct mode (expect a firewall prompt;
 forward the port on your router or turn on UPnP), and only inside the tunnel in WireGuard mode; behind a VPN, peers reach the port only if the provider
 forwards it. A SOCKS5 proxy cannot accept incoming connections, so TorrentPlayer does not
-listen at all in that mode. Settings shows whether it is listening. While it listens,
-TorrentPlayer's engine also announces the port in the DHT (never in SOCKS5 mode); while
-incoming peers are off, it announces nothing there and tells other DHT nodes it cannot be
-reached (read-only, BEP 43). See
+listen at all in that mode. Settings shows whether it is listening. TorrentPlayer's engine announces the port in the DHT,
+and answers there as a read-write node, only while peers can reach it: while the router confirms
+a UPnP mapping to a public address, or for 30 minutes after a peer from the internet connected in
+(which covers a port forwarded by hand or by a VPN provider). Otherwise, and always in SOCKS5
+mode, it announces nothing there and tells other DHT nodes it cannot be reached (read-only,
+BEP 43). See
 [Incoming peer connections](network.md#incoming-peer-connections).
 
 **VPN recommendation:** in Direct mode, Settings → Network & VPN, a **VPN recommended** button

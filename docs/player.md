@@ -1,6 +1,8 @@
 # Player integration
 
-> **Status: Planned (Phase 2).** This page records the intended design.
+> **Status:** the built-in player (the system web engine's `<video>` element, described in the
+> "today" sections) ships now. The libmpv player is **Planned (Phase 2)**; its sections record the
+> intended design.
 
 ## libmpv (primary)
 
@@ -24,6 +26,20 @@ If libmpv fails to initialize, the webview's `<video>` element plays from the lo
 server: directly when the platform supports the format, remuxed to fragmented MP4 when the codecs
 are compatible, and transcoded in real time only as a last resort.
 
+## Controls in the built-in player (today)
+
+- **Keyboard** (`Player.svelte`, `App.svelte`): Space plays or pauses, ←/→ skip 10 seconds, F
+  toggles fullscreen, M mutes, C turns subtitles off and on, D shows the debug overlay (when
+  `advanced.debugOverlay` is on), Q shows or hides the queue, Shift+N plays the queue's next
+  item, <kbd>Ctrl</kbd>+<kbd>,</kbd> opens Settings over the video, and Esc goes back (or leaves
+  fullscreen). In the queue, P pauses or resumes the focused row.
+- **Buttons:** Rewind 10 seconds and Forward 10 seconds sit beside Play, also in fullscreen. They
+  keep the pause state and stay within the media's duration.
+- **Resume:** with `playback.resumePosition` on, a video reopened at least 10 seconds in continues
+  from its saved position, and a "Continuing from …" chip offers **Start over**.
+- **End of a video:** it is marked played and stays on its last frame; a card offers **Play
+  next** (Shift+N) or **Replay**, also in fullscreen. Nothing plays on its own.
+
 ## Sound in the built-in player (today)
 
 Until libmpv lands, the webview's `<video>` element is the only player (`Player.svelte`).
@@ -46,7 +62,8 @@ Until libmpv lands, the webview's `<video>` element is the only player (`Player.
   MB within Chromium's 150 MB quota per media buffer; when the buffer is full anyway, appending
   waits for playback to use it up. After a seek, a new conversion starts where the buffered video at
   the new position ends, unless the running one is about to deliver it, typically playing again
-  within 2 s. A conversion that stops early is continued from where it stopped. If conversion fails,
+  within 2 s. A conversion that stops early is continued from where it stopped, and a temporary failure to
+  start or read the stream is retried twice (a new seek cancels a pending retry). If conversion fails,
   or for AC-4 and other codecs it cannot convert, the video plays without sound and a dismissible
   notice names the codec, and any other track that would play, once Chromium's decoder counters
   (`webkitAudioDecodedByteCount` stays 0 while `webkitVideoDecodedByteCount` grows) confirm that no
@@ -78,7 +95,8 @@ Until libmpv lands, the webview's `<video>` element is the only player (`Player.
 
 ## Safety rules for the FFI layer
 
-`torrentplayer-player` is the only crate allowed to use `unsafe`:
+`torrentplayer-player` is the only crate allowed to use `unsafe` (apart from the app shell's
+WebView2 memory call on Windows, `src-tauri/src/window.rs`):
 
 - Unsafe code lives in one `ffi` module behind a safe API.
 - Every `unsafe` block has a `// SAFETY:` comment explaining why its invariants hold (enforced by
