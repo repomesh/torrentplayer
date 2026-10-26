@@ -72,7 +72,9 @@ including the player controls overlaid on the video.
 
 `torrentplayer_torrent::StreamEngine` sends every source to **torrentplayer-swarm** by default, with the same
 safety checks on every path. For a magnet link, librqbit starts lazily as a metadata-only
-resolver and hands its metadata and discovered peers to torrentplayer-swarm. `TORRENTPLAYER_ENGINE=auto|swarm|rqbit`
+resolver and hands its metadata and discovered peers to torrentplayer-swarm. Its session (DHT
+node, trackers, listener) stops after a minute with no torrents and nothing in flight, and the
+next magnet link starts a new one. `TORRENTPLAYER_ENGINE=auto|swarm|rqbit`
 overrides the choice. Downloads go to separate
 `torrentplayer-swarm/` and `librqbit/` sub-folders. See [ADR 0006](adr/0006-streaming-engine.md).
 

@@ -33,6 +33,12 @@ environment.
 | **SOCKS5 proxy**     | Every TCP connection goes through the proxy (RFC 1928), with optional username and password (RFC 1929). Host names are resolved by the proxy unless "Resolve DNS through the proxy" is off. | A TCP connection to the proxy plus the method negotiation and login. No connection is requested through it. |
 | **WireGuard**        | TCP and DNS run inside an application-local WireGuard tunnel using the imported configuration. No OS routes or adapters are changed.                                                        | A handshake under 180 s old, and replies to traffic (see [WireGuard health](#wireguard-health)).            |
 
+A connected proxy that nothing has used since its last check is checked less and less often:
+the gap doubles with each such check, up to 80 s. The next connection through it triggers a
+check at once and restores the 5 s interval, as does a failed connection to the proxy. Nothing
+can go around a proxy that is down meanwhile: connections through it just fail until the check
+engages the kill switch.
+
 A protected mode with incomplete settings (a proxy without a host, a username whose password is
 missing from the credential store, no WireGuard configuration) is also `Error`: blocked, with the
 reason shown, until the settings are fixed.

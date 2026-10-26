@@ -294,6 +294,83 @@ async fn failed_proxy_dials_wake_the_health_check_at_most_once_per_interval() {
     net.shutdown();
 }
 
+/// Health checks the proxy has had: connections that requested nothing through it.
+fn proxy_checks(proxy: &TestProxy) -> u64 {
+    proxy.accepted() - proxy.connections().len() as u64
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_used_proxy_is_checked_at_the_normal_interval() {
+    let proxy = TestProxy::start(None).await.unwrap();
+    let (echo, _) = echo_server().await;
+    let net = Network::start(socks_mode(&proxy, None), fast_options())
+        .await
+        .unwrap();
+    net.settled(Duration::from_secs(5)).await;
+    let before = proxy_checks(&proxy);
+    for _ in 0..20 {
+        drop(net.connect(echo).await.unwrap());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // About 1 s of traffic, checked every 100 ms (unused, it would be 3 or 4 times).
+    let checks = proxy_checks(&proxy) - before;
+    assert!(checks >= 6, "{checks} checks");
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_proxy_that_went_down_blocks_the_first_traffic_and_is_rechecked_at_once() {
+    let proxy = TestProxy::start(None).await.unwrap();
+    // Goes down by closing connections at once: a refused connection to a closed port takes
+    // Windows seconds to report.
+    let (front, refuse) = refusing_front(proxy.addr()).await;
+    let (echo, echo_hits) = echo_server().await;
+    let mut config = socks_mode(&proxy, None);
+    if let NetworkMode::Socks5(cfg) = &mut config.mode {
+        cfg.port = front.port();
+    }
+    let options = NetworkOptions {
+        health_interval: Duration::from_millis(500),
+        ..fast_options()
+    };
+    let net = Network::start(config, options).await.unwrap();
+    net.settled(Duration::from_secs(5)).await;
+    // Unused for 4 s: checked after 1, 2, and 4 s instead of every 0.5 s; the next one is 4 s
+    // away.
+    let before = proxy_checks(&proxy);
+    tokio::time::sleep(Duration::from_millis(4200)).await;
+    let checks = proxy_checks(&proxy) - before;
+    assert!((1..=4).contains(&checks), "{checks} checks");
+    assert_eq!(net.status().state, ConnectionState::Connected);
+
+    refuse.store(usize::MAX, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    assert!(net.connect(echo).await.is_err(), "no way around the proxy");
+    let state = wait_for_state(&net, |s| !matches!(s, ConnectionState::Connected)).await;
+    assert!(
+        matches!(
+            state,
+            ConnectionState::Reconnecting { .. } | ConnectionState::KillSwitchActive { .. }
+        ),
+        "{state:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "re-checked at the first use, not at the next idle check: {:?}",
+        started.elapsed()
+    );
+    assert!(matches!(
+        net.connect(echo).await,
+        Err(NetError::KillSwitch(_))
+    ));
+    assert_eq!(
+        echo_hits.load(Ordering::SeqCst),
+        0,
+        "nothing reached the target"
+    );
+    net.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_kill_switch_blocks_and_recovers() {
     let proxy = TestProxy::start(None).await.unwrap();

@@ -45,6 +45,10 @@ const MAX_EVENTS: usize = 100;
 const STATUS_EVENTS: usize = 50;
 /// Largest response accepted from the connection-check service.
 const MAX_IP_RESPONSE: usize = 1024;
+/// How many times the gap between checks of a connected proxy doubles while nothing uses it:
+/// up to 16 times [`NetworkOptions::health_interval`] (80 s by default, as for an idle
+/// WireGuard tunnel's probes).
+const IDLE_CHECK_DOUBLINGS: u32 = 4;
 
 /// What the user selected.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -351,6 +355,11 @@ pub(crate) struct State {
     pub(crate) incoming: IncomingState,
     /// A connected SOCKS5 proxy failed one check, under this generation (see `on_check`).
     proxy_failed_once: Option<u64>,
+    /// Traffic was routed through the proxy since its last check.
+    proxy_used: bool,
+    /// Checks in a row that found the connected proxy working and unused: the gap before the
+    /// next one doubles with each (see [`IDLE_CHECK_DOUBLINGS`]).
+    idle_checks: u32,
 }
 
 impl State {
@@ -517,8 +526,21 @@ impl Inner {
         st.last_check = Some(SystemTime::now());
         let via = describe(&st.config.mode);
         let failed_once = st.proxy_failed_once.take() == Some(generation);
+        let used = std::mem::take(&mut st.proxy_used);
         match result {
             Ok(()) => {
+                // A connected proxy nothing has used since the last check is checked less and
+                // less often; the next connection through it snaps back (see `Network::route`),
+                // and so does a failed check.
+                if st.conn == ConnectionState::Connected
+                    && matches!(st.config.mode, NetworkMode::Socks5(_))
+                    && !used
+                    && !failed_once
+                {
+                    st.idle_checks += 1;
+                } else {
+                    st.idle_checks = 0;
+                }
                 match &st.conn {
                     ConnectionState::Connected => {}
                     ConnectionState::Connecting => {
@@ -534,7 +556,7 @@ impl Inner {
                 }
                 st.conn = ConnectionState::Connected;
                 self.publish(&st);
-                interval
+                interval * 2u32.pow(st.idle_checks.min(IDLE_CHECK_DOUBLINGS))
             }
             Err(_)
                 if st.conn == ConnectionState::Connected
@@ -547,9 +569,11 @@ impl Inner {
                 // hit the cap again. Nothing goes around the proxy meanwhile; its own
                 // connections just fail. WireGuard has its own grace (the reply timeout).
                 st.proxy_failed_once = Some(generation);
+                st.idle_checks = 0;
                 self.options.retry_interval
             }
             Err(error) => {
+                st.idle_checks = 0;
                 let reason = error.to_string();
                 let next = match &st.conn {
                     ConnectionState::Connected => {
@@ -611,6 +635,8 @@ impl Network {
             events: VecDeque::new(),
             incoming: IncomingState::default(),
             proxy_failed_once: None,
+            proxy_used: false,
+            idle_checks: 0,
         };
         let message = format!("Network mode: {}", describe(&st.config.mode));
         st.log(EventLevel::Info, message);
@@ -670,6 +696,8 @@ impl Network {
             st.generation += 1;
             st.epoch += 1;
             st.last_check = None;
+            st.proxy_used = false;
+            st.idle_checks = 0;
             let message = format!("Network mode changed: {}", describe(&st.config.mode));
             st.log(EventLevel::Info, message);
             if let ConnectionState::Error { reason } = &st.conn {
@@ -1036,9 +1064,20 @@ impl Network {
     }
 
     pub(crate) fn route(&self) -> Result<(Route, Lease, bool), NetError> {
-        let st = self.inner.state();
+        let mut st = self.inner.state();
         if !st.conn.allows_traffic() {
             return Err(st.blocked());
+        }
+        if matches!(st.config.mode, NetworkMode::Socks5(_)) {
+            st.proxy_used = true;
+            if st.idle_checks > 0 {
+                // Checked less often while unused, so it may have gone down since: check it
+                // now rather than at the next interval. Nothing can go around a proxy that is
+                // down (its connections just fail, and the kill switch engages within a retry
+                // interval of the check), so this connection need not wait for the check.
+                st.idle_checks = 0;
+                self.inner.wake.notify_one();
+            }
         }
         let route = match &st.config.mode {
             NetworkMode::Direct => Route::Direct,
@@ -1259,8 +1298,9 @@ struct IpAnswer {
     ip: String,
 }
 
-/// Checks the selected mode every [`NetworkOptions::health_interval`], and immediately after
-/// a change or a failed connection.
+/// Checks the selected mode every [`NetworkOptions::health_interval`] (less often while a
+/// connected proxy goes unused, see `Inner::on_check`), and immediately after a change, a
+/// failed connection, or the first connection through an idle proxy.
 async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToken) {
     loop {
         let Some(net) = inner.upgrade() else {
@@ -1349,4 +1389,70 @@ async fn probe(cfg: &Socks5Config, timeout: Duration) -> Result<(), NetError> {
     })
     .await
     .map_err(|_| NetError::Timeout)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_unused_proxy_is_checked_less_and_less_until_used_or_failing() {
+        let ms = Duration::from_millis;
+        let options = NetworkOptions {
+            health_interval: ms(100),
+            retry_interval: ms(10),
+            loopback_only: true,
+            ..NetworkOptions::default()
+        };
+        let net = Network::start(NetworkConfig::default(), options)
+            .await
+            .unwrap();
+        // No monitor: only the checks below. It sees direct mode and the cancellation, and
+        // stops.
+        net.inner.cancel.cancel();
+        tokio::task::yield_now().await;
+        let generation = {
+            let mut st = net.inner.state();
+            st.config.mode = NetworkMode::Socks5(Socks5Config {
+                host: Ipv4Addr::LOCALHOST.to_string(),
+                port: 9,
+                username: None,
+                password: None,
+                remote_dns: true,
+                proxy_trackers: true,
+                proxy_dht: true,
+            });
+            st.conn = ConnectionState::Connecting;
+            st.generation
+        };
+        let check = |result: Result<(), NetError>| net.inner.on_check(generation, result);
+        let failed = || Err(NetError::Timeout);
+
+        assert_eq!(check(Ok(())), ms(100), "just connected");
+        for expected in [200, 400, 800, 1600, 1600, 1600] {
+            assert_eq!(check(Ok(())), ms(expected), "unused");
+        }
+        // The first connection through it asks for a check at once, at the normal interval.
+        net.route().unwrap();
+        assert_eq!(net.inner.state().idle_checks, 0);
+        assert_eq!(check(Ok(())), ms(100), "used");
+        net.route().unwrap();
+        assert_eq!(check(Ok(())), ms(100), "used");
+        assert_eq!(check(Ok(())), ms(200), "unused again");
+        assert_eq!(check(Ok(())), ms(400));
+
+        // One failed check is retried soon; the next ones are at the normal interval again.
+        assert_eq!(check(failed()), ms(10));
+        assert_eq!(net.inner.state().conn, ConnectionState::Connected);
+        assert_eq!(check(Ok(())), ms(100), "after a failed check");
+        assert_eq!(check(Ok(())), ms(200));
+        // Two in a row engage the kill switch; once restored, it starts over.
+        assert_eq!(check(failed()), ms(10));
+        assert_eq!(check(failed()), ms(10));
+        assert!(!net.inner.state().conn.allows_traffic());
+        assert!(net.route().is_err(), "nothing is routed while it is down");
+        assert_eq!(check(Ok(())), ms(100), "restored");
+        assert_eq!(check(Ok(())), ms(200));
+        net.shutdown();
+    }
 }

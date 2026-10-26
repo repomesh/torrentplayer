@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
 use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
@@ -298,6 +298,28 @@ struct Inner {
     /// Held shared by every librqbit operation, and exclusively by [`Engine::shutdown`], which
     /// so waits until the operations in flight have ended.
     operations: RwLock<()>,
+    /// When the last librqbit operation ended, or the session started (see
+    /// [`Engine::idle_for`]).
+    last_used: Mutex<Instant>,
+}
+
+/// A reference to an [`Engine`] that does not count as using it (see [`Engine::idle_for`]).
+pub(crate) struct WeakEngine(Weak<Inner>);
+
+impl WeakEngine {
+    /// Whether `engine` is the engine this refers to.
+    pub(crate) fn is(&self, engine: &Engine) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&engine.inner))
+    }
+}
+
+/// Marks the end of an operation (see [`Engine::idle_for`]), however it ends.
+struct Used<'a>(&'a Mutex<Instant>);
+
+impl Drop for Used<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+    }
 }
 
 impl std::fmt::Debug for Engine {
@@ -349,6 +371,7 @@ impl Engine {
                 protected,
                 stopping: CancellationToken::new(),
                 operations: RwLock::new(()),
+                last_used: Mutex::new(Instant::now()),
             }),
         })
     }
@@ -361,6 +384,7 @@ impl Engine {
         op: impl Future<Output = Result<T, EngineError>>,
     ) -> Result<T, EngineError> {
         let _running = self.inner.operations.read().await;
+        let _used = Used(&self.inner.last_used);
         if self.inner.stopping.is_cancelled() {
             return Err(EngineError::Unsupported(SESSION_STOPPED));
         }
@@ -425,6 +449,39 @@ impl Engine {
         Session::new_with_opts(config.download_dir.clone(), options)
             .await
             .map_err(engine_err)
+    }
+
+    /// How long the session has been idle: it has no torrents, and nothing but this handle
+    /// holds it (no operation in flight, no stream open, no caller about to start one), for
+    /// this long since its last operation ended. `None` while it is in use.
+    pub(crate) fn idle_for(&self) -> Option<Duration> {
+        if Arc::strong_count(&self.inner) > 1 || self.has_torrents() {
+            return None;
+        }
+        Some(
+            self.inner
+                .last_used
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .elapsed(),
+        )
+    }
+
+    fn has_torrents(&self) -> bool {
+        self.inner
+            .session
+            .with_torrents(|torrents| torrents.next().is_some())
+    }
+
+    /// A reference that does not keep the engine in use.
+    pub(crate) fn downgrade(&self) -> WeakEngine {
+        WeakEngine(Arc::downgrade(&self.inner))
+    }
+
+    /// Whether [`Engine::shutdown`] has started.
+    #[cfg(test)]
+    pub(crate) fn is_stopping(&self) -> bool {
+        self.inner.stopping.is_cancelled()
     }
 
     /// Whether the session was started for a protected network mode. Its DHT, listening
@@ -887,7 +944,13 @@ impl Engine {
     pub async fn shutdown(&self) {
         self.inner.stopping.cancel();
         let _stopped = self.inner.operations.write().await;
-        self.inner.session.stop().await;
+        if self.has_torrents() {
+            self.inner.session.stop().await;
+        } else {
+            // `Session::stop` pauses every torrent, then waits a second for their tasks; with
+            // none, cancelling the session (its listener, DHT, and trackers) is all it does.
+            self.inner.session.cancellation_token().cancel();
+        }
     }
 
     /// A [`MediaSource`] that serves one file of a torrent over the stream server.
