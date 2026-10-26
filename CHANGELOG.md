@@ -9,10 +9,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- Less memory with many torrents: partly downloaded pieces now share one 256 MiB budget across
-  the whole engine instead of up to 256 MiB per torrent. The video being played keeps a quarter of
-  it to itself, so background torrents cannot crowd out its downloads. Huge torrents also need less
-  memory per peer: a 100,000-piece torrent with 50 peers keeps 625 KB of piece maps instead of 5 MB.
+- Less memory with many torrents: partly downloaded pieces now share one 256 MiB budget across the
+  whole engine instead of up to 256 MiB per torrent. The video being played keeps a quarter of it to
+  itself, so background torrents cannot crowd out its downloads, and paused or stalled torrents give
+  their share back. Huge torrents also need less memory per peer: a 100,000-piece torrent with 50
+  peers keeps 625 KB of piece maps instead of 5 MB.
 
 ### Fixed
 
