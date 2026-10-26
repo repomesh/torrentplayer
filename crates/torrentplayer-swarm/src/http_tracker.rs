@@ -243,6 +243,8 @@ mod tests {
         let mut v6 = [0u8; 18];
         v6[0] = 0x20;
         v6[1] = 0x01;
+        v6[2] = 0x48;
+        v6[3] = 0x60;
         v6[15] = 1;
         v6[17] = 80;
         body.extend_from_slice(&v6);
@@ -252,7 +254,7 @@ mod tests {
             peers,
             vec![
                 "1.2.3.4:6881".parse().unwrap(),
-                "[2001::1]:80".parse().unwrap()
+                "[2001:4860::1]:80".parse().unwrap()
             ]
         );
 
