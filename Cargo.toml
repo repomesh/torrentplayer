@@ -56,8 +56,8 @@ librqbit-core = { version = "9.0.1", default-features = false, features = ["sha1
 # The DHT node librqbit uses (already built for it), for torrentplayer-swarm's own peer discovery.
 librqbit-dht = "9.0.1"
 librqbit-tracker-comms = "9.0.1"
-# UPnP IGD port mapping for incoming peers in direct mode. Already built for librqbit (same
-# version), so it adds no crate to the build.
+# UPnP IGD discovery (SSDP) for incoming peers in direct mode; the port mapping requests are
+# our own (torrentplayer-net incoming.rs). Already built for librqbit (same version).
 librqbit-upnp = "9.0.1"
 proptest = "1.7"
 # The system folder picker for choosing the download folder (Tauri v2 has none built in). GTK3 on
@@ -94,7 +94,8 @@ windows-core = "0.62.2"
 zeroize = "1.8"
 
 [workspace.lints.rust]
-# `deny` rather than `forbid` so the FFI crate can opt in locally. Every other crate
+# `deny` rather than `forbid` so the FFI crate and src-tauri (two WebView2 calls in window.rs)
+# can opt in locally. Every other crate
 # additionally declares `#![forbid(unsafe_code)]` at its root.
 unsafe_code = "deny"
 missing_docs = "warn"

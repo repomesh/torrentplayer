@@ -61,7 +61,8 @@ pub struct NetworkConfig {
     /// Hold all traffic, whatever the mode, until this is cleared: the state is
     /// [`ConnectionState::Error`] with this reason, and the policy counts as protected, so the
     /// engines start as they would behind the kill switch. For settings that need the user's
-    /// confirmation before anything is sent (the removed VPN adapter mode).
+    /// confirmation before anything is sent: settings that could not be read, or the removed VPN
+    /// adapter mode (see `NetworkHold` in torrentplayer-settings).
     pub hold: Option<String>,
 }
 
