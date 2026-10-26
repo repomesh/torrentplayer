@@ -7,22 +7,6 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-### Changed
-
-- Less memory with many torrents: partly downloaded pieces now share one 256 MiB budget across
-  the whole engine instead of up to 256 MiB per torrent. The video being played keeps a quarter of
-  it to itself, so background torrents cannot crowd out its downloads. Huge torrents also need less
-  memory per peer: a 100,000-piece torrent with 50 peers keeps 625 KB of piece maps instead of 5 MB.
-- TorrentPlayer announces its port in the DHT and answers as a read-write DHT node only while the
-  router confirms a UPnP mapping for it to a public address, not merely while it listens; when
-  the mapping lapses it is read-only (BEP 43) again at once. DHT lookups are unaffected.
-
-### Fixed
-
-- Audio conversion retries temporary startup and stream-read failures twice before falling back
-  to silent playback. Seeking again cancels a pending retry. When large videos fill the media
-  buffer after backward seeks, distant future segments are evicted before retrying the append.
-
 ## [0.3.1] - 2026-10-23
 
 ### Added
@@ -101,6 +85,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   player and status bar wake up less often.
 - On Windows the app uses about 100 MB less memory while its window is minimized: the webview is
   asked to drop caches it only needs for drawing, and gets its normal memory back when restored.
+- Less memory with many torrents: partly downloaded pieces now share one 256 MiB budget across
+  the whole engine instead of up to 256 MiB per torrent. The video being played keeps a quarter of
+  it to itself, so background torrents cannot crowd out its downloads. Huge torrents also need less
+  memory per peer: a 100,000-piece torrent with 50 peers keeps 625 KB of piece maps instead of 5 MB.
+- TorrentPlayer announces its port in the DHT and answers as a read-write DHT node only while the
+  router confirms a UPnP mapping for it to a public address, not merely while it listens; when
+  the mapping lapses it is read-only (BEP 43) again at once. DHT lookups are unaffected.
 - librqbit (used for magnet metadata, or for every torrent with the librqbit engine) stops its
   session, with its DHT node, trackers and listener, after a minute with no torrents and nothing
   to do, and starts a new one when next needed. It used to keep its DHT node running until the app
@@ -127,6 +118,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Audio conversion retries temporary startup and stream-read failures twice before falling back
+  to silent playback. Seeking again cancels a pending retry. When large videos fill the media
+  buffer after backward seeks, distant future segments are evicted before retrying the append.
 - Playing files always have a visible queue entry. The active row offers Pause/Resume, Stop,
   and Stop & remove; removing it saves progress and stops playback, and Undo restores the
   entry without autoplay. File lists also allow queued videos to be removed.
