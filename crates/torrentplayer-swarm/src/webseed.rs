@@ -201,6 +201,8 @@ struct Assembler {
     buf: Vec<u8>,
     /// Blocks of this run not yet delivered and still wanted.
     wanted: Arc<Mutex<BTreeSet<u64>>>,
+    /// Blocks handed to the scheduler so far.
+    delivered: usize,
 }
 
 impl Assembler {
@@ -229,6 +231,7 @@ impl Assembler {
                 &self.buf,
             );
             self.buf.clear();
+            self.delivered += 1;
         }
         !self
             .wanted
@@ -504,6 +507,7 @@ impl WebSeed {
                 blocks: run.iter().copied().collect(),
                 buf: Vec::new(),
                 wanted: Arc::clone(&wanted),
+                delivered: 0,
             };
             let job = fetch(
                 Arc::clone(&self.shared),
@@ -672,6 +676,11 @@ async fn fetch_segment(
             .map_err(|e| FetchError::http(&e))?;
         let Some(chunk) = chunk else {
             trace!(received, want, "short web seed response");
+            // Without a single block delivered (an empty `206`, say) it is a failure, so such
+            // a server is backed off instead of asked again at once.
+            if assembler.delivered == 0 {
+                return Err(FetchError::Transient("the response ended early".into()));
+            }
             return Ok(Fetched::Partial);
         };
         // Never more than the range asked for.

@@ -1342,6 +1342,13 @@ impl Shared {
             .len()
     }
 
+    /// Whether a swarm of `live` peers (counted with [`Shared::live_peers`]) is thin. Web seeds
+    /// do not count: the guards keep BitTorrent peers while there are few of them, whatever web
+    /// seeds there are.
+    fn is_thin(&self, live: usize) -> bool {
+        live.saturating_sub(self.web_seeds.load(Ordering::Relaxed)) <= THIN_SWARM
+    }
+
     /// Asks the driver to re-plan soon; `seek` also cancels requests that are no longer urgent.
     pub(crate) fn request_replan(&self, seek: bool) {
         if seek {
@@ -1771,7 +1778,7 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             let mut peers = shared.peers.lock().unwrap_or_else(PoisonError::into_inner);
             for key in unresponsive {
                 // In a thin swarm a slow peer is better than none: keep it.
-                if peers.len() <= THIN_SWARM {
+                if shared.is_thin(peers.len()) {
                     break;
                 }
                 // Dropping the sender ends the peer's writer, and so its connection.
@@ -1795,7 +1802,10 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             connect_more(&shared, keys.len());
         }
     }
-    // Peer tasks watch the same token and exit.
+    // Peer tasks watch the same token and exit. Readers and stream handles may keep this
+    // torrent's state alive a while longer, so its partial pieces give their memory back to
+    // the other torrents now (blocks still arriving are counted as wasted).
+    let _ = shared.sched().set_paused(true);
     debug!("torrent driver stopped");
 }
 
@@ -1985,7 +1995,7 @@ impl Shared {
 
     /// Called by a peer task when it ends, to schedule the next attempt.
     pub(crate) fn peer_finished(&self, addr: SocketAddr, end: PeerEnd) {
-        let thin = self.live_peers() <= THIN_SWARM;
+        let thin = self.is_thin(self.live_peers());
         self.candidates().finished(addr, end, thin, Instant::now());
     }
 }
@@ -2318,6 +2328,58 @@ mod tests {
         a.shared.store.read(0, 0, &mut buf).unwrap();
         assert_eq!(&buf, b"piece of a");
         assert_eq!(c.have_pieces(), vec![true]);
+        swarm.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stopping_wakes_a_waiting_reader_and_gives_back_partial_pieces() {
+        let dir = tempfile::tempdir().unwrap();
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let mut bytes =
+            b"d4:infod6:lengthi65536e4:name5:a.mp412:piece lengthi16384e6:pieces80:".to_vec();
+        bytes.extend_from_slice(&[0; 80]);
+        bytes.extend_from_slice(b"ee");
+        let torrent = swarm
+            .add(Metainfo::from_bytes(&bytes).unwrap(), Vec::new())
+            .unwrap();
+        let mut reader = torrent.reader(0).unwrap();
+        // A peer (never connected) that has every piece starts the reader's pieces.
+        {
+            let mut sched = torrent.shared.sched();
+            sched.add_peer(1_000);
+            sched.on_bitfield(1_000, &[0xf0]);
+            sched.on_unchoke(1_000);
+            sched.reprioritize(false);
+            assert!(!sched.fill(1_000, Instant::now()).is_empty());
+        }
+        assert!(swarm.piece_budget.used() > 0);
+
+        let read = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let result = reader.read_exact(&mut buf).await.map(|_| ());
+            (result, reader)
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        torrent.stop();
+        let (result, reader) = tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .expect("the read ends when the torrent stops")
+            .unwrap();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+        // The reader still holds the torrent, but no longer its share of the budget.
+        wait_for(
+            "the partial pieces are given back",
+            Duration::from_secs(5),
+            || swarm.piece_budget.used() == 0,
+        )
+        .await;
+
+        let gone = Arc::downgrade(&torrent.shared);
+        drop((reader, torrent));
+        wait_for("the torrent closes", Duration::from_secs(5), || {
+            gone.strong_count() == 0
+        })
+        .await;
         swarm.shutdown();
     }
 

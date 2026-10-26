@@ -11,6 +11,7 @@ use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 use tokio::sync::futures::OwnedNotified;
 use tokio::task::JoinHandle;
+use tokio_util::sync::WaitForCancellationFutureOwned;
 
 use crate::metainfo::Metainfo;
 use crate::sched::{Interest, InterestId, InterestKind};
@@ -21,7 +22,11 @@ const MAX_READ: usize = 256 * 1024;
 
 enum State {
     Idle,
-    Waiting(Pin<Box<OwnedNotified>>),
+    /// Until a piece is verified, or the torrent stops.
+    Waiting(
+        Pin<Box<OwnedNotified>>,
+        Pin<Box<WaitForCancellationFutureOwned>>,
+    ),
     Reading(JoinHandle<io::Result<Vec<u8>>>),
 }
 
@@ -29,7 +34,8 @@ enum State {
 ///
 /// While it exists, the data just after its position is the most urgent work in the torrent.
 /// Reads wait until the needed piece is downloaded and verified; seeking re-prioritizes
-/// immediately and cancels requests that are no longer needed.
+/// immediately and cancels requests that are no longer needed. Once the torrent stops, a read
+/// that would wait fails with [`io::ErrorKind::ConnectionAborted`].
 ///
 /// A *stored-only* reader ([`Torrent::stored_reader`](crate::Torrent::stored_reader)) changes
 /// nothing about what is downloaded: it reads pieces already stored and fails at once with
@@ -182,11 +188,21 @@ impl AsyncRead for FileReader {
                             Box::pin(Arc::clone(&self.shared.piece_done).notified_owned());
                         notified.as_mut().enable();
                         if !self.shared.sched().have(piece) {
-                            self.state = State::Waiting(notified);
+                            let stopped = Box::pin(self.shared.cancel.clone().cancelled_owned());
+                            self.state = State::Waiting(notified, stopped);
                         }
                     }
                 }
-                State::Waiting(notified) => {
+                State::Waiting(notified, stopped) => {
+                    // A stopped torrent downloads nothing more: fail instead of waiting forever
+                    // (and keeping the torrent's state alive).
+                    if stopped.as_mut().poll(cx).is_ready() {
+                        self.state = State::Idle;
+                        return Poll::Ready(Err(io::Error::new(
+                            io::ErrorKind::ConnectionAborted,
+                            "the torrent was stopped",
+                        )));
+                    }
                     if notified.as_mut().poll(cx).is_pending() {
                         return Poll::Pending;
                     }

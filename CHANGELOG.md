@@ -313,6 +313,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   address stream exhausted"): the metadata lookup now gets up to 200 DHT peers instead of 20.
 - Videos with chapters whose Dolby or DTS audio needs converting, such as Sintel, now play with
   sound. The conversion used to fail at once with "The audio could not be converted".
+- A web seed that answers range requests with an empty `206` response (or one that ends before
+  a whole block) is now backed off like any failing server instead of being asked again at once,
+  in a tight loop.
+- A block from a peer that starts past the end of its piece no longer trips an arithmetic
+  overflow check in debug builds; it is ignored like any other malformed block.
+- Stopping or removing a torrent now ends reads still waiting for its pieces (they fail instead
+  of hanging), and gives the memory of its partial pieces back to the other torrents at once.
+  Before, an open stream request kept the stopped torrent and its share of the piece memory
+  budget alive.
+- Web seeds no longer count towards the thin-swarm limit (four peers), so a slow BitTorrent
+  peer in a small swarm is kept, and retried after it disconnects, even while web seeds are in
+  use.
 
 ### Known limitations
 
