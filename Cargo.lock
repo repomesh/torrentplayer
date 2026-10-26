@@ -5996,6 +5996,8 @@ dependencies = [
  "tracing-subscriber",
  "ts-rs",
  "url",
+ "webview2-com",
+ "windows-core",
 ]
 
 [[package]]

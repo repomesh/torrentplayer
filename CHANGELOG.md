@@ -89,6 +89,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   panel no longer animates its progress bars (about 1 % of a core for the UI during downloads
   instead of about 9 %) and stops checking downloads while the window is minimized; the VPN tunnel,
   player and status bar wake up less often.
+- On Windows the app uses about 100 MB less memory while its window is minimized: the webview is
+  asked to drop caches it only needs for drawing, and gets its normal memory back when restored.
 - The queue says when the kill switch blocks downloads, with a button to Network & VPN settings,
   instead of "Finding peers…" forever.
 - When a video ends, a card offers Play next (Shift+N) or Replay, also in fullscreen. Nothing plays
