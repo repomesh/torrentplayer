@@ -1244,3 +1244,121 @@ async fn the_port_is_reachable_only_while_the_router_confirms_a_public_mapping()
     assert_eq!(net.reachable_port(), None);
     net.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_listener_abandons_a_pending_port_mapping() {
+    // A router that takes requests and never answers them, counting the connections and those
+    // the client closed.
+    let router = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = router.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(AtomicUsize::new(0));
+    let (counted, ended) = (Arc::clone(&requests), Arc::clone(&closed));
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = router.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let ended = Arc::clone(&ended);
+            tokio::spawn(async move {
+                let mut buf = [0; 4096];
+                while matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {}
+                ended.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+    });
+    let net = Network::start(
+        NetworkConfig::default(),
+        NetworkOptions {
+            upnp_lease: Duration::from_millis(400),
+            upnp_control_url: Some(format!("http://{addr}/control")),
+            ..fast_options()
+        },
+    )
+    .await
+    .unwrap();
+    let _peers = net.incoming_peers();
+    let port = free_port();
+    net.set_incoming(IncomingConfig {
+        upnp: true,
+        ..incoming(port)
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while requests.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the mapping is requested");
+    net.set_incoming(IncomingConfig::default());
+    wait_for_incoming(&net, |s| *s == IncomingStatus::Off).await;
+    let sent = requests.load(Ordering::SeqCst);
+    // The pending request is dropped at once, well within the request timeout (5 s), and
+    // several renewal periods later nothing more was sent and nothing was recorded.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        closed.load(Ordering::SeqCst),
+        sent,
+        "the request was abandoned"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), sent);
+    assert_eq!(net.reachable_port(), None);
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_connecting_in_makes_the_port_reachable_for_a_while() {
+    let net = Network::start(
+        NetworkConfig::default(),
+        NetworkOptions {
+            reachable_after_inbound: Duration::from_secs(1),
+            ..fast_options()
+        },
+    )
+    .await
+    .unwrap();
+    let mut peers = net.incoming_peers();
+    let port = free_port();
+    // Listening, no UPnP, nobody connected yet: not reachable.
+    net.set_incoming(incoming(port));
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    assert_eq!(net.reachable_port(), None);
+
+    // A peer connects in (a port forwarded by hand, as far as TorrentPlayer can tell).
+    let _client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), peers.next())
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for_reachable(&net, Some(port)).await;
+    // Nobody else connects: no longer reachable once the time is up, and status_changes says
+    // so.
+    let mut changes = net.status_changes();
+    changes.borrow_and_update();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while net.reachable_port().is_some() {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("a status change reports the expiry");
+
+    // A peer of a closed listener does not count for the next one.
+    let _client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), peers.next())
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for_reachable(&net, Some(port)).await;
+    let moved = free_port();
+    net.set_incoming(incoming(moved));
+    wait_for_incoming(
+        &net,
+        |s| matches!(s, IncomingStatus::Listening { port, .. } if *port == moved),
+    )
+    .await;
+    assert_eq!(net.reachable_port(), None);
+    net.shutdown();
+}

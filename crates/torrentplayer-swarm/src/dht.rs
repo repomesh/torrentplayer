@@ -12,8 +12,9 @@
 //! [`next_lookup`]): every 20 seconds or so while it downloads with few peers, every few
 //! minutes once it has enough, and not at all while paused or with nothing to download.
 //! TorrentPlayer announces itself in its lookups, and answers as a read-write node (BEP 43), only
-//! while peers can reach it: the engine accepts incoming peers and the router confirms a port
-//! mapping for them (see [`announce_port`] and [`follow_reachability`]); never in SOCKS5 mode.
+//! while peers can reach it: the engine accepts incoming peers, and the router confirms a port
+//! mapping for them or a peer connected in recently (see [`announce_port`] and
+//! [`follow_reachability`]); never in SOCKS5 mode.
 //!
 //! In direct mode the routing tables (and with them the node id) are kept in a file between
 //! runs, so the next start finds peers without bootstrapping from scratch. A protected mode
@@ -342,8 +343,9 @@ pub(crate) async fn follow_policy(node: Arc<DhtNode>, mut policy: watch::Receive
 }
 
 /// Makes the node read-write (BEP 43) as soon as peers can reach the engine (it accepts
-/// incoming peers and the router confirms a port mapping for them, see [`announce_port`]), and
-/// read-only again as soon as they cannot (the mapping lapsed, or the listener closed), rather
+/// incoming peers on a port with a confirmed mapping or a recent inbound peer, see
+/// [`announce_port`]), and read-only again as soon as they cannot (the mapping lapsed, no peer
+/// connected in for a while, or the listener closed), rather
 /// than at a torrent's next lookup, which may be many minutes away. Runs until the engine
 /// stops.
 pub(crate) async fn follow_reachability(
@@ -454,12 +456,12 @@ fn next_lookup(demand: Demand, announcing: bool, misses: u32, empty: u32) -> Opt
 /// The port to announce in DHT lookups (BEP 5 `announce_peer`, with the port given rather
 /// than implied: the DHT's UDP port is not the peer port), and while there is one the node is
 /// read-write. Only while the engine accepts incoming peers on `listen_port` and peers can
-/// reach that port (`reachable`, from [`Network::reachable_port`]: the network listens on it
-/// and the router confirms a UPnP mapping to a public address). Listening alone is not enough:
-/// behind a router that forwards nothing, an announcement only sends peers to a closed port,
-/// and a read-write node only gets queries it never receives. Never in SOCKS5 mode, which
-/// cannot accept connections. Nothing confirms a forward in WireGuard mode, so it does not
-/// announce there either; trackers still get the port.
+/// reach that port (`reachable`, from [`Network::reachable_port`]: the network listens on it,
+/// and the router confirms a UPnP mapping to a public address or a peer from the internet
+/// connected in recently, which also covers a port forwarded by hand or by a VPN provider once
+/// trackers have sent a peer). Listening alone is not enough: behind a router that forwards
+/// nothing, an announcement only sends peers to a closed port, and a read-write node only gets
+/// queries it never receives. Never in SOCKS5 mode, which cannot accept connections.
 ///
 /// [`Network::reachable_port`]: torrentplayer_net::Network::reachable_port
 fn announce_port(
@@ -878,9 +880,14 @@ mod tests {
             "listening without a mapping"
         );
         assert_eq!(
+            announce_port(Some(6881), ModeKind::WireGuard, Some(6881)),
+            Some(6881),
+            "a peer connected in through the tunnel"
+        );
+        assert_eq!(
             announce_port(Some(6881), ModeKind::WireGuard, None),
             None,
-            "nothing confirms a forward through the tunnel"
+            "nobody connected in through the tunnel"
         );
         assert_eq!(
             announce_port(None, ModeKind::Direct, Some(6881)),
@@ -1027,7 +1034,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn the_node_is_read_write_and_announces_only_while_a_port_mapping_is_confirmed() {
+    async fn the_node_is_read_write_and_announces_only_while_the_port_is_reachable() {
         use torrentplayer_net::{IncomingConfig, Network, NetworkConfig, test_util::TestGateway};
         let public = std::net::IpAddr::from([93, 184, 216, 34]);
         let gateway = TestGateway::start(public).await.unwrap();
@@ -1036,6 +1043,7 @@ mod tests {
             torrentplayer_net::NetworkOptions {
                 upnp_lease: Duration::from_secs(1),
                 upnp_control_url: Some(gateway.control_url()),
+                reachable_after_inbound: Duration::from_secs(2),
                 ..loopback_options()
             },
         )
@@ -1111,6 +1119,18 @@ mod tests {
         assert_eq!(announce(), None);
         let seen = lookup_queries(&dht, announce(), &mut queries).await;
         assert!(unreachable(&seen), "{seen:?}");
+
+        // A peer connects in (a port forwarded by hand or by a VPN provider): read-write and
+        // announced, until no peer has connected in for a while.
+        let _client = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
+        wait_reachable(true).await;
+        assert_eq!(announce(), Some(port));
+        let seen = lookup_queries(&dht, announce(), &mut queries).await;
+        assert!(announced(&seen, port), "{seen:?}");
+        wait_reachable(false).await;
+        assert_eq!(announce(), None);
 
         node.cancel.cancel();
         dht.cancellation_token().cancel();

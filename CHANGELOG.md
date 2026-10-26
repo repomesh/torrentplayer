@@ -90,9 +90,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   itself, so background torrents cannot crowd out its downloads, and paused or stalled torrents give
   their share back. Huge torrents also need less memory per peer: a 100,000-piece torrent with 50
   peers keeps 625 KB of piece maps instead of 5 MB.
-- TorrentPlayer announces its port in the DHT and answers as a read-write DHT node only while the
-  router confirms a UPnP mapping for it to a public address, not merely while it listens; when
-  the mapping lapses it is read-only (BEP 43) again at once. DHT lookups are unaffected.
+- TorrentPlayer announces its port in the DHT and answers as a read-write DHT node only while
+  peers can reach it, not merely while it listens: while the router confirms a UPnP mapping to a
+  public address, or for 30 minutes after a peer from the internet connected in (which covers a
+  port forwarded by hand or by a VPN provider). Otherwise it is read-only (BEP 43), and it
+  switches back at once when that ends. DHT lookups are unaffected.
 - librqbit (used for magnet metadata, or for every torrent with the librqbit engine) stops its
   session, with its DHT node, trackers and listener, after a minute with no torrents and nothing
   to do, and starts a new one when next needed. It used to keep its DHT node running until the app

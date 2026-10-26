@@ -19,7 +19,9 @@
 //! connections go to a single consumer, the torrent engine ([`Network::incoming_peers`]).
 //!
 //! Listening does not mean peers can connect: a router without a port forward drops them.
-//! [`Network::reachable_port`] tells only while the router confirms a UPnP mapping.
+//! [`Network::reachable_port`] tells only while the router confirms a UPnP mapping, or a peer
+//! from the internet connected in recently (which also covers a port forwarded by hand or by a
+//! VPN provider).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Weak};
@@ -55,6 +57,8 @@ const UPNP_DISCOVER_TIMEOUT: Duration = Duration::from_secs(5);
 const UPNP_DISCOVER_EVERY: Duration = Duration::from_secs(60);
 /// Time limit for one request to the router.
 const UPNP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Largest reply accepted from a router (a device description or a SOAP reply).
+const MAX_UPNP_REPLY: usize = 64 * 1024;
 /// The UPnP service that maps ports.
 const WAN_IP_CONNECTION: &str = "urn:schemas-upnp-org:service:WANIPConnection:1";
 
@@ -162,9 +166,22 @@ pub(crate) struct IncomingState {
     mapped: Option<(u64, u16)>,
     /// Increases with each [`forward_port`] task.
     mapping_id: u64,
+    /// Increases each time a listener opens, so peers accepted by a closed one do not count.
+    listener_id: u64,
+    /// When a peer from the internet last connected in, and on which listener.
+    inbound: Option<(u64, Instant)>,
+    /// Whether a task waits to report that the last inbound peer is too long ago (see
+    /// [`Inbound::record`]).
+    inbound_expiry: bool,
 }
 
 impl IncomingState {
+    /// Whether a peer connected in on the open listener within `within`.
+    fn inbound_within(&self, within: Duration) -> bool {
+        self.inbound
+            .is_some_and(|(listener, at)| listener == self.listener_id && at.elapsed() < within)
+    }
+
     /// The port to listen on: the configured one, or the random one.
     fn port(&self) -> Option<u16> {
         match self.config.port {
@@ -296,19 +313,24 @@ impl Network {
     }
 
     /// The listening port that peers on the internet can reach, as far as TorrentPlayer can
-    /// tell: only while the router confirms a UPnP mapping for it and its own address is public
-    /// (direct mode). `None` otherwise: behind a router without UPnP, in WireGuard mode (nothing
-    /// says whether the VPN server forwards the port), and with a port forwarded by hand, which
-    /// cannot be seen. [`Network::status_changes`] fires when this may have changed.
+    /// tell: while the router confirms a UPnP mapping for it and its own address is public
+    /// (direct mode), or while a peer from the internet connected in on the open listener within
+    /// [`NetworkOptions::reachable_after_inbound`](crate::NetworkOptions) (direct and WireGuard
+    /// modes: that covers a port forwarded by hand or by the VPN provider, once trackers have
+    /// sent a peer). `None` otherwise, and never in SOCKS5 mode, which does not listen.
+    /// [`Network::status_changes`] fires when this may have changed.
     #[must_use]
     pub fn reachable_port(&self) -> Option<u16> {
         let st = self.inner.state();
-        match (&st.incoming.status, st.incoming.mapped) {
-            (IncomingStatus::Listening { port, .. }, Some((_, mapped))) if *port == mapped => {
-                Some(mapped)
-            }
-            _ => None,
-        }
+        let IncomingStatus::Listening { port, .. } = st.incoming.status else {
+            return None;
+        };
+        let mapped = st.incoming.mapped.is_some_and(|(_, mapped)| mapped == port);
+        (mapped
+            || st
+                .incoming
+                .inbound_within(self.inner.options.reachable_after_inbound))
+        .then_some(port)
     }
 
     /// Takes the accepted incoming connections. There is one consumer at a time: a new call
@@ -523,6 +545,17 @@ async fn open(
     let cancel = CancellationToken::new();
     let mut addresses = Vec::new();
     let mut accepting = Vec::new();
+    let inbound = Inbound {
+        net: Arc::downgrade(net),
+        listener: {
+            let mut st = net.state();
+            st.incoming.listener_id += 1;
+            st.incoming.listener_id
+        },
+        // Only the VPN server can send connections into the tunnel; tests' peers are on
+        // loopback.
+        any_source: matches!(bound, Bound::Tunnel(..)) || net.options.loopback_only,
+    };
     match bound {
         Bound::Os(listeners) => {
             for (listener, addr) in listeners {
@@ -531,6 +564,7 @@ async fn open(
                     listener,
                     tx.clone(),
                     lease.clone(),
+                    inbound.clone(),
                     cancel.child_token(),
                 )));
             }
@@ -543,6 +577,7 @@ async fn open(
                     tunnel.clone(),
                     tx.clone(),
                     lease.clone(),
+                    inbound.clone(),
                     cancel.child_token(),
                 )));
             }
@@ -633,10 +668,18 @@ fn listen(addr: SocketAddr) -> Result<std::net::TcpListener, NetError> {
 }
 
 /// Hands an accepted connection to the consumer, if it is still allowed and there is room.
-fn deliver(tx: &mpsc::Sender<IncomingPeer>, stream: TcpStream, addr: SocketAddr, lease: &Lease) {
+fn deliver(
+    tx: &mpsc::Sender<IncomingPeer>,
+    stream: TcpStream,
+    addr: SocketAddr,
+    lease: &Lease,
+    inbound: &Inbound,
+) {
     if !lease.is_valid() {
         return;
     }
+    // Reachable even if the engine is too busy to take the peer.
+    inbound.record(addr);
     let _ = stream.set_nodelay(true);
     let peer = IncomingPeer {
         stream,
@@ -652,6 +695,7 @@ async fn accept_os(
     listener: TcpListener,
     tx: mpsc::Sender<IncomingPeer>,
     lease: Lease,
+    inbound: Inbound,
     cancel: CancellationToken,
 ) {
     loop {
@@ -660,7 +704,7 @@ async fn accept_os(
             accepted = listener.accept() => accepted,
         };
         match accepted {
-            Ok((stream, addr)) => deliver(&tx, stream, addr, &lease),
+            Ok((stream, addr)) => deliver(&tx, stream, addr, &lease, &inbound),
             Err(error) => {
                 tracing::debug!(target: "torrentplayer_net", %error, "accepting a peer failed");
                 tokio::time::sleep(ACCEPT_BACKOFF).await;
@@ -674,6 +718,7 @@ async fn accept_tunnel(
     tunnel: Tunnel,
     tx: mpsc::Sender<IncomingPeer>,
     lease: Lease,
+    inbound: Inbound,
     cancel: CancellationToken,
 ) {
     loop {
@@ -683,7 +728,7 @@ async fn accept_tunnel(
         };
         match accepted {
             Ok((upstream, addr)) => match tunnel.relay(upstream, Some(lease.clone())).await {
-                Ok(stream) => deliver(&tx, stream, addr, &lease),
+                Ok(stream) => deliver(&tx, stream, addr, &lease, &inbound),
                 Err(error) => {
                     tracing::debug!(target: "torrentplayer_net", %error, "relaying a peer failed");
                 }
@@ -693,6 +738,83 @@ async fn accept_tunnel(
                 tokio::time::sleep(ACCEPT_BACKOFF).await;
             }
         }
+    }
+}
+
+/// Records the peers that connect in on one listener, for [`Network::reachable_port`].
+#[derive(Clone)]
+struct Inbound {
+    net: Weak<Inner>,
+    listener: u64,
+    /// Every peer proves the port reachable, not only those at public addresses.
+    any_source: bool,
+}
+
+impl Inbound {
+    /// Records that a peer connected in from `addr`. In direct mode only a peer at a public
+    /// address shows that the internet reaches the port; a peer on the local network does not.
+    fn record(&self, addr: SocketAddr) {
+        if !self.any_source && !crate::addr::is_public_ip(addr.ip()) {
+            return;
+        }
+        let Some(net) = self.net.upgrade() else {
+            return;
+        };
+        let mut st = net.state();
+        if st.incoming.listener_id != self.listener {
+            return;
+        }
+        let reachable = st
+            .incoming
+            .inbound_within(net.options.reachable_after_inbound);
+        st.incoming.inbound = Some((self.listener, Instant::now()));
+        if reachable {
+            return;
+        }
+        st.log(
+            EventLevel::Info,
+            "A peer connected in from the internet: the listening port is reachable".into(),
+        );
+        let expiry = !std::mem::replace(&mut st.incoming.inbound_expiry, true);
+        drop(st);
+        net.status_changed();
+        if expiry {
+            tokio::spawn(expire_inbound(self.net.clone()));
+        }
+    }
+}
+
+/// Waits until the last peer that connected in is
+/// [`NetworkOptions::reachable_after_inbound`](crate::NetworkOptions) ago, then reports that
+/// the port may no longer be reachable.
+async fn expire_inbound(net: Weak<Inner>) {
+    loop {
+        let Some(due) = net.upgrade().and_then(|net| {
+            let st = net.state();
+            st.incoming
+                .inbound
+                .map(|(_, at)| at + net.options.reachable_after_inbound)
+        }) else {
+            return;
+        };
+        tokio::time::sleep_until(due.into()).await;
+        let Some(net) = net.upgrade() else {
+            return;
+        };
+        let mut st = net.state();
+        if st
+            .incoming
+            .inbound
+            .is_some_and(|(_, at)| at.elapsed() < net.options.reachable_after_inbound)
+        {
+            // Another peer connected in since.
+            continue;
+        }
+        st.incoming.inbound_expiry = false;
+        drop(st);
+        tracing::debug!(target: "torrentplayer_net", "no peer connected in for a while: the listening port no longer counts as reachable");
+        net.status_changed();
+        return;
     }
 }
 
@@ -719,6 +841,7 @@ async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
     let mapping = Mapping { net, id, port };
     let client = match reqwest::Client::builder()
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(UPNP_REQUEST_TIMEOUT)
         .build()
     {
@@ -738,22 +861,23 @@ async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
         let alive = confirmed.is_some_and(|(_, until)| until > Instant::now());
         if !alive && discovered.is_none_or(|at| at.elapsed() >= UPNP_DISCOVER_EVERY) {
             discovered = Some(Instant::now());
-            gateways = match &fixed {
-                Some(url) => gateway_at(url).into_iter().collect(),
-                None => discover_gateways().await,
+            gateways = if let Some(url) = &fixed {
+                gateway_at(url).into_iter().collect()
+            } else {
+                // A mode change or a closed listener stops discovery at once.
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    gateways = discover_gateways(&client) => gateways,
+                }
             };
         }
-        let mut external = None;
-        for gateway in &gateways {
-            match gateway.map(&client, port, lease).await {
-                Ok(ip) => {
-                    external = Some(ip);
-                    break;
-                }
-                Err(error) => {
-                    tracing::debug!(target: "torrentplayer_net", url = %gateway.control_url, %error, "UPnP port mapping failed");
-                }
-            }
+        let external = tokio::select! {
+            () = cancel.cancelled() => return,
+            external = map_any(&gateways, &client, port, lease) => external,
+        };
+        // Cancelled while the last reply arrived: never record a mapping afterwards.
+        if cancel.is_cancelled() {
+            return;
         }
         if let Some(ip) = external
             && last_external != external
@@ -781,6 +905,24 @@ async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
             () = tokio::time::sleep(lease / 2) => {}
         }
     }
+}
+
+/// Maps `port` on the first of `gateways` that accepts, and returns its external address.
+async fn map_any(
+    gateways: &[Gateway],
+    client: &reqwest::Client,
+    port: u16,
+    lease: Duration,
+) -> Option<IpAddr> {
+    for gateway in gateways {
+        match gateway.map(client, port, lease).await {
+            Ok(ip) => return Some(ip),
+            Err(error) => {
+                tracing::debug!(target: "torrentplayer_net", url = %gateway.control_url, %error, "UPnP port mapping failed");
+            }
+        }
+    }
+    None
 }
 
 /// The mapping kept by one [`forward_port`] task, forgotten when the task ends.
@@ -892,8 +1034,7 @@ impl Gateway {
             .await
             .map_err(|error| format!("{action}: {error}"))?;
         let status = response.status();
-        let reply = response
-            .text()
+        let reply = read_reply(response)
             .await
             .map_err(|error| format!("{action}: {error}"))?;
         if !status.is_success() {
@@ -904,6 +1045,18 @@ impl Gateway {
         }
         Ok(reply)
     }
+}
+
+/// A router's reply as text, up to [`MAX_UPNP_REPLY`] bytes.
+async fn read_reply(mut response: reqwest::Response) -> Result<String, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if body.len() + chunk.len() > MAX_UPNP_REPLY {
+            return Err("the router sent too much data".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// The service at `control_url`, given rather than discovered (tests).
@@ -923,7 +1076,7 @@ fn gateway_at(control_url: &str) -> Option<Gateway> {
 /// Looks for routers with a `WANIPConnection` service on the local network (SSDP). Only
 /// routers on the local network count: a description or control URL pointing anywhere else
 /// is ignored, as anyone on the network can answer the search.
-async fn discover_gateways() -> Vec<Gateway> {
+async fn discover_gateways(client: &reqwest::Client) -> Vec<Gateway> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     if let Err(error) = librqbit_upnp::discover_once(
         &tx,
@@ -941,35 +1094,51 @@ async fn discover_gateways() -> Vec<Gateway> {
         if !on_local_network(&found.location) {
             continue;
         }
-        let description = match librqbit_upnp::discover_services(found.location.clone()).await {
+        let description = match client.get(found.location.clone()).send().await {
+            Ok(response) if response.status().is_success() => read_reply(response).await,
+            Ok(response) => Err(format!("HTTP {}", response.status())),
+            Err(error) => Err(error.to_string()),
+        };
+        let description = match description {
             Ok(description) => description,
             Err(error) => {
-                tracing::debug!(target: "torrentplayer_net", location = %found.location, error = %format!("{error:#}"), "unusable UPnP router");
+                tracing::debug!(target: "torrentplayer_net", location = %found.location, %error, "unusable UPnP router");
                 continue;
             }
         };
         let Ok(local_ip) = local_ip_towards(found.received_from) else {
             continue;
         };
-        for device in &description.devices {
-            for (_, service) in device.iter_services(tracing::Span::none()) {
-                if service.service_type != WAN_IP_CONNECTION {
-                    continue;
-                }
-                if let Ok(control_url) = found.location.join(&service.control_url)
-                    && on_local_network(&control_url)
-                    && !gateways.iter().any(|g| g.control_url == control_url)
-                {
-                    gateways.push(Gateway {
-                        control_url,
-                        local_ip,
-                    });
-                }
+        for control_url in wan_ip_control_urls(&description) {
+            if let Ok(control_url) = found.location.join(control_url)
+                && on_local_network(&control_url)
+                && !gateways.iter().any(|g| g.control_url == control_url)
+            {
+                gateways.push(Gateway {
+                    control_url,
+                    local_ip,
+                });
             }
         }
     }
     tracing::debug!(target: "torrentplayer_net", gateways = gateways.len(), "UPnP discovery");
     gateways
+}
+
+/// The control URLs of the `WANIPConnection` services in a router's device description,
+/// at any depth of its device tree.
+fn wan_ip_control_urls(description: &str) -> Vec<&str> {
+    description
+        .split("<service>")
+        .skip(1)
+        .filter_map(|service| {
+            let service = service.split("</service>").next()?;
+            if xml_value(service, "serviceType")?.trim() != WAN_IP_CONNECTION {
+                return None;
+            }
+            xml_value(service, "controlURL").map(str::trim)
+        })
+        .collect()
 }
 
 /// Whether `url` names a host by a local (not public) address.
@@ -1037,5 +1206,67 @@ mod tests {
         assert_eq!(from, client.local_addr().unwrap());
         // The same port cannot be opened twice.
         assert!(listen(addr).is_err());
+    }
+
+    #[test]
+    fn finds_the_port_mapping_service_anywhere_in_a_device_description() {
+        let description = format!(
+            "<root><device><serviceList><service><serviceType>urn:other</serviceType>\
+             <controlURL>/other</controlURL></service></serviceList><deviceList><device>\
+             <serviceList><service>\n  <serviceType>{WAN_IP_CONNECTION}</serviceType>\n  \
+             <controlURL> /ctl/IPConn </controlURL></service></serviceList></device>\
+             </deviceList></device></root>"
+        );
+        assert_eq!(wan_ip_control_urls(&description), ["/ctl/IPConn"]);
+        assert!(wan_ip_control_urls("<root></root>").is_empty());
+    }
+
+    /// A router on loopback that answers every request with `response`, then closes.
+    async fn router(response: Vec<u8>) -> Gateway {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream.write_all(&response).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        gateway_at(&format!("http://{addr}/control")).unwrap()
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(UPNP_REQUEST_TIMEOUT)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_router_reply_is_capped_and_redirects_are_not_followed() {
+        let body = "x".repeat(MAX_UPNP_REPLY + 1);
+        let huge = router(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes(),
+        )
+        .await;
+        let error = huge.call(&client(), "GetExternalIPAddress", "").await;
+        assert!(error.is_err_and(|e| e.contains("too much")));
+
+        let redirect = router(
+            b"HTTP/1.1 302 Found\r\nLocation: http://93.184.216.34/\r\nContent-Length: 0\r\n\
+              Connection: close\r\n\r\n"
+                .to_vec(),
+        )
+        .await;
+        let error = redirect.call(&client(), "AddPortMapping", "").await;
+        assert!(error.is_err_and(|e| e.contains("302")));
     }
 }
