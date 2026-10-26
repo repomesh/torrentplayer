@@ -324,7 +324,7 @@ impl Drop for Used<'_> {
 
 impl Drop for Engine {
     /// A caller let go of the engine: it counts as idle only from now (see
-    /// [`Engine::idle_for`]). Callers get it from `StreamEngine::rqbit` and may use it without
+    /// `Engine::idle_for`). Callers get it from `StreamEngine::rqbit` and may use it without
     /// a librqbit operation, or hold it a while before one.
     fn drop(&mut self) {
         *self
