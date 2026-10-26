@@ -100,7 +100,17 @@ pub struct NetworkOptions {
     /// tests, whose servers are all on loopback: a socket on every interface makes Windows ask
     /// whether to allow each newly built test binary through the firewall. Off by default.
     pub loopback_only: bool,
+    /// How long a UPnP port mapping is leased for. It is renewed at half of this, and counts as
+    /// lost once a lease passes without a renewal. See [`UPNP_LEASE`].
+    pub upnp_lease: Duration,
+    /// The router's UPnP control URL (its `WANIPConnection` service), used instead of
+    /// discovering one, even with `loopback_only`. Only for tests, whose fake router is on
+    /// loopback; `None` by default.
+    pub upnp_control_url: Option<String>,
 }
+
+/// The default [`NetworkOptions::upnp_lease`].
+pub const UPNP_LEASE: Duration = Duration::from_secs(60);
 
 /// The default [`NetworkOptions::wireguard_reply_timeout`]: WireGuard's `KEEPALIVE_TIMEOUT`
 /// (10 s, within which a peer that received data answers, if only with a keepalive) plus two
@@ -124,6 +134,8 @@ impl Default for NetworkOptions {
             wireguard_reply_timeout: WIREGUARD_REPLY_TIMEOUT,
             wireguard_restart_after: WIREGUARD_RESTART_AFTER,
             loopback_only: false,
+            upnp_lease: UPNP_LEASE,
+            upnp_control_url: None,
         }
     }
 }
@@ -778,8 +790,8 @@ impl Network {
         self.inner.policy.subscribe()
     }
 
-    /// Notified whenever [`Network::status`] may have changed: every policy change, and changes
-    /// of the incoming-connection listener.
+    /// Notified whenever [`Network::status`] or [`Network::reachable_port`] may have changed:
+    /// every policy change, and changes of the incoming-connection listener or its port mapping.
     #[must_use]
     pub fn status_changes(&self) -> watch::Receiver<u64> {
         self.inner.status_seq.subscribe()

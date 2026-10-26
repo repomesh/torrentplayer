@@ -13,6 +13,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the whole engine instead of up to 256 MiB per torrent. The video being played keeps a quarter of
   it to itself, so background torrents cannot crowd out its downloads. Huge torrents also need less
   memory per peer: a 100,000-piece torrent with 50 peers keeps 625 KB of piece maps instead of 5 MB.
+- TorrentPlayer announces its port in the DHT and answers as a read-write DHT node only while the
+  router confirms a UPnP mapping for it to a public address, not merely while it listens; when
+  the mapping lapses it is read-only (BEP 43) again at once. DHT lookups are unaffected.
 
 ### Fixed
 

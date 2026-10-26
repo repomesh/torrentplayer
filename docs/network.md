@@ -127,20 +127,26 @@ epochs as outgoing connections.
   an outgoing peer. Unknown torrents, paused torrents, our own peer id, and torrents at their
   peer limit (connected plus connecting) are refused. Trackers are told the listening port,
   and torrentplayer-swarm announces it in its DHT lookups (BEP 5 `announce_peer`, with the
-  port itself rather than the DHT's UDP port) while the listener is open on it in the current
-  mode: never in SOCKS5 mode, and in WireGuard mode only while the tunnel's listener is open.
-  DHT nodes record the address they see, the VPN server's in WireGuard mode, so as with
-  trackers the announcement brings peers only if the provider forwards the port. With incoming
-  peers off, TorrentPlayer announces nothing to the DHT, and its DHT queries say it is
-  read-only (BEP 43).
+  port itself rather than the DHT's UDP port), and answers as a read-write DHT node, only
+  while peers can reach the port: the listener is open on it and the router confirms a UPnP
+  mapping to a public address (`Network::reachable_port`). Listening alone is not enough,
+  since behind a router that forwards nothing an announcement sends peers to a closed port.
+  Never in SOCKS5 mode; nothing confirms a provider's port forward in WireGuard mode or a
+  forward set up by hand on the router, so neither announces in the DHT (trackers still get
+  the port). Otherwise TorrentPlayer announces nothing to the DHT and its DHT queries say it
+  is read-only (BEP 43); lookups work the same either way. The switch happens as soon as the
+  mapping is confirmed or lost, not at the next lookup.
   librqbit listens itself only when it is the engine for every torrent (`advanced.engine` =
   `rqbit`) and only in direct mode, TCP only, on `[::]` (dual stack); its listener cannot be
   moved into a tunnel, so it never listens in a protected mode. With the automatic
   engine librqbit only fetches magnet metadata and never listens.
 - **UPnP** (`network.incomingPeers.upnp`, off by default) asks the router to forward the port
-  with UPnP IGD (`librqbit-upnp`), only in direct mode and only while listening. The mapping's
-  lease is 60 seconds, renewed every 30, so it lapses within a minute after listening stops or
-  the mode changes. NAT-PMP and PCP are not supported.
+  with UPnP IGD (SSDP discovery from `librqbit-upnp`; only routers at local addresses are
+  used), only in direct mode and only while listening. The mapping's lease is 60 seconds,
+  renewed every 30, so it lapses within a minute after listening stops or the mode changes.
+  It counts as confirmed while the router accepts the renewals and reports a public external
+  address (not behind carrier-grade or double NAT), and as lost once a lease passes without a
+  renewal; both are logged. NAT-PMP and PCP are not supported.
 - **Status.** `NetworkStatus.incoming` is `off`, `idle` (no engine accepts them right now),
   `paused` (traffic blocked), `unsupported` (SOCKS5), `listening` (port, addresses, UPnP), or
   `failed` (the port could not be opened). Settings shows it under the connection state.

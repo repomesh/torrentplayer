@@ -344,6 +344,11 @@ impl Swarm {
                 Arc::clone(node),
                 network.subscribe(),
             ));
+            tokio::spawn(crate::dht::follow_reachability(
+                Arc::clone(node),
+                network.clone(),
+                cfg.accept_incoming,
+            ));
         }
         let torrents = Registry::default();
         if cfg.accept_incoming

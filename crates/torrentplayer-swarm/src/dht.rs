@@ -11,8 +11,9 @@
 //! Each torrent looks up its peers at once when added, then as often as it needs them (see
 //! [`next_lookup`]): every 20 seconds or so while it downloads with few peers, every few
 //! minutes once it has enough, and not at all while paused or with nothing to download.
-//! TorrentPlayer announces itself in its lookups only while it accepts incoming peers and the
-//! current mode listens for them (see [`announce_port`]); never in SOCKS5 mode.
+//! TorrentPlayer announces itself in its lookups, and answers as a read-write node (BEP 43), only
+//! while peers can reach it: the engine accepts incoming peers and the router confirms a port
+//! mapping for them (see [`announce_port`] and [`follow_reachability`]); never in SOCKS5 mode.
 //!
 //! In direct mode the routing tables (and with them the node id) are kept in a file between
 //! runs, so the next start finds peers without bootstrapping from scratch. A protected mode
@@ -23,6 +24,7 @@ use std::collections::HashSet;
 use std::io::{self, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -32,7 +34,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, watch};
 use tokio_util::sync::CancellationToken;
 use torrentplayer_net::Policy;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use crate::torrent::Shared;
 
@@ -51,6 +53,9 @@ pub(crate) struct DhtNode {
     cancel: CancellationToken,
     /// Where direct-mode routing tables are kept between runs; `None` keeps nothing.
     state: Option<Arc<StateFile>>,
+    /// Whether peers can reach the engine, as [`follow_reachability`] last saw: a node started
+    /// while they cannot is read-only (BEP 43).
+    reachable: AtomicBool,
 }
 
 // librqbit's DHT state is not `Debug`.
@@ -76,6 +81,7 @@ impl DhtNode {
                     written: std::sync::Mutex::new(None),
                 })
             }),
+            reachable: AtomicBool::new(false),
         }
     }
 
@@ -129,8 +135,8 @@ impl DhtNode {
             routing_table,
             routing_table_v6,
             cancellation_token: Some(token.clone()),
-            // Read-only (BEP 43) until a lookup finds the engine listening: see `discover`.
-            read_only: true,
+            // Read-only (BEP 43) while peers cannot reach the engine: see `follow_reachability`.
+            read_only: !self.reachable.load(Ordering::Relaxed),
             ..DhtConfig::default()
         };
         // The node keeps the id its saved tables were built around.
@@ -335,6 +341,41 @@ pub(crate) async fn follow_policy(node: Arc<DhtNode>, mut policy: watch::Receive
     }
 }
 
+/// Makes the node read-write (BEP 43) as soon as peers can reach the engine (it accepts
+/// incoming peers and the router confirms a port mapping for them, see [`announce_port`]), and
+/// read-only again as soon as they cannot (the mapping lapsed, or the listener closed), rather
+/// than at a torrent's next lookup, which may be many minutes away. Runs until the engine
+/// stops.
+pub(crate) async fn follow_reachability(
+    node: Arc<DhtNode>,
+    network: torrentplayer_net::Network,
+    accept_incoming: bool,
+) {
+    let mut status = network.status_changes();
+    loop {
+        let port = announce_port(
+            network.incoming_port().filter(|_| accept_incoming),
+            network.status().mode,
+            network.reachable_port(),
+        );
+        let reachable = port.is_some();
+        if node.reachable.swap(reachable, Ordering::Relaxed) != reachable {
+            if let Some(port) = port {
+                info!(port, "DHT read-write: peers can reach the listening port");
+            } else {
+                info!("DHT read-only: peers can no longer reach the listening port");
+            }
+            if let Some((dht, ..)) = node.running.lock().await.as_ref() {
+                dht.set_read_only(!reachable);
+            }
+        }
+        tokio::select! {
+            () = node.cancel.cancelled() => return,
+            changed = status.changed() => if changed.is_err() { return },
+        }
+    }
+}
+
 /// What a torrent needs from the DHT right now, for [`next_lookup`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Demand {
@@ -411,23 +452,23 @@ fn next_lookup(demand: Demand, announcing: bool, misses: u32, empty: u32) -> Opt
 }
 
 /// The port to announce in DHT lookups (BEP 5 `announce_peer`, with the port given rather
-/// than implied: the DHT's UDP port is not the peer port). Only while the engine accepts
-/// incoming peers on `listen_port` and the network listens on that port in the current mode:
-/// never in SOCKS5 mode, which cannot accept connections, nor while the WireGuard tunnel's
-/// listener is closed. Peers that find the announcement connect to the address the DHT nodes
-/// saw (the VPN server's, in WireGuard mode), so that address must forward the port, as for
-/// trackers.
+/// than implied: the DHT's UDP port is not the peer port), and while there is one the node is
+/// read-write. Only while the engine accepts incoming peers on `listen_port` and peers can
+/// reach that port (`reachable`, from [`Network::reachable_port`]: the network listens on it
+/// and the router confirms a UPnP mapping to a public address). Listening alone is not enough:
+/// behind a router that forwards nothing, an announcement only sends peers to a closed port,
+/// and a read-write node only gets queries it never receives. Never in SOCKS5 mode, which
+/// cannot accept connections. Nothing confirms a forward in WireGuard mode, so it does not
+/// announce there either; trackers still get the port.
+///
+/// [`Network::reachable_port`]: torrentplayer_net::Network::reachable_port
 fn announce_port(
     listen_port: Option<u16>,
     mode: torrentplayer_net::ModeKind,
-    incoming: &torrentplayer_net::IncomingStatus,
+    reachable: Option<u16>,
 ) -> Option<u16> {
     let port = listen_port?;
-    let listening = matches!(
-        incoming,
-        torrentplayer_net::IncomingStatus::Listening { port: open, .. } if *open == port
-    );
-    (mode != torrentplayer_net::ModeKind::Socks5 && listening).then_some(port)
+    (mode != torrentplayer_net::ModeKind::Socks5 && reachable == Some(port)).then_some(port)
 }
 
 /// Finds peers for a torrent through the DHT while the policy allows it, until `cancel` fires
@@ -468,8 +509,11 @@ pub(crate) async fn discover(
             }
         };
         let announce = network.as_ref().and_then(|network| {
-            let status = network.status();
-            announce_port(demand.listen_port, status.mode, &status.incoming)
+            announce_port(
+                demand.listen_port,
+                network.status().mode,
+                network.reachable_port(),
+            )
         });
         // Not announcing means nobody can connect to us: say so (BEP 43), so other nodes keep
         // us out of their routing tables and do not query us.
@@ -821,55 +865,38 @@ mod tests {
     }
 
     #[test]
-    fn announces_only_while_incoming_peers_are_accepted_in_the_current_mode() {
-        use torrentplayer_net::{IncomingStatus, ModeKind};
-        let listening = |port| IncomingStatus::Listening {
-            port,
-            addresses: vec!["0.0.0.0".into()],
-            upnp: false,
-        };
+    fn announces_only_while_peers_can_reach_the_accepted_port() {
+        use torrentplayer_net::ModeKind;
         assert_eq!(
-            announce_port(Some(6881), ModeKind::Direct, &listening(6881)),
-            Some(6881)
-        );
-        assert_eq!(
-            announce_port(Some(6881), ModeKind::WireGuard, &listening(6881)),
+            announce_port(Some(6881), ModeKind::Direct, Some(6881)),
             Some(6881),
-            "the tunnel's listener is open"
+            "the router confirms a mapping"
         );
         assert_eq!(
-            announce_port(None, ModeKind::Direct, &listening(6881)),
+            announce_port(Some(6881), ModeKind::Direct, None),
+            None,
+            "listening without a mapping"
+        );
+        assert_eq!(
+            announce_port(Some(6881), ModeKind::WireGuard, None),
+            None,
+            "nothing confirms a forward through the tunnel"
+        );
+        assert_eq!(
+            announce_port(None, ModeKind::Direct, Some(6881)),
             None,
             "incoming peers are off for this engine"
         );
         assert_eq!(
-            announce_port(Some(6881), ModeKind::Socks5, &listening(6881)),
+            announce_port(Some(6881), ModeKind::Socks5, Some(6881)),
             None,
             "never through a proxy"
         );
         assert_eq!(
-            announce_port(Some(6881), ModeKind::Direct, &listening(7000)),
+            announce_port(Some(6881), ModeKind::Direct, Some(7000)),
             None,
             "another port"
         );
-        for closed in [
-            IncomingStatus::Off,
-            IncomingStatus::Paused {
-                reason: "kill switch".into(),
-            },
-            IncomingStatus::Failed {
-                reason: "in use".into(),
-            },
-            IncomingStatus::Idle {
-                reason: "no engine".into(),
-            },
-        ] {
-            assert_eq!(
-                announce_port(Some(6881), ModeKind::WireGuard, &closed),
-                None,
-                "{closed:?}"
-            );
-        }
     }
 
     #[tokio::test]
@@ -889,15 +916,23 @@ mod tests {
         responder.abort();
     }
 
-    #[tokio::test]
-    async fn a_lookup_announces_the_listening_port_to_close_nodes_unless_read_only() {
-        // A responder whose id is the info hash itself (as close as a node can be), giving a
-        // token with every reply and recording the queries it gets: method, read-only flag
-        // (BEP 43), and for announcements the port and `implied_port`.
-        const ID: &[u8; 20] = b"ABCDEFGHIJKLMNOPQRST";
+    /// The id of [`recording_responder`], and the info hash its tests look up.
+    const ID: &[u8; 20] = b"ABCDEFGHIJKLMNOPQRST";
+
+    /// A query seen by [`recording_responder`]: method, read-only flag (BEP 43), and for
+    /// announcements the port and `implied_port`.
+    type Query = (Vec<u8>, Option<i64>, Option<i64>, Option<i64>);
+
+    /// A responder whose id is the info hash itself (as close as a node can be), giving a token
+    /// with every reply and recording the queries it gets.
+    async fn recording_responder() -> (
+        SocketAddr,
+        tokio::sync::mpsc::UnboundedReceiver<Query>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let contact = socket.local_addr().unwrap();
-        let (tx, mut queries) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, queries) = tokio::sync::mpsc::unbounded_channel();
         let responder = tokio::spawn(async move {
             let mut buf = [0; 1500];
             while let Ok((len, from)) = socket.recv_from(&mut buf).await {
@@ -934,51 +969,153 @@ mod tests {
                 let _ = socket.send_to(&reply, from).await;
             }
         });
-        let node = local_node(vec![contact.to_string()]).await;
-        knows_a_node(&node).await;
-        let mut drain = || {
-            let mut seen = Vec::new();
-            while let Ok(query) = queries.try_recv() {
-                seen.push(query);
-            }
-            seen
-        };
+        (contact, queries, responder)
+    }
 
-        // Unreachable: no announcement, and every query says it is read-only.
-        drain();
-        node.set_read_only(true);
-        let mut lookup = node.get_peers_once(Id20::new(*ID), None);
-        while lookup.next().await.is_some() {}
-        let seen = drain();
-        assert!(
-            seen.iter().any(|(method, ..)| method == b"get_peers"),
-            "{seen:?}"
-        );
-        assert!(
-            seen.iter()
-                .all(|(method, read_only, ..)| method != b"announce_peer" && *read_only == Some(1)),
-            "{seen:?}"
-        );
-
-        // Listening: announced with the listening port, and not read-only.
-        node.set_read_only(false);
-        let mut lookup = node.get_peers_once(Id20::new(*ID), Some(51413));
+    /// Runs one lookup of [`ID`], announcing `announce`, and returns the queries the
+    /// responder got.
+    async fn lookup_queries(
+        node: &Dht,
+        announce: Option<u16>,
+        queries: &mut tokio::sync::mpsc::UnboundedReceiver<Query>,
+    ) -> Vec<Query> {
+        while queries.try_recv().is_ok() {}
+        let mut lookup = node.get_peers_once(Id20::new(*ID), announce);
         while lookup.next().await.is_some() {}
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let seen = drain();
-        assert!(
-            seen.iter().all(|(_, read_only, ..)| read_only.is_none()),
-            "{seen:?}"
-        );
-        assert!(
-            seen.iter()
-                .any(|(method, _, port, implied)| method == b"announce_peer"
-                    && *port == Some(51413)
-                    && *implied == Some(0)),
-            "the given port, not the DHT's own: {seen:?}"
-        );
+        let mut seen = Vec::new();
+        while let Ok(query) = queries.try_recv() {
+            seen.push(query);
+        }
+        seen
+    }
+
+    /// No announcement, and every query says the node is read-only.
+    fn unreachable(seen: &[Query]) -> bool {
+        seen.iter().any(|(method, ..)| method == b"get_peers")
+            && seen
+                .iter()
+                .all(|(method, read_only, ..)| method != b"announce_peer" && *read_only == Some(1))
+    }
+
+    /// Announced with `port` (given, not implied: the DHT's own port is not the peer port),
+    /// and no query says the node is read-only.
+    fn announced(seen: &[Query], port: u16) -> bool {
+        seen.iter().all(|(_, read_only, ..)| read_only.is_none())
+            && seen.iter().any(|(method, _, announced, implied)| {
+                method == b"announce_peer"
+                    && *announced == Some(i64::from(port))
+                    && *implied == Some(0)
+            })
+    }
+
+    #[tokio::test]
+    async fn a_lookup_announces_the_listening_port_to_close_nodes_unless_read_only() {
+        let (contact, mut queries, responder) = recording_responder().await;
+        let node = local_node(vec![contact.to_string()]).await;
+        knows_a_node(&node).await;
+
+        node.set_read_only(true);
+        let seen = lookup_queries(&node, None, &mut queries).await;
+        assert!(unreachable(&seen), "{seen:?}");
+
+        node.set_read_only(false);
+        let seen = lookup_queries(&node, Some(51413), &mut queries).await;
+        assert!(announced(&seen, 51413), "{seen:?}");
         node.cancellation_token().cancel();
         responder.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_node_is_read_write_and_announces_only_while_a_port_mapping_is_confirmed() {
+        use torrentplayer_net::{IncomingConfig, Network, NetworkConfig, test_util::TestGateway};
+        let public = std::net::IpAddr::from([93, 184, 216, 34]);
+        let gateway = TestGateway::start(public).await.unwrap();
+        let net = Network::start(
+            NetworkConfig::default(),
+            torrentplayer_net::NetworkOptions {
+                upnp_lease: Duration::from_secs(1),
+                upnp_control_url: Some(gateway.control_url()),
+                ..loopback_options()
+            },
+        )
+        .await
+        .unwrap();
+        let _peers = net.incoming_peers();
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let listen = |upnp| IncomingConfig {
+            enabled: true,
+            port,
+            upnp,
+        };
+        net.set_incoming(listen(false));
+
+        // The engine's node, started as `DhtNode::get` starts it, but on loopback.
+        let (contact, mut queries, responder) = recording_responder().await;
+        let node = Arc::new(DhtNode::new(
+            CancellationToken::new(),
+            Some(net.clone()),
+            None,
+        ));
+        let dht = local_node(vec![contact.to_string()]).await;
+        dht.set_read_only(!node.reachable.load(Ordering::Relaxed));
+        *node.running.lock().await = Some((Arc::clone(&dht), CancellationToken::new(), 0));
+        knows_a_node(&dht).await;
+        tokio::spawn(follow_reachability(Arc::clone(&node), net.clone(), true));
+        let wait_reachable = |want: bool| {
+            let node = Arc::clone(&node);
+            async move {
+                tokio::time::timeout(Duration::from_secs(10), async {
+                    while node.reachable.load(Ordering::Relaxed) != want {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .unwrap_or_else(|_| panic!("reachable never became {want}"));
+            }
+        };
+        let announce =
+            || announce_port(net.incoming_port(), net.status().mode, net.reachable_port());
+
+        // Listening, but no mapping: read-only, and no announcement.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !matches!(
+                net.status().incoming,
+                torrentplayer_net::IncomingStatus::Listening { .. }
+            ) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!node.reachable.load(Ordering::Relaxed));
+        assert_eq!(announce(), None);
+        let seen = lookup_queries(&dht, announce(), &mut queries).await;
+        assert!(unreachable(&seen), "{seen:?}");
+
+        // The router confirms a mapping: read-write, and the port is announced.
+        net.set_incoming(listen(true));
+        wait_reachable(true).await;
+        assert_eq!(announce(), Some(port));
+        let seen = lookup_queries(&dht, announce(), &mut queries).await;
+        assert!(announced(&seen, port), "{seen:?}");
+
+        // The mapping lapses: read-only again, without waiting for a lookup.
+        gateway.set_external(None);
+        wait_reachable(false).await;
+        assert_eq!(announce(), None);
+        let seen = lookup_queries(&dht, announce(), &mut queries).await;
+        assert!(unreachable(&seen), "{seen:?}");
+
+        node.cancel.cancel();
+        dht.cancellation_token().cancel();
+        responder.abort();
+        net.shutdown();
     }
 
     #[test]
