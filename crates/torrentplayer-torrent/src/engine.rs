@@ -298,8 +298,8 @@ struct Inner {
     /// Held shared by every librqbit operation, and exclusively by [`Engine::shutdown`], which
     /// so waits until the operations in flight have ended.
     operations: RwLock<()>,
-    /// When the last librqbit operation ended, or the session started (see
-    /// [`Engine::idle_for`]).
+    /// When a caller last let go of the engine or ended a librqbit operation, or the session
+    /// started (see [`Engine::idle_for`]).
     last_used: Mutex<Instant>,
 }
 
@@ -319,6 +319,19 @@ struct Used<'a>(&'a Mutex<Instant>);
 impl Drop for Used<'_> {
     fn drop(&mut self) {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+    }
+}
+
+impl Drop for Engine {
+    /// A caller let go of the engine: it counts as idle only from now (see
+    /// [`Engine::idle_for`]). Callers get it from `StreamEngine::rqbit` and may use it without
+    /// a librqbit operation, or hold it a while before one.
+    fn drop(&mut self) {
+        *self
+            .inner
+            .last_used
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Instant::now();
     }
 }
 
@@ -453,7 +466,8 @@ impl Engine {
 
     /// How long the session has been idle: it has no torrents, and nothing but this handle
     /// holds it (no operation in flight, no stream open, no caller about to start one), for
-    /// this long since its last operation ended. `None` while it is in use.
+    /// this long since a caller last let go of it or its last operation ended. `None` while it
+    /// is in use.
     pub(crate) fn idle_for(&self) -> Option<Duration> {
         if Arc::strong_count(&self.inner) > 1 || self.has_torrents() {
             return None;

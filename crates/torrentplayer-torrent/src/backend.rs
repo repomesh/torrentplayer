@@ -2476,6 +2476,28 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn librqbit_in_steady_use_is_never_stopped() {
+        // Callers that take the engine and let it go again, more often than the idle time,
+        // keep one session, whether or not they ran a librqbit operation with it (the metadata
+        // of a search result's torrents, then its add, then its streams).
+        let dir = tempfile::tempdir().unwrap();
+        let idle = Duration::from_millis(600);
+        let engine = rqbit_only(dir.path(), idle).await;
+        let first = engine.rqbit().await.unwrap();
+        let weak = first.downgrade();
+        drop(first);
+        for round in 0..12 {
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            let again = engine.rqbit().await.unwrap();
+            assert!(weak.is(&again), "restarted in round {round}");
+            if round == 0 {
+                assert!(runs(&again).await);
+            }
+        }
+        engine.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn librqbit_stops_only_after_its_last_operation_is_long_past() {
         let dir = tempfile::tempdir().unwrap();
         let idle = Duration::from_secs(1);
