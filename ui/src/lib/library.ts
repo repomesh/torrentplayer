@@ -92,7 +92,8 @@ export function groupLibrary(items: readonly LibraryItem[]): LibraryCourse[] {
 
 /**
  * Reads the current library and follows individual changes until the returned function is
- * called. Changes that race the initial read are overlaid on its result.
+ * called. Changes that race the initial read are overlaid on its result. A failed read is tried
+ * once more; if that fails too, the library starts empty and still follows changes.
  */
 export function followLibrary(onItems: (items: LibraryItem[]) => void): () => void {
   let stopped = false;
@@ -100,6 +101,7 @@ export function followLibrary(onItems: (items: LibraryItem[]) => void): () => vo
   let pending: LibraryItem[] = [];
   let unlisten: (() => void) | null = null;
   let loading = false;
+  let retried = false;
   const loadInitial = (): void => {
     if (stopped || loading) {
       return;
@@ -115,12 +117,20 @@ export function followLibrary(onItems: (items: LibraryItem[]) => void): () => vo
         onItems(current);
       })
       .catch(() => {
-        // Event delivery can still keep the view useful if the initial read alone failed.
-        if (!stopped && pending.length > 0) {
-          current = pending.reduce(mergeLibrary, []);
-          pending = [];
-          onItems(current);
+        if (stopped) {
+          return;
         }
+        if (!retried) {
+          retried = true;
+          loading = false;
+          loadInitial();
+          return;
+        }
+        // Event delivery can still keep the view useful if the initial read alone failed;
+        // without a base list, changes would wait in `pending` forever.
+        current = pending.reduce(mergeLibrary, []);
+        pending = [];
+        onItems(current);
       });
   };
   listen<LibraryItem>(LIBRARY_CHANGED_EVENT, (event) => {

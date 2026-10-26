@@ -46,6 +46,7 @@
   } from '../subtitles';
   import { PlaybackTimer } from '../metrics';
   import { followNetwork, pausedMessage } from '../network';
+  import { pollWhileVisible, reportDue, type ReportedPosition } from '../poll';
   import { SeekGate } from '../seekgate';
   import { thumbnailSource } from '../seekbar';
   import type { SettingsSection } from '../settings';
@@ -119,6 +120,8 @@
   const CONVERSION_NOTICE_MS = 10_000;
   /** A seek hold is released this long after `seeked` even if no frame was seen painted. */
   const SEEK_HOLD_MAX_MS = 1000;
+  /** An unchanged position is reported again after this long (the backend's save interval). */
+  const PROGRESS_REPEAT_MS = 30_000;
 
   let video: HTMLVideoElement | undefined = $state();
   let container: HTMLDivElement | undefined = $state();
@@ -175,6 +178,8 @@
   let convertedSrc = $state<string | null>(null);
   let converted: ConvertedPlayback | null = null;
   let converting = $state(false);
+  // After a failed conversion, returns to its position once the stream itself has loaded.
+  let restoreAfterConversion: (() => void) | null = null;
   let conversionFailed = $state(false);
   // The "Converting…" notice leaves on its own a while after the video starts.
   let conversionNoticed = $state(false);
@@ -247,7 +252,8 @@
   let seekHoldTimer: ReturnType<typeof setTimeout> | undefined;
   let frameHandle: number | null = null;
   let reportTimer: ReturnType<typeof setInterval> | undefined;
-  let statsTimer: ReturnType<typeof setInterval> | undefined;
+  let stopStats: (() => void) | undefined;
+  let lastReport: ReportedPosition | null = null;
   let stopNetwork: (() => void) | undefined;
   let lastPoll = 0;
   let noPeersSince: number | null = null;
@@ -330,11 +336,33 @@
   }
 
   function report(): void {
-    if (!video) {
+    // Unloading the video on destroy pauses it and resets the position to 0: not a position.
+    if (!video || destroyed) {
       return;
     }
     const known = Number.isFinite(video.duration) ? video.duration : null;
+    lastReport = { position: video.currentTime, duration: known, at: performance.now() };
     reportPlayback(stream.streamId, video.currentTime, known).catch(() => undefined);
+  }
+
+  /**
+   * The report every second: skipped while the position stands still (paused), apart from one
+   * every `PROGRESS_REPEAT_MS` so the backend still saves it on its schedule. A minimized window
+   * playing keeps reporting, so audio playing in the background is still saved.
+   */
+  function reportProgress(): void {
+    if (
+      video &&
+      reportDue(
+        lastReport,
+        video.currentTime,
+        Number.isFinite(video.duration) ? video.duration : null,
+        performance.now(),
+        PROGRESS_REPEAT_MS,
+      )
+    ) {
+      report();
+    }
   }
 
   /** Captures the exact final position before the parent closes this stream. */
@@ -465,6 +493,7 @@
     if (!video || converted !== null || destroyed || !ConvertedPlayback.supported()) {
       return;
     }
+    forgetRestore();
     const media = video;
     const start = resumed ? media.currentTime : startAt;
     resumed = true;
@@ -502,19 +531,27 @@
     converted = null;
     converting = false;
     convertedSrc = null;
-    media.addEventListener(
-      'loadedmetadata',
-      () => {
-        if (destroyed) {
-          return;
-        }
-        media.currentTime = position;
-        if (resume) {
-          void startPlaying();
-        }
-      },
-      { once: true },
-    );
+    forgetRestore();
+    const restore = (): void => {
+      restoreAfterConversion = null;
+      if (destroyed) {
+        return;
+      }
+      media.currentTime = position;
+      if (resume) {
+        void startPlaying();
+      }
+    };
+    restoreAfterConversion = restore;
+    media.addEventListener('loadedmetadata', restore, { once: true });
+  }
+
+  /** Drops a pending return to the position from before the conversion stopped. */
+  function forgetRestore(): void {
+    if (restoreAfterConversion !== null) {
+      video?.removeEventListener('loadedmetadata', restoreAfterConversion);
+      restoreAfterConversion = null;
+    }
   }
 
   /** Samples the decoder counters until they show audio being decoded. */
@@ -676,6 +713,8 @@
   /** The chip's "Start over": back to the beginning. */
   function startOver(): void {
     dismissChip();
+    // Before the duration is known, the position to continue from must not be applied later.
+    resumed = true;
     seekTo(0);
     poke();
   }
@@ -798,13 +837,12 @@
   function onKey(event: KeyboardEvent): void {
     // The settings, dialogs over the player (the queue's "Choose files"), the queue panel, and
     // form controls (the volume slider) handle their own keys: one key press must not also
-    // pause or seek the video.
+    // pause or seek the video. Escape on the end card still leaves the player.
+    const target = event.target instanceof Element ? event.target : null;
     if (
       settingsSection !== null ||
-      (event.target instanceof Element &&
-        event.target.closest(
-          'dialog, aside, [role="tree"], [role="menu"], .end-card, input, select, textarea',
-        ) !== null)
+      target?.closest('dialog, aside, [role="tree"], [role="menu"], input, select, textarea') ||
+      (event.key !== 'Escape' && target?.closest('.end-card'))
     ) {
       return;
     }
@@ -890,9 +928,8 @@
     onFullscreenChange();
     timer.play(startedAt);
     watchFrames();
-    reportTimer = setInterval(report, 1000);
-    statsTimer = setInterval(() => void pollStats(), 1000);
-    void pollStats();
+    reportTimer = setInterval(reportProgress, 1000);
+    stopStats = pollWhileVisible(pollStats, 1000);
     window.addEventListener('keydown', onKey, { capture: true });
     document.addEventListener('fullscreenchange', onFullscreenChange);
     poke();
@@ -926,12 +963,13 @@
     destroyed = true;
     playRequest += 1;
     converted?.destroy();
+    forgetRestore();
     clearInterval(audioTimer);
     stopNetwork?.();
     window.removeEventListener('keydown', onKey, { capture: true });
     document.removeEventListener('fullscreenchange', onFullscreenChange);
     clearInterval(reportTimer);
-    clearInterval(statsTimer);
+    stopStats?.();
     clearTimeout(hideTimer);
     clearTimeout(chipTimer);
     clearTimeout(seekHoldTimer);
@@ -988,6 +1026,7 @@
     onpause={() => {
       paused = true;
       onPauseChange?.(true);
+      report();
     }}
     ontimeupdate={() => {
       if (video) {

@@ -109,6 +109,36 @@ describe('followLibrary', () => {
     handler?.({ payload: item({ positionSecs: 70 }) });
     expect(seen.at(-1)?.[0]?.positionSecs).toBe(60);
   });
+
+  it('tries a failed initial read once more', async () => {
+    listen.mockResolvedValue(vi.fn());
+    invoke.mockRejectedValueOnce(new Error('busy')).mockResolvedValueOnce([item()]);
+    const seen: LibraryItem[][] = [];
+    const stop = followLibrary((items) => seen.push(items));
+    await vi.waitFor(() => {
+      expect(seen).toEqual([[item()]]);
+    });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it('starts empty and follows changes when the initial read keeps failing', async () => {
+    let handler: ((event: { payload: LibraryItem }) => void) | undefined;
+    listen.mockImplementation((_name: string, callback: typeof handler) => {
+      handler = callback;
+      return Promise.resolve(vi.fn());
+    });
+    invoke.mockRejectedValue(new Error('gone'));
+    const seen: LibraryItem[][] = [];
+    const stop = followLibrary((items) => seen.push(items));
+    await vi.waitFor(() => {
+      expect(seen).toEqual([[]]);
+    });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    handler?.({ payload: item() });
+    expect(seen.at(-1)).toEqual([item()]);
+    stop();
+  });
 });
 
 describe('resumeStart', () => {

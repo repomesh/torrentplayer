@@ -70,6 +70,31 @@
   let preview = $state.raw<FilePreviewDto | null>(null);
   let previewError = $state<string | null>(null);
   let previewing = $state(false);
+  // What screen readers hear of the preview: a short line, not the text shown (up to 64 KB).
+  const previewStatus = $derived.by(() => {
+    if (selectedFile === null) {
+      return '';
+    }
+    if (
+      preview?.image ||
+      (preview?.text !== undefined && preview.text !== null) ||
+      preview?.video
+    ) {
+      return `Preview of ${fileName(selectedFile.path)}`;
+    }
+    if (previewing && previewHint(selectedFile) !== 'none') {
+      return 'Loading preview…';
+    }
+    return previewError ?? preview?.note ?? 'No preview for this kind of file.';
+  });
+
+  /** A preview video that goes away stops loading, so it does not keep the stream open. */
+  function unloadOnRemove(media: HTMLVideoElement): () => void {
+    return () => {
+      media.removeAttribute('src');
+      media.load();
+    };
+  }
 
   // A torrent shown anew keeps a still-present selection, else picks the file playing or the
   // first video.
@@ -346,7 +371,8 @@
         </section>
       </div>
 
-      <aside class="preview" aria-label="Preview" aria-live="polite">
+      <aside class="preview" aria-label="Preview">
+        <p class="sr-only" role="status">{previewStatus}</p>
         {#if selectedFile}
           <div class="view">
             {#if preview?.image}
@@ -355,7 +381,13 @@
               <pre>{preview.text}</pre>
               {#if preview.truncated}<p class="note">Showing the first 64 KB.</p>{/if}
             {:else if preview?.video}
-              <video src={preview.video} muted playsinline preload="metadata"></video>
+              <video
+                {@attach unloadOnRemove}
+                src={preview.video}
+                muted
+                playsinline
+                preload="metadata"
+              ></video>
             {:else if previewing && previewHint(selectedFile) !== 'none'}
               <p class="note">Loading preview…</p>
             {:else}
