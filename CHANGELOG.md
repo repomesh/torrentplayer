@@ -317,6 +317,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without the `=`, showed most of the key in the import warnings and silently dropped it. Such
   key lines are now refused, other unrecognized lines are ignored without being repeated, and no
   warning or error quotes key material.
+- A direct peer connection still being made when you switch to the WireGuard tunnel or a SOCKS5
+  proxy is now abandoned at once. Before, it could still reach the peer from your own address
+  and was only closed afterwards.
 
 ### Known limitations
 

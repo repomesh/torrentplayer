@@ -642,6 +642,38 @@ async fn a_direct_dial_started_before_a_switch_to_protected_never_goes_out() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_to_protected_abandons_a_direct_dial_in_flight() {
+    // A dial still in progress when the mode becomes protected must not reach the peer, not
+    // even to be dropped once it connects.
+    let (echo, hits) = echo_server().await;
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    *net.inner.connect_delay.lock().unwrap() = Duration::from_millis(500);
+    let connecting = tokio::spawn({
+        let net = net.clone();
+        async move { net.connect(echo).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    net.apply(NetworkConfig {
+        hold: Some("confirm the network settings first".into()),
+        ..NetworkConfig::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        connecting.await.unwrap(),
+        Err(NetError::KillSwitch(_))
+    ));
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "a direct connection went out"
+    );
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hold_blocks_direct_mode_until_cleared() {
     let (echo, hits) = echo_server().await;
     let held = NetworkConfig {

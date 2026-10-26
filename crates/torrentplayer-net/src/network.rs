@@ -343,6 +343,9 @@ pub(crate) struct Inner {
     /// Test seam: how long host name lookups through the system resolver take.
     #[cfg(test)]
     pub(crate) resolve_delay: Mutex<Duration>,
+    /// Test seam: how long direct connections take to start.
+    #[cfg(test)]
+    pub(crate) connect_delay: Mutex<Duration>,
 }
 
 impl Drop for Inner {
@@ -680,6 +683,8 @@ impl Network {
             last_dial_wake: Mutex::default(),
             #[cfg(test)]
             resolve_delay: Mutex::default(),
+            #[cfg(test)]
+            connect_delay: Mutex::default(),
         });
         tokio::spawn(monitor(Arc::downgrade(&inner), wake, cancel.clone()));
         tokio::spawn(bridge::serve(
@@ -1084,6 +1089,20 @@ impl Network {
         Ok(tokio::net::lookup_host((host, port)).await?.collect())
     }
 
+    /// Connects to `target` directly.
+    async fn direct_connect(&self, target: SocketAddr) -> std::io::Result<TcpStream> {
+        #[cfg(test)]
+        {
+            let delay = *self
+                .inner
+                .connect_delay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            tokio::time::sleep(delay).await;
+        }
+        TcpStream::connect(target).await
+    }
+
     pub(crate) fn route(&self) -> Result<(Route, Lease, bool), NetError> {
         let mut st = self.inner.state();
         if !st.conn.allows_traffic() {
@@ -1126,7 +1145,18 @@ impl Network {
             return Err(NetError::Ipv6Disabled);
         }
         match route {
-            Route::Direct => Ok(TcpStream::connect(target).await?),
+            Route::Direct => {
+                // A switch to a protected mode abandons the dial at once, rather than letting
+                // it reach the peer directly and dropping the connection only afterwards.
+                let mut lease = lease.clone();
+                tokio::select! {
+                    biased;
+                    () = lease.revoked() => Err(NetError::KillSwitch(
+                        "the network settings changed while connecting".into(),
+                    )),
+                    stream = self.direct_connect(target) => Ok(stream?),
+                }
+            }
             Route::Socks(cfg) => self.socks_dial(cfg, &Target::Addr(target)).await,
             Route::WireGuard(tunnel) => tunnel.connect(target, Some(lease.clone())).await,
         }
