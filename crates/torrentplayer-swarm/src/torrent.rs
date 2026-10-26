@@ -29,8 +29,8 @@ use crate::metainfo::{BLOCK_LEN, Metainfo};
 use crate::reader::FileReader;
 use crate::reload::Rechecker;
 use crate::sched::{
-    BlockDigest, Interest, InterestId, InterestKind, PeerKey, PieceCheck, Request, Scheduler,
-    SchedulerConfig,
+    BlockDigest, Interest, InterestId, InterestKind, PeerKey, PieceBudget, PieceCheck, Request,
+    Scheduler, SchedulerConfig,
 };
 use crate::store::{CacheFile, PieceStore};
 use crate::wire::{self, HANDSHAKE_LEN, Outgoing};
@@ -298,6 +298,8 @@ pub struct Swarm {
     limiter: Option<Arc<RateLimiter>>,
     upload_limiter: Arc<RateLimiter>,
     upload_slots: Arc<Semaphore>,
+    /// Memory for partially downloaded pieces, shared by all torrents.
+    piece_budget: Arc<PieceBudget>,
     peer_id: [u8; 20],
     http: reqwest::Client,
     /// For web seeds: only public destinations, checked redirects.
@@ -374,6 +376,7 @@ impl Swarm {
                     .map_or_else(RateLimiter::unlimited, RateLimiter::new),
             ),
             upload_slots: Arc::new(Semaphore::new(MAX_UPLOAD_READS)),
+            piece_budget: PieceBudget::new(cfg.scheduler.max_in_progress_bytes),
             cfg: Arc::new(cfg),
             peer_id: generate_peer_id(),
             http,
@@ -411,9 +414,10 @@ impl Swarm {
         };
         let cache_file = store.cache_file();
         let shared = Arc::new(Shared {
-            sched: Mutex::new(Scheduler::new(
+            sched: Mutex::new(Scheduler::with_budget(
                 Arc::clone(&meta),
                 self.cfg.scheduler.clone(),
+                Arc::clone(&self.piece_budget),
             )),
             meta: Arc::clone(&meta),
             store,

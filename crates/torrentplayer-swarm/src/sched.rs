@@ -30,8 +30,10 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::bits::Bits;
 use crate::metainfo::{BLOCK_LEN, Metainfo};
 
 /// Identifies a connected peer.
@@ -94,7 +96,10 @@ pub struct SchedulerConfig {
     pub max_window: u64,
     /// Bytes at the end of a playing file to prefetch (container indexes), once not critical.
     pub tail_bytes: u64,
-    /// Upper bound on memory held by partially downloaded background pieces.
+    /// Upper bound on memory held by partially downloaded background pieces, shared by every
+    /// torrent of the engine. Torrents nobody is playing or reading stop starting pieces at
+    /// three quarters of it, leaving the rest to the one being played; urgent pieces are never
+    /// held back, and every torrent may always work on at least one piece.
     pub max_in_progress_bytes: u64,
 }
 
@@ -197,6 +202,51 @@ pub(crate) struct Verified {
     pub(crate) failed_by: Vec<PeerKey>,
     /// Peers whose data for a piece differed from the data that later verified: to ban.
     pub(crate) banned: Vec<PeerKey>,
+}
+
+/// Torrents with no playhead or reader leave this fraction (one in `STREAMING_RESERVE`) of the
+/// [`PieceBudget`] to torrents being played.
+const STREAMING_RESERVE: u64 = 4;
+
+/// Memory for partially downloaded pieces, shared by every torrent of an engine (see
+/// [`SchedulerConfig::max_in_progress_bytes`]). Each [`Scheduler`] accounts for its own
+/// pieces here and gives them back when they complete or it is dropped.
+#[derive(Debug)]
+pub(crate) struct PieceBudget {
+    limit: u64,
+    used: AtomicU64,
+}
+
+impl PieceBudget {
+    pub(crate) fn new(limit: u64) -> Arc<Self> {
+        Arc::new(Self {
+            limit,
+            used: AtomicU64::new(0),
+        })
+    }
+
+    /// Takes `bytes` if that keeps the total within `limit`.
+    fn try_take(&self, bytes: u64, limit: u64) -> bool {
+        self.used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                let after = used.saturating_add(bytes);
+                (after <= limit).then_some(after)
+            })
+            .is_ok()
+    }
+
+    fn give_back(&self, bytes: u64) {
+        let _ = self
+            .used
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |used| {
+                Some(used.saturating_sub(bytes))
+            });
+    }
+
+    #[cfg(test)]
+    fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
 }
 
 /// Failed pieces remembered for smart ban at most; the oldest is forgotten first.
@@ -321,7 +371,7 @@ impl Rate {
 
 #[derive(Debug)]
 struct Peer {
-    has: Vec<bool>,
+    has: Bits,
     has_count: u32,
     choked: bool,
     outstanding: Vec<Outstanding>,
@@ -409,6 +459,8 @@ pub(crate) struct Scheduler {
     suspects: HashMap<u32, Vec<Vec<(PeerKey, BlockDigest)>>>,
     /// [`Scheduler::suspects`] oldest first, to bound them.
     suspect_order: VecDeque<u32>,
+    /// The engine's budget for partial pieces, and this torrent's share of it.
+    budget: Arc<PieceBudget>,
     in_progress_bytes: u64,
     urgency: Vec<Option<Duration>>,
     urgent_order: Vec<u32>,
@@ -440,7 +492,19 @@ pub(crate) struct Scheduler {
 }
 
 impl Scheduler {
+    /// A scheduler with a partial-piece budget of its own.
+    #[cfg(test)]
     pub(crate) fn new(meta: Arc<Metainfo>, cfg: SchedulerConfig) -> Self {
+        let budget = PieceBudget::new(cfg.max_in_progress_bytes);
+        Self::with_budget(meta, cfg, budget)
+    }
+
+    /// A scheduler sharing the engine's partial-piece `budget` with other torrents.
+    pub(crate) fn with_budget(
+        meta: Arc<Metainfo>,
+        cfg: SchedulerConfig,
+        budget: Arc<PieceBudget>,
+    ) -> Self {
         let n = meta.piece_count() as usize;
         Self {
             meta,
@@ -453,6 +517,7 @@ impl Scheduler {
             verifying: HashMap::new(),
             suspects: HashMap::new(),
             suspect_order: VecDeque::new(),
+            budget,
             in_progress_bytes: 0,
             urgency: vec![None; n],
             urgent_order: Vec::new(),
@@ -619,7 +684,7 @@ impl Scheduler {
         self.peers.insert(
             key,
             Peer {
-                has: vec![false; self.have.len()],
+                has: Bits::new(self.have.len()),
                 has_count: 0,
                 choked: true,
                 outstanding: Vec::new(),
@@ -640,10 +705,8 @@ impl Scheduler {
     pub(crate) fn remove_peer(&mut self, key: PeerKey) {
         self.release_outstanding(key);
         if let Some(peer) = self.peers.remove(&key) {
-            for (piece, has) in peer.has.iter().enumerate() {
-                if *has {
-                    self.availability[piece] = self.availability[piece].saturating_sub(1);
-                }
+            for piece in peer.has.ones() {
+                self.availability[piece] = self.availability[piece].saturating_sub(1);
             }
         }
     }
@@ -659,8 +722,7 @@ impl Scheduler {
         };
         for piece in 0..n {
             let set = bits[piece / 8] & (0x80 >> (piece % 8)) != 0;
-            if set && !peer.has[piece] {
-                peer.has[piece] = true;
+            if set && peer.has.set(piece) {
                 peer.has_count += 1;
                 self.availability[piece] = self.availability[piece].saturating_add(1);
             }
@@ -677,8 +739,7 @@ impl Scheduler {
         if i >= peer.has.len() {
             return false;
         }
-        if !peer.has[i] {
-            peer.has[i] = true;
+        if peer.has.set(i) {
             peer.has_count += 1;
             self.availability[i] = self.availability[i].saturating_add(1);
         }
@@ -1119,18 +1180,26 @@ impl Scheduler {
     fn peer_has(&self, key: PeerKey, piece: u32) -> bool {
         self.peers
             .get(&key)
-            .and_then(|p| p.has.get(piece as usize))
-            .copied()
-            .unwrap_or(false)
+            .is_some_and(|p| p.has.get(piece as usize))
     }
 
-    /// Creates download state for a piece. Background pieces respect the memory budget.
+    /// Creates download state for a piece. Background pieces respect the engine's memory
+    /// budget, and leave part of it to torrents being played.
     fn ensure_progress(&mut self, piece: u32, urgent: bool) -> bool {
         if self.progress.contains_key(&piece) {
             return true;
         }
         let size = u64::from(self.meta.piece_size(piece));
-        if !urgent && self.in_progress_bytes + size > self.cfg.max_in_progress_bytes {
+        // One piece at a time is always allowed, so a torrent whose partial pieces stall
+        // cannot starve the others.
+        let limit = if urgent || self.in_progress_bytes == 0 {
+            u64::MAX
+        } else if self.interests.is_empty() {
+            self.budget.limit - self.budget.limit / STREAMING_RESERVE
+        } else {
+            self.budget.limit
+        };
+        if !self.budget.try_take(size, limit) {
             return false;
         }
         let blocks = self.meta.blocks_in(piece) as usize;
@@ -1442,6 +1511,7 @@ impl Scheduler {
             && let Some(done) = self.progress.remove(&piece)
         {
             self.in_progress_bytes -= done.data.len() as u64;
+            self.budget.give_back(done.data.len() as u64);
             // Every block was received, so every block has a sender.
             let senders = done.senders.into_iter().flatten().collect();
             self.verifying.insert(piece, senders);
@@ -1623,6 +1693,13 @@ impl Scheduler {
     }
 }
 
+impl Drop for Scheduler {
+    /// Gives this torrent's partial pieces back to the engine's budget.
+    fn drop(&mut self) {
+        self.budget.give_back(self.in_progress_bytes);
+    }
+}
+
 fn set_urgency(
     urgency: &mut [Option<Duration>],
     touched: &mut Vec<u32>,
@@ -1724,6 +1801,74 @@ mod tests {
 
     fn deliver(s: &mut Scheduler, key: PeerKey, r: Request) -> BlockOutcome {
         s.on_block(key, r.piece, r.begin, &vec![0u8; r.len as usize])
+    }
+
+    #[test]
+    fn the_partial_piece_budget_is_shared_and_favours_the_torrent_being_played() {
+        let piece = u64::from(PIECE);
+        let budget = PieceBudget::new(8 * piece);
+        let shared =
+            |pieces| Scheduler::with_budget(meta(pieces), small_queues(), Arc::clone(&budget));
+        let mut background = shared(100);
+        let mut playing = shared(100);
+        playing.set_interest(1, reader(0, &playing));
+
+        // A torrent nobody is playing stops at three quarters of the budget...
+        let started = (0..100)
+            .take_while(|&p| background.ensure_progress(p, false))
+            .count();
+        assert_eq!(started, 6);
+        // ...and the torrent being played gets the rest.
+        let started = (0..100)
+            .take_while(|&p| playing.ensure_progress(p, false))
+            .count();
+        assert_eq!(started, 2);
+        assert_eq!(budget.used(), 8 * piece);
+
+        // Another torrent can still work on one piece, and urgent pieces are never held back.
+        let mut third = shared(100);
+        assert!(third.ensure_progress(0, false));
+        assert!(!third.ensure_progress(1, false));
+        assert!(playing.ensure_progress(50, true));
+        assert_eq!(budget.used(), 10 * piece);
+
+        // A torrent that goes away gives back its pieces: alone, the one being played gets the
+        // whole budget, as a torrent did before the budget was shared.
+        drop((background, third));
+        assert_eq!(budget.used(), 3 * piece);
+        let started = (3..100)
+            .take_while(|&p| playing.ensure_progress(p, false))
+            .count();
+        assert_eq!(started, 5);
+        assert_eq!(budget.used(), 8 * piece);
+    }
+
+    #[test]
+    fn a_torrent_finishes_its_pieces_while_others_hold_the_whole_budget() {
+        let piece = u64::from(PIECE);
+        let budget = PieceBudget::new(4 * piece);
+        // A torrent whose partial pieces stall (its peers left) holds every byte it may.
+        let mut stalled = Scheduler::with_budget(meta(100), small_queues(), Arc::clone(&budget));
+        let started = (0..100)
+            .take_while(|&p| stalled.ensure_progress(p, false))
+            .count();
+        assert_eq!(started, 3);
+        assert_eq!(budget.used(), 3 * piece);
+
+        let mut s = Scheduler::with_budget(meta(20), small_queues(), Arc::clone(&budget));
+        s.want_range(0, s.meta.total_len);
+        s.tick(Instant::now(), true);
+        seed(&mut s, 1);
+        for _ in 0..100 {
+            for r in s.fill(1, Instant::now()) {
+                if let Some((piece, _)) = deliver(&mut s, 1, r).completed {
+                    s.on_verified(piece, PieceCheck::Valid(None));
+                }
+            }
+            assert!(budget.used() <= 4 * piece);
+        }
+        assert_eq!(s.stats().have_pieces, 20, "every piece downloaded");
+        assert_eq!(budget.used(), 3 * piece, "only the stalled pieces are held");
     }
 
     #[test]
