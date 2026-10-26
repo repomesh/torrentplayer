@@ -269,10 +269,11 @@ impl Conversion {
         let (len, bytes) = init;
         let mime = torrentplayer_media::mse_type(&bytes[..len])
             .ok_or_else(|| ConversionError::Codec(log.tail()))?;
+        let duration = log.duration();
         Ok(Self {
-            output: Output::new(bytes, stdout, child),
+            output: Output::new(bytes, stdout, child, log),
             mime,
-            duration: log.duration(),
+            duration,
         })
     }
 }
@@ -453,10 +454,12 @@ fn redact(line: &str) -> String {
 struct Output(Mutex<Option<OutputReader>>);
 
 impl Output {
-    fn new(read: Vec<u8>, stdout: ChildStdout, child: Child) -> Self {
+    fn new(read: Vec<u8>, stdout: ChildStdout, child: Child, log: Arc<Log>) -> Self {
         Self(Mutex::new(Some(OutputReader {
             reader: io::Cursor::new(read).chain(stdout),
             _child: child,
+            log,
+            ended: false,
         })))
     }
 }
@@ -479,6 +482,8 @@ impl LiveSource for Output {
 struct OutputReader {
     reader: tokio::io::Chain<io::Cursor<Vec<u8>>, ChildStdout>,
     _child: Child,
+    log: Arc<Log>,
+    ended: bool,
 }
 
 impl AsyncRead for OutputReader {
@@ -487,7 +492,19 @@ impl AsyncRead for OutputReader {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.reader).poll_read(cx, buf)
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut self.reader).poll_read(cx, buf);
+        let ended = match &poll {
+            Poll::Ready(Ok(())) => buf.filled().len() == before && buf.remaining() > 0,
+            Poll::Ready(Err(_)) => true,
+            Poll::Pending => false,
+        };
+        if ended && !std::mem::replace(&mut self.ended, true) {
+            // FFmpeg finished, or stopped early (the player then continues from there): its
+            // last words say which.
+            tracing::info!(log = %self.log.tail(), "the audio conversion ended");
+        }
+        poll
     }
 }
 

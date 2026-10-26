@@ -124,6 +124,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Audio conversion retries temporary startup and stream-read failures twice before falling back
   to silent playback. Seeking again cancels a pending retry. When large videos fill the media
   buffer after backward seeks, distant future segments are evicted before retrying the append.
+- High-bitrate videos with Dolby or DTS audio, such as 4K WEB-DLs at about 27 Mbit/s, no longer
+  lose their sound after the first seconds or minutes of playback ("The audio could not be
+  converted"). The player buffered a minute of converted video ahead, more than the webview's 150
+  MB media buffer holds at that bitrate, and gave up when an append was refused. It now buffers
+  fewer seconds of high-bitrate video and, when the buffer is full anyway, waits for playback.
 - Playing files always have a visible queue entry. The active row offers Pause/Resume, Stop,
   and Stop & remove; removing it saves progress and stops playback, and Undo restores the
   entry without autoplay. File lists also allow queued videos to be removed.

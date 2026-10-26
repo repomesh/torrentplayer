@@ -7,22 +7,34 @@
  * The backend converts the audio to AAC from a given position and serves fragmented MP4 that
  * keeps the video's own timestamps. This feeds it to the video element through Media Source
  * Extensions, so the seek bar, duration, and subtitles work as usual. Reading pauses once a
- * minute is buffered ahead, which also pauses the conversion. After a seek, data is next needed
- * where the buffered run at the playhead ends; a new conversion starts there unless the running
- * one will deliver it soon (see {@link planSeek}). A conversion that stops before the end, such
- * as when FFmpeg fails, is continued from where it stopped.
+ * minute is buffered ahead (less for high-bitrate video, see {@link bufferLimits}), which also
+ * pauses the conversion. After a seek, data is next needed where the buffered run at the playhead
+ * ends; a new conversion starts there unless the running one will deliver it soon (see
+ * {@link planSeek}). A conversion that stops before the end, such as when FFmpeg fails, is
+ * continued from where it stopped.
  */
 
 import type { ConvertedStream } from './bindings/ConvertedStream';
 
 export type { ConvertedStream };
 
-/** Reading pauses with this many seconds buffered ahead of the playhead... */
+/** Reading pauses with at most this many seconds buffered ahead of the playhead... */
 export const AHEAD_MAX_SECS = 60;
-/** ...and resumes below this. */
-export const AHEAD_RESUME_SECS = 40;
-/** Seconds kept behind the playhead; older data is removed to stay within the buffer quota. */
+/** ...and resumes below this share of the limit. */
+const AHEAD_RESUME_SHARE = 2 / 3;
+/** At most this many seconds are kept behind the playhead; older data is removed. */
 export const BEHIND_KEEP_SECS = 30;
+/**
+ * Bytes of converted video kept buffered. Chromium refuses appends beyond about 150 MB per source
+ * buffer (`QuotaExceededError`), which a 4K stream at 27 Mbit/s fills in 45 seconds, so such
+ * video is buffered for fewer seconds than {@link AHEAD_MAX_SECS}.
+ */
+export const BUFFER_BUDGET_BYTES = 96 * 1024 * 1024;
+/** Look-ahead and look-behind kept however high the bitrate. */
+const MIN_AHEAD_SECS = 10;
+const MIN_BEHIND_SECS = 4;
+/** Media seconds a conversion must deliver before its bitrate counts. */
+const RATE_AFTER_SECS = 2;
 /** A seek at most this far past what the running conversion has delivered waits for it. */
 export const REACH_SECS = 3;
 /** How often a paused reader checks whether to resume. */
@@ -30,6 +42,31 @@ const ROOM_POLL_MS = 500;
 /** Retry temporary conversion/read failures without abandoning audio on the first stall. */
 const MAX_RETRIES = 2;
 const RETRY_DELAY_MS = 1000;
+
+/** How much to buffer ahead of and keep behind the playhead, in seconds. */
+export interface BufferLimits {
+  /** Reading pauses with this much buffered ahead... */
+  aheadMax: number;
+  /** ...and resumes below this. */
+  aheadResume: number;
+  /** Data further behind the playhead is removed. */
+  behindKeep: number;
+}
+
+/**
+ * The buffer limits for converted media of `bytesPerSec` (0 while unknown), keeping what is
+ * buffered within `budget` bytes: a quarter of it behind the playhead, the rest ahead.
+ */
+export function bufferLimits(bytesPerSec: number, budget = BUFFER_BUDGET_BYTES): BufferLimits {
+  const fits = bytesPerSec > 0 ? budget / bytesPerSec : Number.POSITIVE_INFINITY;
+  const behindKeep = clamp(fits / 4, MIN_BEHIND_SECS, BEHIND_KEEP_SECS);
+  const aheadMax = clamp(fits - behindKeep, MIN_AHEAD_SECS, AHEAD_MAX_SECS);
+  return { aheadMax, aheadResume: aheadMax * AHEAD_RESUME_SHARE, behindKeep };
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max);
+}
 
 /** Seconds buffered from `time` onward in the range that contains it (0 if none does). */
 export function bufferedAhead(ranges: TimeRanges, time: number): number {
@@ -98,6 +135,10 @@ export class ConvertedPlayback {
   // Bumped by every new conversion and by `destroy`, which ends older readers.
   private generation = 0;
   private running: { start: number; end: number } | null = null;
+  /** The converted media's bitrate as measured so far (0 until known). */
+  private bytesPerSec = 0;
+  /** Lowered when the webview's buffer quota turns out smaller than {@link BUFFER_BUDGET_BYTES}. */
+  private budget = BUFFER_BUDGET_BYTES;
   private destroyed = false;
   private stopOpening: (() => void) | null = null;
 
@@ -220,6 +261,7 @@ export class ConvertedPlayback {
         return;
       }
       this.reader = reader;
+      let received = 0;
       for (;;) {
         await this.roomAhead(generation);
         if (!this.current(generation)) {
@@ -260,6 +302,10 @@ export class ConvertedPlayback {
           this.running.end,
           reachedFrom(buffer.buffered, this.running.end),
         );
+        received += value.byteLength;
+        if (this.running.end - start >= RATE_AFTER_SECS) {
+          this.bytesPerSec = received / (this.running.end - start);
+        }
         if (!ready && this.video.readyState >= HTMLMediaElement.HAVE_METADATA) {
           ready = true;
           if (start > 0) {
@@ -309,6 +355,11 @@ export class ConvertedPlayback {
     return buffer;
   }
 
+  /** The buffer limits for the bitrate measured so far. */
+  private limits(): BufferLimits {
+    return bufferLimits(this.bytesPerSec, this.budget);
+  }
+
   /**
    * Appends `data`, first removing old data behind the playhead. Returns false, without
    * appending, once the conversion `generation` has been replaced: a newer one may have reset
@@ -320,25 +371,46 @@ export class ConvertedPlayback {
     generation: number,
   ): Promise<boolean> {
     await this.trimBehind(buffer);
-    if (!this.current(generation)) {
-      return false;
-    }
-    try {
-      buffer.appendBuffer(data);
-    } catch (reason: unknown) {
-      if (!(reason instanceof DOMException && reason.name === 'QuotaExceededError')) {
-        throw reason;
-      }
-      // Backward seeks can leave distant future ranges occupying the quota. Free both sides
-      // of a small playback window; waiting cannot help when playback is stalled for this data.
-      await this.trimForQuota(buffer, generation);
+    for (let attempt = 0; ; attempt++) {
       if (!this.current(generation)) {
         return false;
       }
-      buffer.appendBuffer(data);
+      try {
+        buffer.appendBuffer(data);
+        break;
+      } catch (reason: unknown) {
+        if (!(reason instanceof DOMException && reason.name === 'QuotaExceededError')) {
+          throw reason;
+        }
+        this.shrinkBudget(buffer.buffered);
+        if (attempt > 0 && bufferedAhead(buffer.buffered, this.video.currentTime) < 1) {
+          // Nothing is left to free; waiting cannot help when playback is stalled for this data.
+          throw reason;
+        }
+        if (attempt > 0) {
+          // The buffer is full of video still to be played, as when a high bitrate fills the
+          // quota before the look-ahead limit: wait for playback to use some of it up.
+          await sleep(ROOM_POLL_MS);
+        }
+        // Backward seeks can leave distant future ranges occupying the quota. Free both sides
+        // of a small playback window.
+        await this.trimForQuota(buffer, generation);
+      }
     }
     await idle(buffer);
     return this.current(generation);
+  }
+
+  /** Keeps later buffering below what the webview just refused to exceed. */
+  private shrinkBudget(ranges: TimeRanges): void {
+    let seconds = 0;
+    for (let i = 0; i < ranges.length; i++) {
+      seconds += ranges.end(i) - ranges.start(i);
+    }
+    const held = seconds * this.bytesPerSec;
+    if (held > 0) {
+      this.budget = Math.min(this.budget, held * 0.8);
+    }
   }
 
   private async trimForQuota(buffer: SourceBuffer, generation: number): Promise<void> {
@@ -365,9 +437,9 @@ export class ConvertedPlayback {
     }
   }
 
-  /** Removes data more than {@link BEHIND_KEEP_SECS} behind the playhead. */
+  /** Removes data further behind the playhead than the limits keep. */
   private async trimBehind(buffer: SourceBuffer): Promise<void> {
-    const until = this.video.currentTime - BEHIND_KEEP_SECS;
+    const until = this.video.currentTime - this.limits().behindKeep;
     const ranges = buffer.buffered;
     if (until > 0 && ranges.length > 0 && ranges.start(0) < until) {
       await idle(buffer);
@@ -381,13 +453,13 @@ export class ConvertedPlayback {
     const buffer = this.buffer;
     if (
       buffer === null ||
-      bufferedAhead(buffer.buffered, this.video.currentTime) < AHEAD_MAX_SECS
+      bufferedAhead(buffer.buffered, this.video.currentTime) < this.limits().aheadMax
     ) {
       return;
     }
     while (
       this.current(generation) &&
-      bufferedAhead(buffer.buffered, this.video.currentTime) >= AHEAD_RESUME_SECS
+      bufferedAhead(buffer.buffered, this.video.currentTime) >= this.limits().aheadResume
     ) {
       await sleep(ROOM_POLL_MS);
     }
