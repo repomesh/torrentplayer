@@ -138,8 +138,10 @@ sources, details, and where other tools are the better fit.
 
 ### A player for video and audio
 
-- A clean, cinematic player with keyboard controls (Space, ←/→ to skip, F for fullscreen, M to
-  mute, C for captions), playback speed, and Shift+N to play the next item in the queue.
+- A clean, cinematic player with keyboard controls (Space, ←/→ or the on-screen buttons to skip
+  10 seconds, F for fullscreen, M to mute, C for captions, Q for the queue), playback speed, and
+  Shift+N to play the next item in the queue. When a video ends, a card offers Play next or
+  Replay; nothing plays on its own.
 - **Music, podcasts, and audiobooks** (MP3, FLAC, AAC/M4A/M4B, Ogg, Opus, WAV) stream and skip
   just like video, with a "now playing" view; an album starts at its first track and its tracks
   queue in order.
@@ -159,8 +161,8 @@ sources, details, and where other tools are the better fit.
 - **Courses, not file lists.** Lectures are natural-sorted ("Lecture 2" before "Lecture 10"), a
   torrent's videos appear as one course in the queue, and a file explorer previews pictures,
   text, and subtitles inside a torrent before you play anything.
-- **Resume across restarts.** Watch progress is saved locally, shown in the queue and Library,
-  and reopening an unfinished video offers to continue from its last position or start over.
+- **Resume across restarts.** Watch progress is saved locally and shown in the queue and Library.
+  Reopening an unfinished video continues from its last position, with a **Start over** button.
 
 ### Network and privacy controls
 
@@ -177,7 +179,7 @@ sources, details, and where other tools are the better fit.
   upload speed of every torrent, and your public IPv4 and IPv6 addresses as the
   internet sees them, through the current mode (optional; see [Privacy](#privacy)).
 - **Bandwidth limits** for download and upload, applied to the whole app instantly.
-- **Seeding you control:** pause or remove a torrent to stop sharing it, and a peer cap per
+- **Sharing you control:** pause or remove a torrent to stop sharing it, and a peer cap per
   torrent.
 
 ## Performance
@@ -218,7 +220,7 @@ phone home. Its only network traffic is:
 - **The public-IP check** in the status bar, which asks [icanhazip.com](https://icanhazip.com)
   (`ipv4.` and `ipv6.icanhazip.com`) for the addresses it sees: at start-up, when the connection
   changes, and every 10 minutes. It carries no identifiers and can be turned off in Settings →
-  Network.
+  Network & VPN.
 
 All of it goes through your selected VPN, WireGuard tunnel, or proxy, and nothing is sent while
 the kill switch is engaged. See the [threat model](docs/threat-model.md) and
@@ -303,7 +305,7 @@ Working today: the streaming engine (for `.torrent` files and magnet links), pla
 queue with background downloads, the WireGuard and SOCKS5 modes with a kill switch, and
 bandwidth limits. Next:
 
-- [x] Seeding controls: pause sharing per video, torrent, or queue; peer limits
+- [x] Sharing controls: pause per video, torrent, or queue; peer limits
 - [x] Cache size limit and automatic clean-up of old downloads
 - [x] Resume where you left off
 - [x] Dolby and DTS audio (converted as it plays)
@@ -333,7 +335,7 @@ connection. If you use your own VPN app (Direct mode), turn on that app's kill s
 [network modes](docs/network.md).
 
 **Where are videos stored?** In `TorrentPlayer` inside your Downloads folder, unless you choose
-another folder in Settings → Storage, which shows its size and limit and safely clears finished,
+another folder in Settings → Downloads & storage, which shows its size and limit and safely clears finished,
 unqueued downloads (see
 [configuration](docs/configuration.md)).
 
