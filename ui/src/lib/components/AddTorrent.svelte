@@ -104,6 +104,9 @@
   let filters = $state<SearchFilters>({ ...DEFAULT_FILTERS });
   let preload = $state<PreloadStatusDto | null>(null);
   let preloadTimer: ReturnType<typeof setTimeout> | undefined;
+  // Bumped when polling stops, so a check still waiting for its answer does not start a second
+  // loop beside the new one.
+  let preloadRun = 0;
   let nextId = 1;
 
   // How often the preload of the best pick is checked, and how many checks may pass after the
@@ -196,7 +199,7 @@
       }
     });
     if (hash !== null) {
-      void followPreload(hash, running);
+      void followPreload(hash, running, preloadRun);
     }
     return stopPreloadPolling;
   });
@@ -305,6 +308,7 @@
   });
 
   function stopPreloadPolling(): void {
+    preloadRun += 1;
     clearTimeout(preloadTimer);
     preloadTimer = undefined;
   }
@@ -313,21 +317,26 @@
    * Follows the backend's preload of the best pick until it finishes; while the search runs
    * (`running`), keeps checking until the preload starts.
    */
-  async function followPreload(infoHash: string, running: boolean, checks = 0): Promise<void> {
+  async function followPreload(
+    infoHash: string,
+    running: boolean,
+    run: number,
+    checks = 0,
+  ): Promise<void> {
     let status: PreloadStatusDto | null;
     try {
       status = await preloadStatus();
     } catch {
       return;
     }
-    if (bestHash !== infoHash) {
+    if (run !== preloadRun || bestHash !== infoHash) {
       return;
     }
     const ours = status !== null && status.infoHash === infoHash;
     preload = ours ? status : null;
     if (ours ? preloadActive(status) : running || checks < PRELOAD_START_CHECKS) {
       preloadTimer = setTimeout(() => {
-        void followPreload(infoHash, running, checks + 1);
+        void followPreload(infoHash, running, run, checks + 1);
       }, PRELOAD_POLL_MS);
     }
   }

@@ -1638,6 +1638,11 @@
           void play(torrent, file, { queue: 'first' });
         }}
         onClose={() => {
+          // Closing the dialog on unmount fires `close` late: after Play it must not cancel the
+          // playback Play just started.
+          if (chooser === null) {
+            return;
+          }
           selection += 1;
           chooser = null;
         }}

@@ -114,6 +114,12 @@
     confirmClear = false;
   }
 
+  /** After a menu action, focus returns to the button that opened the menu. */
+  function chose(): void {
+    closeMenu();
+    menuButton?.focus();
+  }
+
   // A click outside the menu closes it.
   $effect(() => {
     if (!menuOpen) {
@@ -214,7 +220,7 @@
                 disabled={queue.items.length < 2}
                 onclick={() => {
                   onSort(option.key);
-                  closeMenu();
+                  chose();
                 }}>{option.label}</button
               >
             {/each}
@@ -231,7 +237,7 @@
                 queue.items.map((i) => i.id),
                 anyRunning,
               );
-              closeMenu();
+              chose();
             }}>{anyRunning ? 'Pause all (download and upload)' : 'Resume all'}</button
           >
         {/if}
@@ -240,7 +246,7 @@
           disabled={!queue.items.some((item) => item.played && item.id !== playingId)}
           onclick={() => {
             onClearPlayed();
-            closeMenu();
+            chose();
           }}>Clear played</button
         >
         {#if confirmClear}
@@ -251,7 +257,7 @@
               class="danger"
               onclick={() => {
                 onClear();
-                closeMenu();
+                chose();
               }}>Clear</button
             >
             <button

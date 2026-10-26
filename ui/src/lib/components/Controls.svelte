@@ -78,6 +78,11 @@
 
   const groups = $derived(subtitleGroups(subtitles));
   const note = $derived(subtitleMenuNote(subtitles));
+  // Unavailable skips stay focusable (aria-disabled, not disabled): reaching the start or end
+  // must not drop keyboard focus to the page.
+  const seekable = $derived(Number.isFinite(duration) && duration > 0);
+  const canRewind = $derived(seekable && currentTime > 0);
+  const canForward = $derived(seekable && currentTime < duration);
 
   function chooseSubtitle(id: string | null): void {
     subtitleMenuOpen = false;
@@ -128,9 +133,11 @@
       class="icon skip"
       aria-label="Rewind 10 seconds"
       title="Rewind 10 seconds (←)"
-      disabled={!Number.isFinite(duration) || duration <= 0 || currentTime <= 0}
+      aria-disabled={!canRewind}
       onclick={() => {
-        onSeekBy(-10);
+        if (canRewind) {
+          onSeekBy(-10);
+        }
       }}
     >
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -143,9 +150,11 @@
       class="icon skip"
       aria-label="Forward 10 seconds"
       title="Forward 10 seconds (→)"
-      disabled={!Number.isFinite(duration) || duration <= 0 || currentTime >= duration}
+      aria-disabled={!canForward}
       onclick={() => {
-        onSeekBy(10);
+        if (canForward) {
+          onSeekBy(10);
+        }
       }}
     >
       <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -419,7 +428,8 @@
     stroke-linejoin: round;
   }
 
-  .icon:disabled {
+  .icon:disabled,
+  .icon[aria-disabled='true'] {
     cursor: default;
     opacity: 0.35;
   }
@@ -435,7 +445,7 @@
     font-weight: 600;
   }
 
-  .icon:hover:not(:disabled),
+  .icon:hover:not(:disabled, [aria-disabled='true']),
   .text:hover {
     background: rgb(255 255 255 / 10%);
   }

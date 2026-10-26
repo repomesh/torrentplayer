@@ -129,9 +129,20 @@
       .catch(() => undefined);
   }
 
+  // Back (or Escape) waits for the last save; a second press meanwhile must not leave twice.
+  let leaving = $state(false);
+
   async function leave(): Promise<void> {
-    await saver.flush();
-    onBack();
+    if (leaving) {
+      return;
+    }
+    leaving = true;
+    try {
+      await saver.flush();
+      onBack();
+    } finally {
+      leaving = false;
+    }
   }
 
   function select(id: SectionId): void {
@@ -181,7 +192,9 @@
 
 <div class="page">
   <header>
-    <button type="button" class="back" onclick={() => void leave()}>← {backLabel}</button>
+    <button type="button" class="back" disabled={leaving} onclick={() => void leave()}
+      >← {backLabel}</button
+    >
     <h2>Settings</h2>
   </header>
   <div class="layout">

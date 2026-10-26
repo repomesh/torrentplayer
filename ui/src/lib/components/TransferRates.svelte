@@ -7,29 +7,27 @@
   import { onMount } from 'svelte';
   import { describeRates, type LinkUse } from '../downloads';
   import { linkUse } from '../ipc';
+  import { pollWhileVisible } from '../poll';
 
-  /** How often the totals are read. */
+  /** How often the totals are read while the window is on screen. */
   const REFRESH_MS = 2000;
 
   let link = $state<LinkUse | null>(null);
 
   onMount(() => {
     let stopped = false;
-    const refresh = (): void => {
-      linkUse().then(
-        (totals) => {
+    const stop = pollWhileVisible(
+      () =>
+        linkUse().then((totals) => {
           if (!stopped) {
             link = totals;
           }
-        },
-        () => undefined,
-      );
-    };
-    refresh();
-    const timer = setInterval(refresh, REFRESH_MS);
+        }),
+      REFRESH_MS,
+    );
     return () => {
       stopped = true;
-      clearInterval(timer);
+      stop();
     };
   });
 </script>

@@ -121,6 +121,18 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Play in a queue item's "Choose files…" dialog starts the file again; closing the dialog
+  cancelled the playback it had just started.
+- "Start over" pressed before a video's length is known no longer jumps back to the saved
+  position once it is.
+- Pressing Back (or Esc) twice in Settings while a change is still saving no longer leaves twice.
+- Accessibility: focus returns to the queue's options button after choosing a menu action, the
+  10-second skip buttons keep focus at the start or end of a video, Esc on the end card leaves
+  the player, and screen readers hear a short line for the file preview instead of its full
+  text.
+- The player and the status bar no longer poll the backend every second while the window is
+  minimized (or, for the playback position, while paused), and a slow answer can no longer
+  replace a newer one.
 - Audio conversion retries temporary startup and stream-read failures twice before falling back
   to silent playback. Seeking again cancels a pending retry. When large videos fill the media
   buffer after backward seeks, distant future segments are evicted before retrying the append.
