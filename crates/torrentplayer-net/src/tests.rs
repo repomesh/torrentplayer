@@ -1103,3 +1103,67 @@ async fn a_blocked_protected_mode_does_not_listen() {
     assert!(!accepts_on_loopback(port).await);
     net.shutdown();
 }
+
+/// Waits until [`Network::reachable_port`] is `want`.
+async fn wait_for_reachable(net: &Network, want: Option<u16>) {
+    let mut rx = net.status_changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while net.reachable_port() != want {
+            let _ = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("reachable port never became {want:?}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_port_is_reachable_only_while_the_router_confirms_a_public_mapping() {
+    use crate::test_util::TestGateway;
+    let public = std::net::IpAddr::from([93, 184, 216, 34]);
+    let gateway = TestGateway::start(public).await.unwrap();
+    let net = Network::start(
+        NetworkConfig::default(),
+        NetworkOptions {
+            upnp_lease: Duration::from_secs(1),
+            upnp_control_url: Some(gateway.control_url()),
+            ..fast_options()
+        },
+    )
+    .await
+    .unwrap();
+    let _peers = net.incoming_peers();
+    let port = free_port();
+    // Listening without a mapping: not reachable.
+    net.set_incoming(incoming(port));
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(net.reachable_port(), None);
+    assert!(gateway.mapped_ports().is_empty(), "UPnP is off");
+
+    // The router maps the port.
+    net.set_incoming(IncomingConfig {
+        upnp: true,
+        ..incoming(port)
+    });
+    wait_for_reachable(&net, Some(port)).await;
+    assert!(gateway.mapped_ports().contains(&port));
+
+    // The router stops renewing it: lost once the lease ends.
+    gateway.set_external(None);
+    wait_for_reachable(&net, None).await;
+    // Back again.
+    gateway.set_external(Some(public));
+    wait_for_reachable(&net, Some(port)).await;
+
+    // A mapping on a router behind another NAT does not count.
+    gateway.set_external(Some(std::net::IpAddr::from([100, 64, 0, 1])));
+    wait_for_reachable(&net, None).await;
+    gateway.set_external(Some(public));
+    wait_for_reachable(&net, Some(port)).await;
+
+    // Closing the listener forgets the mapping at once.
+    net.set_incoming(IncomingConfig::default());
+    wait_for_incoming(&net, |s| *s == IncomingStatus::Off).await;
+    assert_eq!(net.reachable_port(), None);
+    net.shutdown();
+}

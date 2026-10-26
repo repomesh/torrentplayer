@@ -17,10 +17,13 @@
 //! for each new epoch. Every accepted connection carries a [`Lease`] for its epoch, exactly like
 //! outgoing ones, so it closes when the mode changes or the kill switch engages. Accepted
 //! connections go to a single consumer, the torrent engine ([`Network::incoming_peers`]).
+//!
+//! Listening does not mean peers can connect: a router without a port forward drops them.
+//! [`Network::reachable_port`] tells only while the router confirms a UPnP mapping.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use socket2::{Domain, Protocol, Socket, Type};
@@ -46,6 +49,14 @@ const QUEUE: usize = 64;
 const RETRY_AFTER: Duration = Duration::from_secs(30);
 /// Pause after a failed `accept` (for example, out of file descriptors).
 const ACCEPT_BACKOFF: Duration = Duration::from_millis(200);
+/// How long UPnP discovery waits for routers to answer (they may wait up to 3 seconds).
+const UPNP_DISCOVER_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often routers are looked for again while no mapping works.
+const UPNP_DISCOVER_EVERY: Duration = Duration::from_secs(60);
+/// Time limit for one request to the router.
+const UPNP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// The UPnP service that maps ports.
+const WAN_IP_CONNECTION: &str = "urn:schemas-upnp-org:service:WANIPConnection:1";
 
 /// Whether and where to accept incoming peer connections.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -146,6 +157,11 @@ pub(crate) struct IncomingState {
     consumer_id: u64,
     external: Option<ExternalListener>,
     pub(crate) status: IncomingStatus,
+    /// The port the router confirms it forwards (UPnP), with the id of the [`forward_port`]
+    /// task that keeps the mapping.
+    mapped: Option<(u64, u16)>,
+    /// Increases with each [`forward_port`] task.
+    mapping_id: u64,
 }
 
 impl IncomingState {
@@ -277,6 +293,22 @@ impl Network {
             return None;
         }
         st.incoming.port()
+    }
+
+    /// The listening port that peers on the internet can reach, as far as TorrentPlayer can
+    /// tell: only while the router confirms a UPnP mapping for it and its own address is public
+    /// (direct mode). `None` otherwise: behind a router without UPnP, in WireGuard mode (nothing
+    /// says whether the VPN server forwards the port), and with a port forwarded by hand, which
+    /// cannot be seen. [`Network::status_changes`] fires when this may have changed.
+    #[must_use]
+    pub fn reachable_port(&self) -> Option<u16> {
+        let st = self.inner.state();
+        match (&st.incoming.status, st.incoming.mapped) {
+            (IncomingStatus::Listening { port, .. }, Some((_, mapped))) if *port == mapped => {
+                Some(mapped)
+            }
+            _ => None,
+        }
     }
 
     /// Takes the accepted incoming connections. There is one consumer at a time: a new call
@@ -516,8 +548,15 @@ async fn open(
             }
         }
     }
-    if key.upnp && matches!(route, Route::Direct) && !net.options.loopback_only {
-        tokio::spawn(forward_port(port, cancel.child_token()));
+    if key.upnp
+        && matches!(route, Route::Direct)
+        && (!net.options.loopback_only || net.options.upnp_control_url.is_some())
+    {
+        tokio::spawn(forward_port(
+            Arc::downgrade(net),
+            port,
+            cancel.child_token(),
+        ));
     }
     Ok((port, addresses, Listening { cancel, accepting }))
 }
@@ -657,21 +696,311 @@ async fn accept_tunnel(
     }
 }
 
-/// Keeps a UPnP mapping for `port` on the router (direct mode only) until cancelled. The
-/// mapping's lease is renewed every 30 seconds and lapses within a minute after it stops.
-async fn forward_port(port: u16, cancel: CancellationToken) {
-    let forwarder = match librqbit_upnp::UpnpPortForwarder::new(vec![port], None, None) {
-        Ok(forwarder) => forwarder,
+/// Keeps a UPnP mapping for `port` on the router (direct mode only) until cancelled, and
+/// records while the router confirms it ([`Network::reachable_port`]). The mapping is leased
+/// for [`NetworkOptions::upnp_lease`](crate::NetworkOptions) and renewed at half of it, so it
+/// lapses within a lease after it stops, and counts as lost once a lease passes without a
+/// renewal. It counts only while the router's own address is public: behind a second NAT
+/// (carrier-grade NAT, or a router behind another one) peers cannot reach the port either.
+async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
+    let Some((lease, fixed, id)) = net.upgrade().map(|net| {
+        let mut st = net.state();
+        st.incoming.mapping_id += 1;
+        let id = st.incoming.mapping_id;
+        drop(st);
+        (
+            net.options.upnp_lease,
+            net.options.upnp_control_url.clone(),
+            id,
+        )
+    }) else {
+        return;
+    };
+    let mapping = Mapping { net, id, port };
+    let client = match reqwest::Client::builder()
+        .no_proxy()
+        .timeout(UPNP_REQUEST_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
         Err(error) => {
-            tracing::warn!(target: "torrentplayer_net", error = %format!("{error:#}"), "UPnP port mapping failed");
+            tracing::warn!(target: "torrentplayer_net", %error, "UPnP port mapping failed");
             return;
         }
     };
     tracing::info!(target: "torrentplayer_net", port, "requesting a UPnP port mapping");
-    tokio::select! {
-        () = cancel.cancelled() => {}
-        _ = forwarder.run_forever() => {}
+    let mut gateways = Vec::new();
+    let mut discovered: Option<Instant> = None;
+    // The public address of the last confirmed mapping, and when that mapping lapses.
+    let mut confirmed: Option<(IpAddr, Instant)> = None;
+    let mut last_external = None;
+    loop {
+        let alive = confirmed.is_some_and(|(_, until)| until > Instant::now());
+        if !alive && discovered.is_none_or(|at| at.elapsed() >= UPNP_DISCOVER_EVERY) {
+            discovered = Some(Instant::now());
+            gateways = match &fixed {
+                Some(url) => gateway_at(url).into_iter().collect(),
+                None => discover_gateways().await,
+            };
+        }
+        let mut external = None;
+        for gateway in &gateways {
+            match gateway.map(&client, port, lease).await {
+                Ok(ip) => {
+                    external = Some(ip);
+                    break;
+                }
+                Err(error) => {
+                    tracing::debug!(target: "torrentplayer_net", url = %gateway.control_url, %error, "UPnP port mapping failed");
+                }
+            }
+        }
+        if let Some(ip) = external
+            && last_external != external
+            && !crate::addr::is_public_ip(ip)
+        {
+            tracing::info!(target: "torrentplayer_net", port, %ip, "the router maps the port, but its address is not public (another NAT in front of it), so peers cannot reach it");
+        }
+        if external.is_some() {
+            last_external = external;
+        }
+        let now = Instant::now();
+        match external {
+            Some(ip) if crate::addr::is_public_ip(ip) => confirmed = Some((ip, now + lease)),
+            Some(_) => confirmed = None,
+            // A failed renewal: the last mapping holds until its lease ends.
+            None => {}
+        }
+        mapping.report(
+            confirmed
+                .filter(|(_, until)| *until > now)
+                .map(|(ip, _)| ip),
+        );
+        tokio::select! {
+            () = cancel.cancelled() => return,
+            () = tokio::time::sleep(lease / 2) => {}
+        }
     }
+}
+
+/// The mapping kept by one [`forward_port`] task, forgotten when the task ends.
+struct Mapping {
+    net: Weak<Inner>,
+    id: u64,
+    port: u16,
+}
+
+impl Mapping {
+    /// Records whether the router confirms the mapping, with its public address if it does.
+    fn report(&self, external: Option<IpAddr>) {
+        let Some(net) = self.net.upgrade() else {
+            return;
+        };
+        let mut st = net.state();
+        let recorded = st.incoming.mapped.is_some_and(|(id, _)| id == self.id);
+        match external {
+            Some(ip) if !recorded => {
+                st.incoming.mapped = Some((self.id, self.port));
+                st.log(
+                    EventLevel::Info,
+                    format!(
+                        "The router forwards port {} to TorrentPlayer (UPnP, public address {ip})",
+                        self.port
+                    ),
+                );
+            }
+            None if recorded => {
+                st.incoming.mapped = None;
+                st.log(
+                    EventLevel::Info,
+                    format!("The router no longer forwards port {} (UPnP)", self.port),
+                );
+            }
+            _ => return,
+        }
+        drop(st);
+        net.status_changed();
+    }
+}
+
+impl Drop for Mapping {
+    fn drop(&mut self) {
+        let Some(net) = self.net.upgrade() else {
+            return;
+        };
+        let mut st = net.state();
+        if st.incoming.mapped.is_some_and(|(id, _)| id == self.id) {
+            st.incoming.mapped = None;
+            drop(st);
+            tracing::debug!(target: "torrentplayer_net", port = self.port, "UPnP port mapping stopped");
+            net.status_changed();
+        }
+    }
+}
+
+/// A router's UPnP `WANIPConnection` service, and this computer's address towards it.
+struct Gateway {
+    control_url: url::Url,
+    local_ip: IpAddr,
+}
+
+impl Gateway {
+    /// Maps TCP `port` on the router to the same port here for `lease`, and returns the
+    /// router's own (external) address.
+    async fn map(
+        &self,
+        client: &reqwest::Client,
+        port: u16,
+        lease: Duration,
+    ) -> Result<IpAddr, String> {
+        let arguments = format!(
+            "<NewRemoteHost></NewRemoteHost><NewExternalPort>{port}</NewExternalPort>\
+             <NewProtocol>TCP</NewProtocol><NewInternalPort>{port}</NewInternalPort>\
+             <NewInternalClient>{}</NewInternalClient><NewEnabled>1</NewEnabled>\
+             <NewPortMappingDescription>TorrentPlayer</NewPortMappingDescription>\
+             <NewLeaseDuration>{}</NewLeaseDuration>",
+            self.local_ip,
+            lease.as_secs().max(1)
+        );
+        self.call(client, "AddPortMapping", &arguments).await?;
+        let reply = self.call(client, "GetExternalIPAddress", "").await?;
+        xml_value(&reply, "NewExternalIPAddress")
+            .and_then(|ip| ip.trim().parse().ok())
+            .ok_or_else(|| "the router did not say its external address".to_owned())
+    }
+
+    /// Calls `action` on the service (SOAP) and returns the reply.
+    async fn call(
+        &self,
+        client: &reqwest::Client,
+        action: &str,
+        arguments: &str,
+    ) -> Result<String, String> {
+        let body = format!(
+            "<?xml version=\"1.0\"?><s:Envelope \
+             xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" \
+             s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\"><s:Body>\
+             <u:{action} xmlns:u=\"{WAN_IP_CONNECTION}\">{arguments}</u:{action}>\
+             </s:Body></s:Envelope>"
+        );
+        let response = client
+            .post(self.control_url.clone())
+            .header("Content-Type", "text/xml; charset=\"utf-8\"")
+            .header("SOAPAction", format!("\"{WAN_IP_CONNECTION}#{action}\""))
+            .body(body)
+            .send()
+            .await
+            .map_err(|error| format!("{action}: {error}"))?;
+        let status = response.status();
+        let reply = response
+            .text()
+            .await
+            .map_err(|error| format!("{action}: {error}"))?;
+        if !status.is_success() {
+            let detail = xml_value(&reply, "errorDescription")
+                .map(|d| format!(" ({d})"))
+                .unwrap_or_default();
+            return Err(format!("{action}: HTTP {status}{detail}"));
+        }
+        Ok(reply)
+    }
+}
+
+/// The service at `control_url`, given rather than discovered (tests).
+fn gateway_at(control_url: &str) -> Option<Gateway> {
+    let control_url = url::Url::parse(control_url).ok()?;
+    let router = control_url
+        .socket_addrs(|| Some(80))
+        .ok()?
+        .into_iter()
+        .next()?;
+    Some(Gateway {
+        local_ip: local_ip_towards(router).ok()?,
+        control_url,
+    })
+}
+
+/// Looks for routers with a `WANIPConnection` service on the local network (SSDP). Only
+/// routers on the local network count: a description or control URL pointing anywhere else
+/// is ignored, as anyone on the network can answer the search.
+async fn discover_gateways() -> Vec<Gateway> {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    if let Err(error) = librqbit_upnp::discover_once(
+        &tx,
+        librqbit_upnp::SSDP_SEARCH_WAN_IPCONNECTION_ST,
+        UPNP_DISCOVER_TIMEOUT,
+        None,
+    )
+    .await
+    {
+        tracing::debug!(target: "torrentplayer_net", error = %format!("{error:#}"), "UPnP discovery failed");
+    }
+    drop(tx);
+    let mut gateways: Vec<Gateway> = Vec::new();
+    while let Some(found) = rx.recv().await {
+        if !on_local_network(&found.location) {
+            continue;
+        }
+        let description = match librqbit_upnp::discover_services(found.location.clone()).await {
+            Ok(description) => description,
+            Err(error) => {
+                tracing::debug!(target: "torrentplayer_net", location = %found.location, error = %format!("{error:#}"), "unusable UPnP router");
+                continue;
+            }
+        };
+        let Ok(local_ip) = local_ip_towards(found.received_from) else {
+            continue;
+        };
+        for device in &description.devices {
+            for (_, service) in device.iter_services(tracing::Span::none()) {
+                if service.service_type != WAN_IP_CONNECTION {
+                    continue;
+                }
+                if let Ok(control_url) = found.location.join(&service.control_url)
+                    && on_local_network(&control_url)
+                    && !gateways.iter().any(|g| g.control_url == control_url)
+                {
+                    gateways.push(Gateway {
+                        control_url,
+                        local_ip,
+                    });
+                }
+            }
+        }
+    }
+    tracing::debug!(target: "torrentplayer_net", gateways = gateways.len(), "UPnP discovery");
+    gateways
+}
+
+/// Whether `url` names a host by a local (not public) address.
+fn on_local_network(url: &url::Url) -> bool {
+    match url.host() {
+        Some(url::Host::Ipv4(ip)) => !crate::addr::is_public_ip(IpAddr::V4(ip)),
+        Some(url::Host::Ipv6(ip)) => !crate::addr::is_public_ip(IpAddr::V6(ip)),
+        _ => false,
+    }
+}
+
+/// This computer's address on the route to `addr` (connecting a UDP socket sends nothing).
+fn local_ip_towards(addr: SocketAddr) -> std::io::Result<IpAddr> {
+    if addr.ip().is_loopback() {
+        return Ok(addr.ip());
+    }
+    let any = if addr.is_ipv4() {
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    } else {
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+    };
+    let socket = std::net::UdpSocket::bind((any, 0))?;
+    socket.connect(addr)?;
+    Ok(socket.local_addr()?.ip())
+}
+
+/// The text of the first `<tag>` element in `xml`.
+fn xml_value<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let start = xml.find(&format!("<{tag}>"))? + tag.len() + 2;
+    let end = start + xml[start..].find(&format!("</{tag}>"))?;
+    Some(&xml[start..end])
 }
 
 #[cfg(test)]
