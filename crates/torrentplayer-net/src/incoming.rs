@@ -55,6 +55,8 @@ const UPNP_DISCOVER_TIMEOUT: Duration = Duration::from_secs(5);
 const UPNP_DISCOVER_EVERY: Duration = Duration::from_secs(60);
 /// Time limit for one request to the router.
 const UPNP_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Largest reply accepted from a router (a device description or a SOAP reply).
+const MAX_UPNP_REPLY: usize = 64 * 1024;
 /// The UPnP service that maps ports.
 const WAN_IP_CONNECTION: &str = "urn:schemas-upnp-org:service:WANIPConnection:1";
 
@@ -719,6 +721,7 @@ async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
     let mapping = Mapping { net, id, port };
     let client = match reqwest::Client::builder()
         .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(UPNP_REQUEST_TIMEOUT)
         .build()
     {
@@ -738,22 +741,23 @@ async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
         let alive = confirmed.is_some_and(|(_, until)| until > Instant::now());
         if !alive && discovered.is_none_or(|at| at.elapsed() >= UPNP_DISCOVER_EVERY) {
             discovered = Some(Instant::now());
-            gateways = match &fixed {
-                Some(url) => gateway_at(url).into_iter().collect(),
-                None => discover_gateways().await,
+            gateways = if let Some(url) = &fixed {
+                gateway_at(url).into_iter().collect()
+            } else {
+                // A mode change or a closed listener stops discovery at once.
+                tokio::select! {
+                    () = cancel.cancelled() => return,
+                    gateways = discover_gateways(&client) => gateways,
+                }
             };
         }
-        let mut external = None;
-        for gateway in &gateways {
-            match gateway.map(&client, port, lease).await {
-                Ok(ip) => {
-                    external = Some(ip);
-                    break;
-                }
-                Err(error) => {
-                    tracing::debug!(target: "torrentplayer_net", url = %gateway.control_url, %error, "UPnP port mapping failed");
-                }
-            }
+        let external = tokio::select! {
+            () = cancel.cancelled() => return,
+            external = map_any(&gateways, &client, port, lease) => external,
+        };
+        // Cancelled while the last reply arrived: never record a mapping afterwards.
+        if cancel.is_cancelled() {
+            return;
         }
         if let Some(ip) = external
             && last_external != external
@@ -781,6 +785,24 @@ async fn forward_port(net: Weak<Inner>, port: u16, cancel: CancellationToken) {
             () = tokio::time::sleep(lease / 2) => {}
         }
     }
+}
+
+/// Maps `port` on the first of `gateways` that accepts, and returns its external address.
+async fn map_any(
+    gateways: &[Gateway],
+    client: &reqwest::Client,
+    port: u16,
+    lease: Duration,
+) -> Option<IpAddr> {
+    for gateway in gateways {
+        match gateway.map(client, port, lease).await {
+            Ok(ip) => return Some(ip),
+            Err(error) => {
+                tracing::debug!(target: "torrentplayer_net", url = %gateway.control_url, %error, "UPnP port mapping failed");
+            }
+        }
+    }
+    None
 }
 
 /// The mapping kept by one [`forward_port`] task, forgotten when the task ends.
@@ -892,8 +914,7 @@ impl Gateway {
             .await
             .map_err(|error| format!("{action}: {error}"))?;
         let status = response.status();
-        let reply = response
-            .text()
+        let reply = read_reply(response)
             .await
             .map_err(|error| format!("{action}: {error}"))?;
         if !status.is_success() {
@@ -904,6 +925,18 @@ impl Gateway {
         }
         Ok(reply)
     }
+}
+
+/// A router's reply as text, up to [`MAX_UPNP_REPLY`] bytes.
+async fn read_reply(mut response: reqwest::Response) -> Result<String, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        if body.len() + chunk.len() > MAX_UPNP_REPLY {
+            return Err("the router sent too much data".into());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// The service at `control_url`, given rather than discovered (tests).
@@ -923,7 +956,7 @@ fn gateway_at(control_url: &str) -> Option<Gateway> {
 /// Looks for routers with a `WANIPConnection` service on the local network (SSDP). Only
 /// routers on the local network count: a description or control URL pointing anywhere else
 /// is ignored, as anyone on the network can answer the search.
-async fn discover_gateways() -> Vec<Gateway> {
+async fn discover_gateways(client: &reqwest::Client) -> Vec<Gateway> {
     let (tx, mut rx) = mpsc::unbounded_channel();
     if let Err(error) = librqbit_upnp::discover_once(
         &tx,
@@ -941,35 +974,51 @@ async fn discover_gateways() -> Vec<Gateway> {
         if !on_local_network(&found.location) {
             continue;
         }
-        let description = match librqbit_upnp::discover_services(found.location.clone()).await {
+        let description = match client.get(found.location.clone()).send().await {
+            Ok(response) if response.status().is_success() => read_reply(response).await,
+            Ok(response) => Err(format!("HTTP {}", response.status())),
+            Err(error) => Err(error.to_string()),
+        };
+        let description = match description {
             Ok(description) => description,
             Err(error) => {
-                tracing::debug!(target: "torrentplayer_net", location = %found.location, error = %format!("{error:#}"), "unusable UPnP router");
+                tracing::debug!(target: "torrentplayer_net", location = %found.location, %error, "unusable UPnP router");
                 continue;
             }
         };
         let Ok(local_ip) = local_ip_towards(found.received_from) else {
             continue;
         };
-        for device in &description.devices {
-            for (_, service) in device.iter_services(tracing::Span::none()) {
-                if service.service_type != WAN_IP_CONNECTION {
-                    continue;
-                }
-                if let Ok(control_url) = found.location.join(&service.control_url)
-                    && on_local_network(&control_url)
-                    && !gateways.iter().any(|g| g.control_url == control_url)
-                {
-                    gateways.push(Gateway {
-                        control_url,
-                        local_ip,
-                    });
-                }
+        for control_url in wan_ip_control_urls(&description) {
+            if let Ok(control_url) = found.location.join(control_url)
+                && on_local_network(&control_url)
+                && !gateways.iter().any(|g| g.control_url == control_url)
+            {
+                gateways.push(Gateway {
+                    control_url,
+                    local_ip,
+                });
             }
         }
     }
     tracing::debug!(target: "torrentplayer_net", gateways = gateways.len(), "UPnP discovery");
     gateways
+}
+
+/// The control URLs of the `WANIPConnection` services in a router's device description,
+/// at any depth of its device tree.
+fn wan_ip_control_urls(description: &str) -> Vec<&str> {
+    description
+        .split("<service>")
+        .skip(1)
+        .filter_map(|service| {
+            let service = service.split("</service>").next()?;
+            if xml_value(service, "serviceType")?.trim() != WAN_IP_CONNECTION {
+                return None;
+            }
+            xml_value(service, "controlURL").map(str::trim)
+        })
+        .collect()
 }
 
 /// Whether `url` names a host by a local (not public) address.
@@ -1037,5 +1086,67 @@ mod tests {
         assert_eq!(from, client.local_addr().unwrap());
         // The same port cannot be opened twice.
         assert!(listen(addr).is_err());
+    }
+
+    #[test]
+    fn finds_the_port_mapping_service_anywhere_in_a_device_description() {
+        let description = format!(
+            "<root><device><serviceList><service><serviceType>urn:other</serviceType>\
+             <controlURL>/other</controlURL></service></serviceList><deviceList><device>\
+             <serviceList><service>\n  <serviceType>{WAN_IP_CONNECTION}</serviceType>\n  \
+             <controlURL> /ctl/IPConn </controlURL></service></serviceList></device>\
+             </deviceList></device></root>"
+        );
+        assert_eq!(wan_ip_control_urls(&description), ["/ctl/IPConn"]);
+        assert!(wan_ip_control_urls("<root></root>").is_empty());
+    }
+
+    /// A router on loopback that answers every request with `response`, then closes.
+    async fn router(response: Vec<u8>) -> Gateway {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0; 4096];
+                let _ = stream.read(&mut buf).await;
+                let _ = stream.write_all(&response).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        gateway_at(&format!("http://{addr}/control")).unwrap()
+    }
+
+    fn client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(UPNP_REQUEST_TIMEOUT)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_router_reply_is_capped_and_redirects_are_not_followed() {
+        let body = "x".repeat(MAX_UPNP_REPLY + 1);
+        let huge = router(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes(),
+        )
+        .await;
+        let error = huge.call(&client(), "GetExternalIPAddress", "").await;
+        assert!(error.is_err_and(|e| e.contains("too much")));
+
+        let redirect = router(
+            b"HTTP/1.1 302 Found\r\nLocation: http://93.184.216.34/\r\nContent-Length: 0\r\n\
+              Connection: close\r\n\r\n"
+                .to_vec(),
+        )
+        .await;
+        let error = redirect.call(&client(), "AddPortMapping", "").await;
+        assert!(error.is_err_and(|e| e.contains("302")));
     }
 }
