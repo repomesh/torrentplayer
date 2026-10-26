@@ -93,6 +93,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   session, with its DHT node, trackers and listener, after a minute with no torrents and nothing
   to do, and starts a new one when next needed. It used to keep its DHT node running until the app
   quit after the first magnet link.
+- A SOCKS5 proxy that nothing uses is checked less often: every 10, 20, 40 and then 80 s instead
+  of every 5 s. The first connection through it checks it again at once and restores the 5 s
+  interval, and nothing goes around a proxy that went down meanwhile.
 - The queue says when the kill switch blocks downloads, with a button to Network & VPN settings,
   instead of "Finding peers…" forever.
 - When a video ends, a card offers Play next (Shift+N) or Replay, also in fullscreen. Nothing plays
