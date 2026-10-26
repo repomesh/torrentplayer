@@ -318,6 +318,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   in a tight loop.
 - A block from a peer that starts past the end of its piece no longer trips an arithmetic
   overflow check in debug builds; it is ignored like any other malformed block.
+- Stopping or removing a torrent now ends reads still waiting for its pieces (they fail instead
+  of hanging), and gives the memory of its partial pieces back to the other torrents at once.
+  Before, an open stream request kept the stopped torrent and its share of the piece memory
+  budget alive.
 
 ### Known limitations
 

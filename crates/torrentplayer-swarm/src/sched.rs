@@ -255,7 +255,7 @@ impl PieceBudget {
             });
     }
 
-    fn used(&self) -> u64 {
+    pub(crate) fn used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
     }
 }
