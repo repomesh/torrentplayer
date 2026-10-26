@@ -42,11 +42,13 @@ Until libmpv lands, the webview's `<video>` element is the only player (`Player.
   track to stereo AAC, and writes fragmented MP4 with the original timestamps. The player feeds it
   to the `<video>` element through Media Source Extensions, so the seek bar, duration, and subtitles
   work as usual. Reading pauses with 60 s buffered ahead (which also pauses FFmpeg), and data more
-  than 30 s behind is removed. After a seek, a new conversion starts where the buffered video at the
-  new position ends, unless the running one is about to deliver it, typically playing again within 2
-  s. A conversion that stops early is continued from where it stopped. If conversion fails, or for
-  AC-4 and other codecs it cannot convert, the video plays without sound and a dismissible notice
-  names the codec, and any other track that would play, once Chromium's decoder counters
+  than 30 s behind is removed. High-bitrate video is buffered for fewer seconds, keeping about 100
+  MB within Chromium's 150 MB quota per media buffer; when the buffer is full anyway, appending
+  waits for playback to use it up. After a seek, a new conversion starts where the buffered video at
+  the new position ends, unless the running one is about to deliver it, typically playing again
+  within 2 s. A conversion that stops early is continued from where it stopped. If conversion fails,
+  or for AC-4 and other codecs it cannot convert, the video plays without sound and a dismissible
+  notice names the codec, and any other track that would play, once Chromium's decoder counters
   (`webkitAudioDecodedByteCount` stays 0 while `webkitVideoDecodedByteCount` grows) confirm that no
   audio is being decoded. If the header cannot be read, three seconds of such silent playback show a
   general notice. Without the counters, the probe alone decides. See [ADR
