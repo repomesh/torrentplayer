@@ -155,7 +155,7 @@ pub fn run() -> anyhow::Result<()> {
                 && earlier_default != folders.downloads
                 && earlier_default.is_dir()
             {
-                migrate::migrate(&earlier_default, &folders.downloads);
+                migrate::downloads(&earlier_default, &folders.downloads);
             }
             // Renamed with the app: the default download folder and the engine cache inside it.
             if settings.current().storage.download_dir.is_none() {
@@ -163,7 +163,7 @@ pub fn run() -> anyhow::Result<()> {
                     .downloads
                     .with_file_name(migrate::OLD_DOWNLOADS_NAME);
                 if renamed != folders.downloads && renamed.is_dir() {
-                    migrate::migrate(&renamed, &folders.downloads);
+                    migrate::downloads(&renamed, &folders.downloads);
                 }
             }
             let download_dir = settings

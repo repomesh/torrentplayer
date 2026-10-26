@@ -325,6 +325,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - When the window's page reloads or recovers from a crash, the videos it was playing stop
   streaming (their progress is saved), and the explorer preview and best-pick frame are
   withdrawn, instead of staying open until TorrentPlayer quits.
+- Downloads in the old `Downloads\TorrentStream` cache now move to `Downloads\TorrentPlayer` even
+  when its cache folder already exists. A torrent cached in both stays in the old folder.
 
 ### Known limitations
 
