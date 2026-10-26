@@ -103,10 +103,17 @@ pub struct NetworkOptions {
     /// discovering one, even with `loopback_only`. Only for tests, whose fake router is on
     /// loopback; `None` by default.
     pub upnp_control_url: Option<String>,
+    /// How long after a peer last connected in the listening port still counts as reachable
+    /// ([`Network::reachable_port`]). See [`REACHABLE_AFTER_INBOUND`].
+    pub reachable_after_inbound: Duration,
 }
 
 /// The default [`NetworkOptions::upnp_lease`].
 pub const UPNP_LEASE: Duration = Duration::from_secs(60);
+
+/// The default [`NetworkOptions::reachable_after_inbound`]: about as long as DHT nodes keep an
+/// announced peer, so one inbound peer per announcement keeps the port announced.
+pub const REACHABLE_AFTER_INBOUND: Duration = Duration::from_secs(30 * 60);
 
 /// The default [`NetworkOptions::wireguard_reply_timeout`]: WireGuard's `KEEPALIVE_TIMEOUT`
 /// (10 s, within which a peer that received data answers, if only with a keepalive) plus two
@@ -132,6 +139,7 @@ impl Default for NetworkOptions {
             loopback_only: false,
             upnp_lease: UPNP_LEASE,
             upnp_control_url: None,
+            reachable_after_inbound: REACHABLE_AFTER_INBOUND,
         }
     }
 }
@@ -763,7 +771,8 @@ impl Network {
     }
 
     /// Notified whenever [`Network::status`] or [`Network::reachable_port`] may have changed:
-    /// every policy change, and changes of the incoming-connection listener or its port mapping.
+    /// every policy change, and changes of the incoming-connection listener, its port mapping,
+    /// or whether a peer connected in recently.
     #[must_use]
     pub fn status_changes(&self) -> watch::Receiver<u64> {
         self.inner.status_seq.subscribe()

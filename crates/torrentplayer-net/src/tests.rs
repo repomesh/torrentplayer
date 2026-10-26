@@ -1226,3 +1226,62 @@ async fn a_closed_listener_abandons_a_pending_port_mapping() {
     assert_eq!(net.reachable_port(), None);
     net.shutdown();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_connecting_in_makes_the_port_reachable_for_a_while() {
+    let net = Network::start(
+        NetworkConfig::default(),
+        NetworkOptions {
+            reachable_after_inbound: Duration::from_secs(1),
+            ..fast_options()
+        },
+    )
+    .await
+    .unwrap();
+    let mut peers = net.incoming_peers();
+    let port = free_port();
+    // Listening, no UPnP, nobody connected yet: not reachable.
+    net.set_incoming(incoming(port));
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    assert_eq!(net.reachable_port(), None);
+
+    // A peer connects in (a port forwarded by hand, as far as TorrentPlayer can tell).
+    let _client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), peers.next())
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for_reachable(&net, Some(port)).await;
+    // Nobody else connects: no longer reachable once the time is up, and status_changes says
+    // so.
+    let mut changes = net.status_changes();
+    changes.borrow_and_update();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while net.reachable_port().is_some() {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("a status change reports the expiry");
+
+    // A peer of a closed listener does not count for the next one.
+    let _client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), peers.next())
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for_reachable(&net, Some(port)).await;
+    let moved = free_port();
+    net.set_incoming(incoming(moved));
+    wait_for_incoming(
+        &net,
+        |s| matches!(s, IncomingStatus::Listening { port, .. } if *port == moved),
+    )
+    .await;
+    assert_eq!(net.reachable_port(), None);
+    net.shutdown();
+}

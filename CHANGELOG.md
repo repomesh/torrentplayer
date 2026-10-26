@@ -9,9 +9,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- TorrentPlayer announces its port in the DHT and answers as a read-write DHT node only while the
-  router confirms a UPnP mapping for it to a public address, not merely while it listens; when
-  the mapping lapses it is read-only (BEP 43) again at once. DHT lookups are unaffected.
+- TorrentPlayer announces its port in the DHT and answers as a read-write DHT node only while
+  peers can reach it, not merely while it listens: while the router confirms a UPnP mapping to a
+  public address, or for 30 minutes after a peer from the internet connected in (which covers a
+  port forwarded by hand or by a VPN provider). Otherwise it is read-only (BEP 43), and it
+  switches back at once when that ends. DHT lookups are unaffected.
 
 ### Fixed
 

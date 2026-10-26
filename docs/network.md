@@ -122,14 +122,16 @@ epochs as outgoing connections.
   peer limit (connected plus connecting) are refused. Trackers are told the listening port,
   and torrentplayer-swarm announces it in its DHT lookups (BEP 5 `announce_peer`, with the
   port itself rather than the DHT's UDP port), and answers as a read-write DHT node, only
-  while peers can reach the port: the listener is open on it and the router confirms a UPnP
-  mapping to a public address (`Network::reachable_port`). Listening alone is not enough,
-  since behind a router that forwards nothing an announcement sends peers to a closed port.
-  Never in SOCKS5 mode; nothing confirms a provider's port forward in WireGuard mode or a
-  forward set up by hand on the router, so neither announces in the DHT (trackers still get
-  the port). Otherwise TorrentPlayer announces nothing to the DHT and its DHT queries say it
-  is read-only (BEP 43); lookups work the same either way. The switch happens as soon as the
-  mapping is confirmed or lost, not at the next lookup.
+  while peers can reach the port (`Network::reachable_port`): the listener is open on it, and
+  either the router confirms a UPnP mapping to a public address or a peer connected in on
+  that listener within the last 30 minutes (in direct mode only one at a public address;
+  through the tunnel any, as only the VPN server can send them). Trackers always get the port,
+  so a port forwarded by hand on the router or by a VPN provider proves itself once a peer
+  they sent connects in. Listening alone is not enough, since behind a router that forwards
+  nothing an announcement sends peers to a closed port. Never in SOCKS5 mode. Otherwise
+  TorrentPlayer announces nothing to the DHT and its DHT queries say it is read-only
+  (BEP 43); lookups work the same either way. The switch happens as soon as reachability is
+  gained or lost, not at the next lookup.
   librqbit listens itself only when it is the engine for every torrent (`advanced.engine` =
   `rqbit`) and only in direct mode, TCP only, on `[::]` (dual stack); its listener cannot be
   moved into a tunnel, so it never listens in a protected mode. With the automatic

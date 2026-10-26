@@ -19,7 +19,9 @@
 //! connections go to a single consumer, the torrent engine ([`Network::incoming_peers`]).
 //!
 //! Listening does not mean peers can connect: a router without a port forward drops them.
-//! [`Network::reachable_port`] tells only while the router confirms a UPnP mapping.
+//! [`Network::reachable_port`] tells only while the router confirms a UPnP mapping, or a peer
+//! from the internet connected in recently (which also covers a port forwarded by hand or by a
+//! VPN provider).
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Weak};
@@ -164,9 +166,22 @@ pub(crate) struct IncomingState {
     mapped: Option<(u64, u16)>,
     /// Increases with each [`forward_port`] task.
     mapping_id: u64,
+    /// Increases each time a listener opens, so peers accepted by a closed one do not count.
+    listener_id: u64,
+    /// When a peer from the internet last connected in, and on which listener.
+    inbound: Option<(u64, Instant)>,
+    /// Whether a task waits to report that the last inbound peer is too long ago (see
+    /// [`Inbound::record`]).
+    inbound_expiry: bool,
 }
 
 impl IncomingState {
+    /// Whether a peer connected in on the open listener within `within`.
+    fn inbound_within(&self, within: Duration) -> bool {
+        self.inbound
+            .is_some_and(|(listener, at)| listener == self.listener_id && at.elapsed() < within)
+    }
+
     /// The port to listen on: the configured one, or the random one.
     fn port(&self) -> Option<u16> {
         match self.config.port {
@@ -298,19 +313,24 @@ impl Network {
     }
 
     /// The listening port that peers on the internet can reach, as far as TorrentPlayer can
-    /// tell: only while the router confirms a UPnP mapping for it and its own address is public
-    /// (direct mode). `None` otherwise: behind a router without UPnP, in WireGuard mode (nothing
-    /// says whether the VPN server forwards the port), and with a port forwarded by hand, which
-    /// cannot be seen. [`Network::status_changes`] fires when this may have changed.
+    /// tell: while the router confirms a UPnP mapping for it and its own address is public
+    /// (direct mode), or while a peer from the internet connected in on the open listener within
+    /// [`NetworkOptions::reachable_after_inbound`](crate::NetworkOptions) (direct and WireGuard
+    /// modes: that covers a port forwarded by hand or by the VPN provider, once trackers have
+    /// sent a peer). `None` otherwise, and never in SOCKS5 mode, which does not listen.
+    /// [`Network::status_changes`] fires when this may have changed.
     #[must_use]
     pub fn reachable_port(&self) -> Option<u16> {
         let st = self.inner.state();
-        match (&st.incoming.status, st.incoming.mapped) {
-            (IncomingStatus::Listening { port, .. }, Some((_, mapped))) if *port == mapped => {
-                Some(mapped)
-            }
-            _ => None,
-        }
+        let IncomingStatus::Listening { port, .. } = st.incoming.status else {
+            return None;
+        };
+        let mapped = st.incoming.mapped.is_some_and(|(_, mapped)| mapped == port);
+        (mapped
+            || st
+                .incoming
+                .inbound_within(self.inner.options.reachable_after_inbound))
+        .then_some(port)
     }
 
     /// Takes the accepted incoming connections. There is one consumer at a time: a new call
@@ -525,6 +545,17 @@ async fn open(
     let cancel = CancellationToken::new();
     let mut addresses = Vec::new();
     let mut accepting = Vec::new();
+    let inbound = Inbound {
+        net: Arc::downgrade(net),
+        listener: {
+            let mut st = net.state();
+            st.incoming.listener_id += 1;
+            st.incoming.listener_id
+        },
+        // Only the VPN server can send connections into the tunnel; tests' peers are on
+        // loopback.
+        any_source: matches!(bound, Bound::Tunnel(..)) || net.options.loopback_only,
+    };
     match bound {
         Bound::Os(listeners) => {
             for (listener, addr) in listeners {
@@ -533,6 +564,7 @@ async fn open(
                     listener,
                     tx.clone(),
                     lease.clone(),
+                    inbound.clone(),
                     cancel.child_token(),
                 )));
             }
@@ -545,6 +577,7 @@ async fn open(
                     tunnel.clone(),
                     tx.clone(),
                     lease.clone(),
+                    inbound.clone(),
                     cancel.child_token(),
                 )));
             }
@@ -635,10 +668,18 @@ fn listen(addr: SocketAddr) -> Result<std::net::TcpListener, NetError> {
 }
 
 /// Hands an accepted connection to the consumer, if it is still allowed and there is room.
-fn deliver(tx: &mpsc::Sender<IncomingPeer>, stream: TcpStream, addr: SocketAddr, lease: &Lease) {
+fn deliver(
+    tx: &mpsc::Sender<IncomingPeer>,
+    stream: TcpStream,
+    addr: SocketAddr,
+    lease: &Lease,
+    inbound: &Inbound,
+) {
     if !lease.is_valid() {
         return;
     }
+    // Reachable even if the engine is too busy to take the peer.
+    inbound.record(addr);
     let _ = stream.set_nodelay(true);
     let peer = IncomingPeer {
         stream,
@@ -654,6 +695,7 @@ async fn accept_os(
     listener: TcpListener,
     tx: mpsc::Sender<IncomingPeer>,
     lease: Lease,
+    inbound: Inbound,
     cancel: CancellationToken,
 ) {
     loop {
@@ -662,7 +704,7 @@ async fn accept_os(
             accepted = listener.accept() => accepted,
         };
         match accepted {
-            Ok((stream, addr)) => deliver(&tx, stream, addr, &lease),
+            Ok((stream, addr)) => deliver(&tx, stream, addr, &lease, &inbound),
             Err(error) => {
                 tracing::debug!(target: "torrentplayer_net", %error, "accepting a peer failed");
                 tokio::time::sleep(ACCEPT_BACKOFF).await;
@@ -676,6 +718,7 @@ async fn accept_tunnel(
     tunnel: Tunnel,
     tx: mpsc::Sender<IncomingPeer>,
     lease: Lease,
+    inbound: Inbound,
     cancel: CancellationToken,
 ) {
     loop {
@@ -685,7 +728,7 @@ async fn accept_tunnel(
         };
         match accepted {
             Ok((upstream, addr)) => match tunnel.relay(upstream, Some(lease.clone())).await {
-                Ok(stream) => deliver(&tx, stream, addr, &lease),
+                Ok(stream) => deliver(&tx, stream, addr, &lease, &inbound),
                 Err(error) => {
                     tracing::debug!(target: "torrentplayer_net", %error, "relaying a peer failed");
                 }
@@ -695,6 +738,83 @@ async fn accept_tunnel(
                 tokio::time::sleep(ACCEPT_BACKOFF).await;
             }
         }
+    }
+}
+
+/// Records the peers that connect in on one listener, for [`Network::reachable_port`].
+#[derive(Clone)]
+struct Inbound {
+    net: Weak<Inner>,
+    listener: u64,
+    /// Every peer proves the port reachable, not only those at public addresses.
+    any_source: bool,
+}
+
+impl Inbound {
+    /// Records that a peer connected in from `addr`. In direct mode only a peer at a public
+    /// address shows that the internet reaches the port; a peer on the local network does not.
+    fn record(&self, addr: SocketAddr) {
+        if !self.any_source && !crate::addr::is_public_ip(addr.ip()) {
+            return;
+        }
+        let Some(net) = self.net.upgrade() else {
+            return;
+        };
+        let mut st = net.state();
+        if st.incoming.listener_id != self.listener {
+            return;
+        }
+        let reachable = st
+            .incoming
+            .inbound_within(net.options.reachable_after_inbound);
+        st.incoming.inbound = Some((self.listener, Instant::now()));
+        if reachable {
+            return;
+        }
+        st.log(
+            EventLevel::Info,
+            "A peer connected in from the internet: the listening port is reachable".into(),
+        );
+        let expiry = !std::mem::replace(&mut st.incoming.inbound_expiry, true);
+        drop(st);
+        net.status_changed();
+        if expiry {
+            tokio::spawn(expire_inbound(self.net.clone()));
+        }
+    }
+}
+
+/// Waits until the last peer that connected in is
+/// [`NetworkOptions::reachable_after_inbound`](crate::NetworkOptions) ago, then reports that
+/// the port may no longer be reachable.
+async fn expire_inbound(net: Weak<Inner>) {
+    loop {
+        let Some(due) = net.upgrade().and_then(|net| {
+            let st = net.state();
+            st.incoming
+                .inbound
+                .map(|(_, at)| at + net.options.reachable_after_inbound)
+        }) else {
+            return;
+        };
+        tokio::time::sleep_until(due.into()).await;
+        let Some(net) = net.upgrade() else {
+            return;
+        };
+        let mut st = net.state();
+        if st
+            .incoming
+            .inbound
+            .is_some_and(|(_, at)| at.elapsed() < net.options.reachable_after_inbound)
+        {
+            // Another peer connected in since.
+            continue;
+        }
+        st.incoming.inbound_expiry = false;
+        drop(st);
+        tracing::debug!(target: "torrentplayer_net", "no peer connected in for a while: the listening port no longer counts as reachable");
+        net.status_changed();
+        return;
     }
 }
 
