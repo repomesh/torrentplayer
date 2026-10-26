@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 mod bencode;
+mod bits;
 mod dht;
 mod dht_transport;
 mod limit;

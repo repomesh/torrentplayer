@@ -32,6 +32,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::bits::Bits;
 use crate::metainfo::{BLOCK_LEN, Metainfo};
 
 /// Identifies a connected peer.
@@ -321,7 +322,7 @@ impl Rate {
 
 #[derive(Debug)]
 struct Peer {
-    has: Vec<bool>,
+    has: Bits,
     has_count: u32,
     choked: bool,
     outstanding: Vec<Outstanding>,
@@ -619,7 +620,7 @@ impl Scheduler {
         self.peers.insert(
             key,
             Peer {
-                has: vec![false; self.have.len()],
+                has: Bits::new(self.have.len()),
                 has_count: 0,
                 choked: true,
                 outstanding: Vec::new(),
@@ -640,10 +641,8 @@ impl Scheduler {
     pub(crate) fn remove_peer(&mut self, key: PeerKey) {
         self.release_outstanding(key);
         if let Some(peer) = self.peers.remove(&key) {
-            for (piece, has) in peer.has.iter().enumerate() {
-                if *has {
-                    self.availability[piece] = self.availability[piece].saturating_sub(1);
-                }
+            for piece in peer.has.ones() {
+                self.availability[piece] = self.availability[piece].saturating_sub(1);
             }
         }
     }
@@ -659,8 +658,7 @@ impl Scheduler {
         };
         for piece in 0..n {
             let set = bits[piece / 8] & (0x80 >> (piece % 8)) != 0;
-            if set && !peer.has[piece] {
-                peer.has[piece] = true;
+            if set && peer.has.set(piece) {
                 peer.has_count += 1;
                 self.availability[piece] = self.availability[piece].saturating_add(1);
             }
@@ -677,8 +675,7 @@ impl Scheduler {
         if i >= peer.has.len() {
             return false;
         }
-        if !peer.has[i] {
-            peer.has[i] = true;
+        if peer.has.set(i) {
             peer.has_count += 1;
             self.availability[i] = self.availability[i].saturating_add(1);
         }
@@ -1119,9 +1116,7 @@ impl Scheduler {
     fn peer_has(&self, key: PeerKey, piece: u32) -> bool {
         self.peers
             .get(&key)
-            .and_then(|p| p.has.get(piece as usize))
-            .copied()
-            .unwrap_or(false)
+            .is_some_and(|p| p.has.get(piece as usize))
     }
 
     /// Creates download state for a piece. Background pieces respect the memory budget.
