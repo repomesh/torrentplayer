@@ -320,6 +320,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - A direct peer connection still being made when you switch to the WireGuard tunnel or a SOCKS5
   proxy is now abandoned at once. Before, it could still reach the peer from your own address
   and was only closed afterwards.
+- A SOCKS5 proxy on the internet can no longer point DHT and UDP tracker traffic at your own
+  computer or local network by naming a local UDP relay; such relays are refused. A proxy that
+  is itself on your computer or network may still use one.
 
 ### Known limitations
 
