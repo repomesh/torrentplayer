@@ -2,9 +2,10 @@
 
 //! Video playback for TorrentPlayer: libmpv (primary) with an FFmpeg-based fallback.
 //!
-//! This is the only crate allowed to contain `unsafe` code, because it wraps the libmpv C
-//! API. All unsafe code is encapsulated behind a safe API, and callbacks invoked from C catch
-//! panics so they never unwind across the FFI boundary.
+//! This is the crate meant to hold the libmpv FFI, the main use of `unsafe` code. All unsafe
+//! code is encapsulated behind a safe API, and callbacks invoked from C catch panics so they
+//! never unwind across the FFI boundary. The only other `unsafe` in the workspace is two
+//! WebView2 calls in `src-tauri/src/window.rs`.
 //!
 //! **Status:** planned for Phase 2. See `docs/architecture.md` for how this crate fits
 //! into the streaming pipeline.
