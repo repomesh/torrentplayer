@@ -334,6 +334,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Clearing a proxy password or WireGuard key now reports an error if a copy filed under the old
   Lumen name in the system credential store cannot be removed. Before, that copy was silently
   kept and brought the cleared secret back on the next read.
+- When the system credential store cannot be read (for example, while it is locked), the
+  WireGuard and SOCKS5 modes now block traffic with a message saying so and read it again after a
+  few seconds, then less often. Before, the WireGuard tunnel could start without its preshared
+  key, and a missing private key left the tunnel in an error state that was never retried.
 
 ### Known limitations
 
