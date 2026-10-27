@@ -7,6 +7,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-27
+
 ### Added
 
 - Completed video and audio downloads are reconstructed automatically into normal files with
@@ -743,7 +745,8 @@ The first public preview: stream any torrent, video or audio, and skip to any mo
   never unmuted. It now mutes only when the autoplay policy refuses sound, then shows a "click
   to unmute" button. Interruptions are retried with the sound unchanged.
 
-[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.2...HEAD
+[0.3.2]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.1.0...v0.2.0

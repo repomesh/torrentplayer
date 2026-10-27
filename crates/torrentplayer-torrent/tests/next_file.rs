@@ -173,7 +173,9 @@ async fn completed_files_are_saved_individually_across_shared_pieces() {
     let info = c.add().await;
     let first = lecture(&info, "Lecture 1.mp4");
     let second = lecture(&info, "Lecture 2.mp4");
-    assert_ne!(second.offset_in_torrent % u64::from(PIECE), 0);
+    // Directory enumeration can put either lecture first, depending on the filesystem.
+    let boundary = first.offset_in_torrent.max(second.offset_in_torrent);
+    assert_ne!(boundary % u64::from(PIECE), 0);
     c.engine.download_file(info.id, first.index).await.unwrap();
     eventually("the first complete file", async || {
         let status = c
