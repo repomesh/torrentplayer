@@ -589,3 +589,43 @@ turns read-write only while the port is shown to be reachable, by a confirmed UP
 a peer that connected in (see `docs/network.md`), so on that machine the node stays read-only
 with incoming peers on and sends no `announce_peer`: its DHT traffic is that of the
 incoming-off runs.
+
+## Measurements from 26 October 2026 (0.3.1)
+
+Release builds of `fcd28df` (before the 0.3.1 optimizations) and of the optimized tree, on the
+same Windows 11 desktop, run natively and back to back. Latencies are milliseconds, median / p95.
+
+**Before against after**, the same `local` commands (256 MiB, five runs, four cold seeks each).
+The optimizations target memory and idle work, and leave streaming latency unchanged:
+
+| Swarm                     | Engine | Before start-up | After start-up | Before seek | After seek  |
+| ------------------------- | ------ | --------------- | -------------- | ----------- | ----------- |
+| 1 seeder, 8 MiB/s         | swarm  | 344 / 347       | 341 / 349      | 267 / 299   | 268 / 302   |
+| 4 seeders, 2 MiB/s, 80 ms | swarm  | 1193 / 1216     | 1226 / 1317    | 773 / 907   | 784 / 882   |
+| 1 seeder, 8 MiB/s         | rqbit  | 343 / 345       | 343 / 351      | 395 / 423   | 395 / 424   |
+| 4 seeders, 2 MiB/s, 80 ms | rqbit  | 2556 / 3445     | 2285 / 2856    | 4964 / 5234 | 4966 / 5256 |
+
+**Public swarms through WireGuard** (`cargo bench-suite --quick public --wireguard`, swarm
+engine, peers only, 10 MiB/s cap, one run each): the Ubuntu 26.10 desktop and server ISOs and
+the Debian 13.7 DVD started in 2.6–2.7 s with seek medians of 0.5–0.8 s (22–40 peers live of
+243–939 seen). The small WebTorrent video swarms (14–27 peers live) started in 3.2–5.2 s with
+seek medians of 1.1–1.9 s.
+
+**Resource use** of the whole app (TorrentPlayer plus its WebView2 processes and the FFmpeg
+sidecar), with a local seeder, a 30 s warm-up and a 120 s window per scenario; release builds
+with debug assertions on, for the playback hook. CPU is the mean in % of one core; memory is the
+peak private bytes, plus the mean working set where it changed:
+
+| Scenario                            | Before CPU | After CPU | Before memory          | After memory           |
+| ----------------------------------- | ---------- | --------- | ---------------------- | ---------------------- |
+| Idle, finished torrent in the queue | 1.8        | 1.2       | 240 MB                 | 188 MB                 |
+| Idle, window minimized              | 0.8        | 0.7       | 194 MB (400 MB in use) | 185 MB (146 MB in use) |
+| Downloading in the background       | 19.1       | 17.6      | 216 MB                 | 215 MB                 |
+| Playing 4K 60 fps                   | 9.7        | 8.8       | 533 MB                 | 399 MB                 |
+| Playing a 9.7 GB 4K file with seeks | 9.4        | 10.8      | 698 MB                 | 577 MB                 |
+| Playing 1080p H.264                 | 8.9        | 9.9       | 479 MB                 | 422 MB                 |
+| Playing Dolby 5.1 (audio converted) | 8.8        | 9.6       | 439 MB                 | 418 MB                 |
+
+Minimized, WebView2 now lowers its memory target, which moves about 250 MB of the app out of
+physical memory. CPU differences of about a point are within the noise of these runs; other
+builds shared the machine during part of the window.
