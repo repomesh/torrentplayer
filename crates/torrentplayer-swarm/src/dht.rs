@@ -986,6 +986,9 @@ mod tests {
         announce: Option<u16>,
         queries: &mut tokio::sync::mpsc::UnboundedReceiver<Query>,
     ) -> Vec<Query> {
+        // Queries sent before this lookup (the node's bootstrap, under the earlier mode) may
+        // still be on their way: let them arrive, then drop them.
+        tokio::time::sleep(Duration::from_millis(200)).await;
         while queries.try_recv().is_ok() {}
         let mut lookup = node.get_peers_once(Id20::new(*ID), announce);
         while lookup.next().await.is_some() {}
