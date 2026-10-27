@@ -33,12 +33,15 @@ for 14 days. They are for testing, not distribution.
    in `Cargo.toml` and `ui/package.json` and stops if not. It then creates one **draft** GitHub
    release for the tag (a tag with a `-` suffix, such as `v1.0.0-rc.1`, becomes a pre-release),
    builds installers for Windows, macOS, and Linux (each build job times out after 120 minutes),
-   signing them when the signing secrets are configured, and uploads them to the draft with
-   `SHA256SUMS.txt`, a CycloneDX SBOM, the FFmpeg source, and build provenance attestations.
-   Every file on the release, the macOS `.app.tar.gz` archives included, is listed in
-   `SHA256SUMS.txt` and attested. The build jobs cannot change the release; only the first and
-   last jobs can. If a run fails, re-run it: it reuses the draft and replaces its files. It stops
-   if the tag's release is already published.
+   signing them when the signing secrets are configured. Each platform is attested and uploaded
+   to the draft as soon as its own build passes, so a platform waiting for a runner (macOS runners
+   are often scarce) does not hold back the others. A final job then adds `SHA256SUMS.txt`, a
+   CycloneDX SBOM, and the FFmpeg source. Every file on the release, the macOS `.app.tar.gz`
+   archives included, is listed in `SHA256SUMS.txt` and attested. The build jobs cannot change
+   the release; only the create, publish, and final jobs can. If a platform fails, re-run the
+   failed jobs: the published platforms stay, and the final job runs again so the checksums cover
+   every file. A full re-run reuses the draft and replaces its files; it stops if the tag's
+   release is already published.
 7. Review the draft: download and smoke-test at least one installer per OS. When the builds are
    signed, check that the FFmpeg sidecar is signed too, not only the main executable: on Windows
    `signtool verify /pa` on `torrentplayer-ffmpeg*.exe` in the installed app's folder; on macOS

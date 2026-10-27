@@ -1,0 +1,162 @@
+name: Release build
+
+# Builds the installers for one platform for release.yml, which calls it once per platform so each
+# platform's installers can be published as soon as they are built. It only builds: it cannot
+# change the release (release.yml's publish jobs upload). Signing secrets live in the protected
+# `release` environment, which requires maintainer approval.
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: Platform name, used in the artifact name (installers-<name>)
+        type: string
+        required: true
+      os:
+        description: Runner image
+        type: string
+        required: true
+      target:
+        description: Rust target triple
+        type: string
+        required: true
+      arch:
+        description: Architecture in the .app archive's name (macOS), as Tauri names the .dmg
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (${{ inputs.name }})
+    environment: release
+    permissions:
+      contents: read
+    runs-on: ${{ inputs.os }}
+    # A hung FFmpeg build or notarization must not hold the job for the 6-hour default.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No build caches in release builds, to rule out cache poisoning.
+      - uses: ./.github/actions/setup
+        with:
+          rust-cache: 'false'
+          build-frontend: 'false'
+
+      - name: Add Rust target
+        # bash on every runner: PowerShell (the Windows default) would read $TARGET as its own
+        # variable, which is empty.
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+        run: rustup target add "$TARGET"
+
+      # The playback-only FFmpeg that converts Dolby and DTS audio (docs/adr/0007), built from
+      # the checksummed source and bundled through tauri.sidecar.conf.json.
+      - name: Build the FFmpeg sidecar
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            # The runner image's MinGW. FFmpeg's configure needs a POSIX temporary directory,
+            # and GCC a Windows one.
+            export PATH="/c/mingw64/bin:$PATH" MAKE=mingw32-make
+            TMPDIR=$(cygpath -u "$RUNNER_TEMP") TMP=$(cygpath -m "$RUNNER_TEMP") TEMP=$(cygpath -m "$RUNNER_TEMP")
+            export TMPDIR TMP TEMP
+          fi
+          bash scripts/build-ffmpeg.sh "$TARGET" src-tauri/binaries
+
+      - name: Import Windows signing certificate
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            Write-Output "::warning::WINDOWS_CERTIFICATE is not set; the Windows build will be unsigned."
+            exit 0
+          }
+          $pfx = Join-Path $env:RUNNER_TEMP "certificate.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $config = @{ bundle = @{ windows = @{
+            certificateThumbprint = $cert.Thumbprint
+            digestAlgorithm = "sha256"
+            timestampUrl = "http://timestamp.digicert.com"
+          } } } | ConvertTo-Json -Depth 5
+          Set-Content -Path src-tauri/tauri.signing.conf.json -Value $config
+
+      # Tauri treats a defined-but-empty APPLE_CERTIFICATE as a signing request, so the
+      # variables are exported only when the secrets exist.
+      - name: Configure macOS signing
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "::warning::APPLE_CERTIFICATE is not set; the macOS build will be unsigned and not notarized."
+            exit 0
+          fi
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+            APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            delimiter="EOF_$(openssl rand -hex 16)"
+            printf '%s<<%s\n%s\n%s\n' "$name" "$delimiter" "${!name}" "$delimiter" >> "$GITHUB_ENV"
+          done
+
+      # Without a tag name or release id, tauri-action only builds; release.yml's publish jobs upload.
+      - name: Build installers
+        id: tauri
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # action-v1.0.0
+        with:
+          # The Tauri CLI is installed in ui/; its "tauri" script runs it from the repository root.
+          tauriScript: npm --prefix ui run tauri
+          args: >-
+            --target ${{ inputs.target }}
+            --config src-tauri/tauri.sidecar.conf.json
+            ${{ runner.os == 'Windows' && hashFiles('src-tauri/tauri.signing.conf.json') != '' && '--config src-tauri/tauri.signing.conf.json' || '' }}
+
+      # TODO(phase 5): bundle an LGPL build of libmpv for each platform
+      # (see docs/adr/0001-project-license.md).
+
+      - name: Collect installers
+        shell: bash
+        env:
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          ARCH: ${{ inputs.arch }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          mkdir -p release-assets
+          node -e 'for (const p of JSON.parse(process.env.ARTIFACT_PATHS)) console.log(p)' |
+            while IFS= read -r path; do
+              if [ -f "$path" ]; then
+                cp "$path" release-assets/
+              elif [ -d "$path" ] && [ "${path%.app}" != "$path" ]; then
+                # An .app bundle is a directory: publish it as TorrentPlayer_x.y.z_<arch>.app.tar.gz.
+                app=$(basename "$path" .app)
+                tar -czf "release-assets/${app}_${TAG#v}_${ARCH}.app.tar.gz" -C "$(dirname "$path")" "$app.app"
+              fi
+            done
+          ls -l release-assets
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: installers-${{ inputs.name }}
+          path: release-assets/
+          if-no-files-found: error
