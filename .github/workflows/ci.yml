@@ -2,8 +2,7 @@ name: CI
 
 on:
   push:
-    # Release branches too: they collect many commits before their pull request opens.
-    branches: [main, 'release/**']
+    branches: [main]
   pull_request:
   merge_group:
 
