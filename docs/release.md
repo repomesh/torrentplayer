@@ -5,8 +5,10 @@ developer machine.
 
 For testing, the [build workflow](../.github/workflows/build.yml) builds unsigned installers for
 Windows (x64), macOS (Apple silicon and Intel, macOS 10.15 or later), and Linux (x64: AppImage,
-`.deb`, `.rpm`) on every push to `main`, on pull requests, and on demand (**Actions → Build → Run
-workflow**). Each platform's installers are kept as a workflow artifact (`installers-<platform>`)
+`.deb`, `.rpm`) on release pull requests (from `release/*` branches), on pull requests labelled
+`build`, and on demand (**Actions → Build → Run workflow**). Other pull requests, Dependabot's
+included, and pushes to `main` skip it, and so do changes to documentation alone; the FFmpeg
+sidecar is cached there until `scripts/build-ffmpeg.sh` changes. Each platform's installers are kept as a workflow artifact (`installers-<platform>`)
 for 14 days. They are for testing, not distribution.
 
 ## Cutting a release

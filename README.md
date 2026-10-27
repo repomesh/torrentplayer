@@ -23,7 +23,6 @@
 
 <p align="center">
   <a href="https://github.com/torrentplayer/torrentplayer/actions/workflows/ci.yml"><img src="https://github.com/torrentplayer/torrentplayer/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
-  <a href="https://github.com/torrentplayer/torrentplayer/actions/workflows/build.yml"><img src="https://github.com/torrentplayer/torrentplayer/actions/workflows/build.yml/badge.svg" alt="Build status"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0"></a>
   <img src="https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-informational" alt="Platforms: Windows, macOS, Linux">
   <img src="https://img.shields.io/badge/telemetry-none-brightgreen" alt="Telemetry: none">
@@ -236,8 +235,9 @@ TorrentPlayer is an early preview. The latest version is **0.3.1**; see the
   page: installers for Windows, macOS, and Linux with SHA-256 checksums, an SBOM, and build
   provenance attestations ([how to verify them](docs/release.md#verifying-a-download)). They
   are not code-signed yet, so Windows SmartScreen and macOS Gatekeeper will warn on first launch.
-- **Download a test build.** Every push to `main` builds unsigned installers for Windows, macOS,
-  and Linux: open the latest [Build workflow run](https://github.com/torrentplayer/torrentplayer/actions/workflows/build.yml)
+- **Download a test build.** Release pull requests build unsigned installers for Windows, macOS,
+  and Linux, and maintainers can start one for any branch (**Actions → Build → Run workflow**):
+  open a [Build workflow run](https://github.com/torrentplayer/torrentplayer/actions/workflows/build.yml)
   and download the `installers-<platform>` artifact. Unsigned builds trigger SmartScreen on
   Windows and Gatekeeper on macOS.
 - **Build from source** (below).

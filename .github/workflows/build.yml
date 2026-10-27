@@ -1,12 +1,15 @@
 name: Build
 
-# Builds unsigned installers for every platform on each push to main, on pull requests, and on
-# demand, and keeps them as workflow artifacts for testing. Signed, published builds come from
-# release.yml when a version tag is pushed. See docs/release.md.
+# Builds unsigned installers for every platform on release pull requests (from release/*
+# branches), on pull requests labelled "build", and on demand (Actions → Build → Run workflow),
+# and keeps them as workflow artifacts for testing. Other pull requests, Dependabot's included,
+# skip it (CI tests them), and so do pushes to main: a release pull request builds every platform
+# before it merges, and the release itself builds again from the tag. Changes to documentation
+# alone never build. Signed, published builds come from release.yml. See docs/release.md.
 on:
-  push:
-    branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
+    paths-ignore: ['**/*.md', 'docs/**']
   workflow_dispatch:
 
 permissions:
@@ -23,6 +26,12 @@ env:
 jobs:
   build:
     name: Build (${{ matrix.name }})
+    # Labelling a pull request "build" starts a build; other labels do not.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (startsWith(github.head_ref, 'release/') && github.event.action != 'labeled') ||
+      (contains(github.event.pull_request.labels.*.name, 'build') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'build'))
     strategy:
       fail-fast: false
       matrix:
@@ -61,8 +70,18 @@ jobs:
         run: rustup target add "$TARGET"
 
       # The playback-only FFmpeg that converts Dolby and DTS audio (docs/adr/0007), built from
-      # the checksummed source and bundled through tauri.sidecar.conf.json.
+      # the checksummed source and bundled through tauri.sidecar.conf.json. Its source and options
+      # live in the script, so a cached build is reused until the script changes. (release.yml
+      # always builds it afresh: release builds use no caches.)
+      - name: Restore the FFmpeg sidecar
+        id: ffmpeg-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: src-tauri/binaries
+          key: ffmpeg-${{ matrix.target }}-${{ hashFiles('scripts/build-ffmpeg.sh') }}
+
       - name: Build the FFmpeg sidecar
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
