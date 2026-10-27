@@ -39,6 +39,10 @@ peersSeen: number,
  */
 downloaded: number, 
 /**
+ * Downloaded sections of this file, using the same cells as the player's seek bar.
+ */
+pieceMap: Array<number>, 
+/**
  * Its file's length, once the torrent is known.
  */
 length: number | null, 

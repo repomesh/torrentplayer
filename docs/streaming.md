@@ -52,6 +52,24 @@ A torrent with nothing to download (paused, complete, or with every selected fil
 nothing playing) re-plans once a second instead of ten times; selecting a file, playing, seeking, or
 resuming re-plans at once.
 
+## Completed video and audio files
+
+Each fully downloaded video or audio file is reconstructed automatically under
+`torrentplayer-swarm/<info hash>/files/<original path>`. Files finish independently: a lecture
+can be saved while the rest of its course is still downloading. The original bytes, name, and
+format are preserved, including the video container's audio tracks; no conversion is needed.
+
+The downloader schedules this from its verified-piece snapshot. One writer runs at a time,
+using a stored-only reader and a bounded buffer so it cannot request missing pieces or hold a
+whole video in memory. It writes a temporary file, flushes it, and publishes the final filename
+without replacing an existing file. On restart, an existing file is reused only if its bytes
+match; conflicts and write failures are reported in the file explorer and retried after a
+minute. Cache removal and shutdown cancel and wait for writers before releasing their data.
+
+The file explorer shows the saved location with a selectable path and **Copy path**. The piece
+cache remains for streaming and sharing. The normal files and cached pieces both count toward
+the configured storage limit and are cleared together.
+
 ## Memory for partial pieces
 
 Pieces being downloaded are held in memory until they verify. All torrents of the engine share

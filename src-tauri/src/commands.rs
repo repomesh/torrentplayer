@@ -17,6 +17,7 @@ use ts_rs::TS;
 use crate::audio::TrackProbe;
 use crate::core::{ActiveStream, AppState, Core, PlayerMetrics, ProgressTracker};
 use crate::error::IpcError;
+use crate::pieces::{PIECE_MAP_CELLS, piece_map};
 
 /// Longest a torrent may take to load (link resolved, metadata found, added). A dead magnet
 /// otherwise waits minutes for peers, and the window stays busy, so nothing else can be
@@ -35,8 +36,6 @@ async fn capped<T>(
         .map_err(|_| IpcError::from(torrentplayer_torrent::EngineError::MetadataTimeout))?
 }
 
-/// Number of cells in the piece map sent to the UI.
-const PIECE_MAP_CELLS: usize = 200;
 /// Longest plausible media duration (about 11 days); anything longer is rejected as bogus.
 const MAX_DURATION_SECS: f64 = 1_000_000.0;
 /// Longest plausible player timing measurement (10 minutes).
@@ -594,25 +593,6 @@ pub(crate) async fn stream_stats(
     })
 }
 
-/// Downsamples the pieces in `range` into `cells` values of 0–255 (fraction downloaded).
-fn piece_map(have: &[bool], range: std::ops::Range<u64>, cells: usize) -> Vec<u8> {
-    let start = usize::try_from(range.start).unwrap_or(usize::MAX);
-    let end = usize::try_from(range.end).unwrap_or(usize::MAX);
-    let pieces = have.get(start..end.min(have.len())).unwrap_or_default();
-    if pieces.is_empty() {
-        return vec![0; cells.min(1)];
-    }
-    let cells = cells.min(pieces.len()).max(1);
-    (0..cells)
-        .map(|c| {
-            let lo = c * pieces.len() / cells;
-            let hi = ((c + 1) * pieces.len() / cells).max(lo + 1);
-            let done = pieces[lo..hi].iter().filter(|h| **h).count();
-            u8::try_from(done * 255 / (hi - lo)).unwrap_or(u8::MAX)
-        })
-        .collect()
-}
-
 /// Stops a stream: unpublishes it and ends prioritization. Downloaded data is kept.
 #[tauri::command]
 pub(crate) async fn stop_stream(
@@ -798,19 +778,6 @@ mod tests {
         let mut keys: Vec<_> = json.as_object().unwrap().keys().cloned().collect();
         keys.sort();
         assert_eq!(keys, ["license", "name", "version"]);
-    }
-
-    #[test]
-    fn piece_map_downsamples_and_scales() {
-        let have = [true, true, false, false, true, false, true, true];
-        assert_eq!(piece_map(&have, 0..8, 4), vec![255, 0, 127, 255]);
-        assert_eq!(
-            piece_map(&have, 0..8, 100),
-            vec![255, 255, 0, 0, 255, 0, 255, 255]
-        );
-        assert_eq!(piece_map(&have, 2..4, 10), vec![0, 0]);
-        assert_eq!(piece_map(&have, 20..30, 10), vec![0]);
-        assert_eq!(piece_map(&[], 0..0, 10), vec![0]);
     }
 
     #[test]

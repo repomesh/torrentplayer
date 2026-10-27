@@ -344,6 +344,11 @@ another folder in Settings → Downloads & storage, which shows its size and lim
 unqueued downloads (see
 [configuration](docs/configuration.md)).
 
+Completed video and audio downloads are saved with their original filenames and formats under
+`torrentplayer-swarm/<torrent hash>/files/`. Select a file in the file explorer to see and copy
+its full **Saved file** location. The piece cache is kept for playback and sharing; both the
+saved file and its cache count toward your storage limit and are removed when the torrent is cleared.
+
 ## Community
 
 Questions, ideas, or just want to talk about TorrentPlayer? Join the

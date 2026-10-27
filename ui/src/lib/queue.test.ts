@@ -655,6 +655,7 @@ describe('sort by', () => {
         peersConnecting: 0,
         peersSeen: 0,
         downloaded: 0,
+        pieceMap: [],
         length: 1000,
         etaSecs: null,
         startable: false,

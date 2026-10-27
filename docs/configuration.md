@@ -129,11 +129,18 @@ downloaded; it needs FFmpeg (see `advanced.ffmpegDir`).
 | `storage.cleanupAfterDays` | `null`  | `null` (never) or 1–3650                          | now        |
 
 The download folder holds everything TorrentPlayer downloads: the videos themselves and its cache, in
-`torrentplayer-swarm/` and `librqbit/` folders inside it. Press **Choose folder…** to pick one with
+`torrentplayer-swarm/` and `librqbit/` folders inside it. Click a folder location to select its full path,
+or press **Copy path** to copy it to the clipboard. Press **Choose folder…** to pick one with
 the system folder picker, which saves it; the folder cannot be typed or set through
 `update_settings`. The new folder is used from the next start (the page says
 so); data already downloaded stays in the old folder, and **Use default** goes back to the
 default folder.
+
+As each video or audio file finishes downloading, the default engine saves a normal file with
+its original name and format under `torrentplayer-swarm/<torrent hash>/files/`. The file explorer
+shows the full **Saved file** location with **Copy path**. Pieces stay cached for playback and
+sharing, so the completed file uses additional disk space. Both are included in the storage
+limit and removed together when that torrent is cleared.
 
 A download folder must be a full path (not relative), must not be the root of a drive, and cannot
 contain `.` or `..` components, control characters, or device prefixes (`\\?\`, `\\.\`), and

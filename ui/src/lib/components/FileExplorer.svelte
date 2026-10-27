@@ -11,17 +11,27 @@
   import type { FileSummary } from '../bindings/FileSummary';
   import type { TorrentSummary } from '../bindings/TorrentSummary';
   import { defaultSelection, previewHint, splitFiles, type ExplorerTorrent } from '../explorer';
-  import { fileName, folderOf, formatOf, mayNotPlay, playableInWebview } from '../files';
+  import {
+    fileName,
+    folderOf,
+    formatOf,
+    isPlayable,
+    mayNotPlay,
+    playableInWebview,
+  } from '../files';
   import { formatBytes } from '../format';
   import {
     errorMessage,
+    fileSaveStatus,
     previewFile,
     preloadStatus,
     stopPreview,
     type FilePreviewDto,
+    type FileSaveStatusDto,
     type PreloadStatusDto,
   } from '../ipc';
   import { preloadActive, preloadLabel } from '../search';
+  import CopyPath from './CopyPath.svelte';
 
   interface Props {
     /** Every torrent to explore (see `explorerTorrents`). */
@@ -70,6 +80,47 @@
   let preview = $state.raw<FilePreviewDto | null>(null);
   let previewError = $state<string | null>(null);
   let previewing = $state(false);
+  let savedFile = $state.raw<FileSaveStatusDto | null>(null);
+  let saveError = $state<string | null>(null);
+
+  // Follow the selected media until its normal file is published. Late replies from an old
+  // selection never replace the current file's location.
+  $effect(() => {
+    const id = torrent.id;
+    const file = selectedFile;
+    savedFile = null;
+    saveError = null;
+    if (file === null || !isPlayable(file)) {
+      return;
+    }
+    const index = file.index;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    async function follow(): Promise<void> {
+      try {
+        const status = await fileSaveStatus(id, index);
+        if (stopped) {
+          return;
+        }
+        savedFile = status;
+        saveError = null;
+        if (status.path !== null) {
+          return;
+        }
+      } catch (reason: unknown) {
+        if (stopped) {
+          return;
+        }
+        saveError = errorMessage(reason);
+      }
+      timer = setTimeout(() => void follow(), 1000);
+    }
+    void follow();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+    };
+  });
   // What screen readers hear of the preview: a short line, not the text shown (up to 64 KB).
   const previewStatus = $derived.by(() => {
     if (selectedFile === null) {
@@ -408,6 +459,22 @@
             <dt>Kind</dt>
             <dd>{kindLabel(selectedFile)}</dd>
           </dl>
+          {#if isPlayable(selectedFile)}
+            <div class="saved-location">
+              <label for="saved-file-location">Saved file</label>
+              {#if savedFile?.path}
+                <CopyPath id="saved-file-location" path={savedFile.path} label="Saved file" />
+              {:else}
+                <p class="note" role="status">
+                  {saveError ??
+                    savedFile?.error ??
+                    (savedFile?.saving
+                      ? 'Saving the completed file…'
+                      : 'The location will appear when this file finishes downloading.')}
+                </p>
+              {/if}
+            </div>
+          {/if}
         {:else}
           <p class="note">Select a file to preview it.</p>
         {/if}
@@ -417,6 +484,13 @@
 </section>
 
 <style>
+  .saved-location {
+    display: grid;
+    gap: 0.4rem;
+    padding: 0.75rem 0;
+    font-size: 0.85rem;
+  }
+
   .explorer {
     display: grid;
     grid-template-columns: minmax(11rem, 15rem) minmax(0, 1fr);

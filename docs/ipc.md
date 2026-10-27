@@ -742,6 +742,11 @@ downloads at once (`maxActive`, `null` for none), and how many items download. T
 that, so it never starts the engine. Pause an item with `save_queue` (`QueueItem.paused`);
 the queue downloads in its own order. The UI asks every second while the queue is on screen.
 
+Each item also includes `pieceMap`, the same 0–255 cells and file-relative piece range used by
+`stream_stats`. Queue bars and the player share the same renderer, green color, and opacity
+for partial cells, so downloaded sections and gaps appear in the same positions. The numeric
+percentage remains the total verified share of the file.
+
 |            |                                                                                                                                                                                                     |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Arguments  | none                                                                                                                                                                                                |
@@ -761,6 +766,24 @@ every 2 s.
 | Returns    | [`LinkUse`](../ui/src/lib/bindings/LinkUse.ts) (see `queue_downloads`) |
 | Errors     | none                                                                   |
 | Permission | `allow-link-use`                                                       |
+
+#### `file_save_status`
+
+The full location of a normal, completed video or audio file, or its progress while it is
+being saved. This never starts the engine or downloads anything. The streaming engine queues
+reconstruction only after every piece of that file is available; librqbit reports its existing
+normal file. The file explorer polls while a selected media file is downloading or being saved.
+
+|            |                                                                                               |
+| ---------- | --------------------------------------------------------------------------------------------- |
+| Arguments  | `{ torrentId: number, fileIndex: number }`                                                    |
+| Returns    | [`FileSaveStatusDto`](../ui/src/lib/bindings/FileSaveStatusDto.ts): `path`, `saving`, `error` |
+| Errors     | `not-found` (torrent or file, or the engine has not started), `engine`                        |
+| Permission | `allow-file-save-status`                                                                      |
+
+`path` is null until a complete file is available. `saving` covers queued and active writes.
+`error` is a safe message; saving retries automatically. Paths are returned only for known
+torrent entries; the command accepts no filesystem path from the frontend.
 
 #### `preview_file`
 

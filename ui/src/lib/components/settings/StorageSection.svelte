@@ -11,6 +11,7 @@
     type Settings,
     type SettingsView,
   } from '../../ipc';
+  import CopyPath from '../CopyPath.svelte';
   import Field from './Field.svelte';
   import Toggle from './Toggle.svelte';
 
@@ -27,6 +28,7 @@
 
   const CLEANUP_DAYS = [7, 14, 30, 90, 365];
   const s = $derived(settings.storage);
+  const downloadDir = $derived(s.downloadDir ?? view.defaultDownloadDir);
   const cleanupChoices = $derived(
     s.cleanupAfterDays === null || CLEANUP_DAYS.includes(s.cleanupAfterDays)
       ? CLEANUP_DAYS
@@ -101,21 +103,16 @@
     id="storage-dir"
     label="Download folder"
     path="storage.downloadDir"
-    help="Where TorrentPlayer saves downloaded videos and its cache (in torrentplayer-swarm and librqbit folders inside it). Data already downloaded stays in the old folder. In use now: {view.activeDownloadDir}"
+    help="Where TorrentPlayer saves videos, audio, and cached data. Click the location to select it. Existing downloads stay in the old folder."
     error={errors['storage.downloadDir'] ?? pickError ?? undefined}
   >
     <div class="folder">
-      <input
+      <CopyPath
         id="storage-dir"
-        class="wide"
-        type="text"
-        spellcheck="false"
-        autocomplete="off"
-        placeholder={view.defaultDownloadDir}
-        readonly
-        value={s.downloadDir ?? ''}
-        aria-describedby="storage-dir-help"
-        aria-invalid={errors['storage.downloadDir'] !== undefined}
+        path={downloadDir}
+        label="Download folder"
+        describedBy="storage-dir-help"
+        invalid={errors['storage.downloadDir'] !== undefined}
       />
       <div class="folder-actions">
         <button type="button" disabled={picking} onclick={() => void pickFolder()}>
@@ -132,6 +129,20 @@
       </div>
     </div>
   </Field>
+  {#if downloadDir !== view.activeDownloadDir}
+    <Field
+      id="storage-active-dir"
+      label="Current download folder"
+      help="Downloads continue here until TorrentPlayer restarts. Click the location to select it."
+    >
+      <CopyPath
+        id="storage-active-dir"
+        path={view.activeDownloadDir}
+        label="Current download folder"
+        describedBy="storage-active-dir-help"
+      />
+    </Field>
+  {/if}
   <Field
     id="storage-limit"
     label="Cache size limit"
@@ -194,7 +205,7 @@
   <Field
     id="storage-clear"
     label="Cache"
-    help="TorrentPlayer's downloaded data (the torrentplayer-swarm and librqbit folders inside the download folder). Nothing else is touched."
+    help="Downloaded media and cached data. Clearing removes finished downloads and their saved files; playing and queued downloads are kept."
   >
     <div class="cache">
       <span class="usage" aria-live="polite">
@@ -228,8 +239,8 @@
   {#if confirming}
     <div class="confirm" role="group" aria-labelledby="storage-confirm-text">
       <p id="storage-confirm-text">
-        Delete {usage ? formatBytes(usage.reclaimableBytes) : 'finished'} of finished downloads that are
-        no longer in the queue? Playing and queued downloads are kept.
+        Delete {usage ? formatBytes(usage.reclaimableBytes) : 'finished'} of finished downloads and their
+        saved media files that are no longer in the queue? Playing and queued downloads are kept.
       </p>
       <div class="actions">
         <button type="button" class="danger" disabled={clearing} onclick={() => void clear()}>
@@ -260,6 +271,8 @@
 
   .folder-actions {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 0.4rem;
   }
 

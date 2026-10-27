@@ -31,7 +31,8 @@ use torrentplayer_torrent::{BackendKind, FileReadiness, TorrentId, TorrentSource
 use ts_rs::TS;
 
 use crate::core::{AppState, Core};
-use crate::error::IpcError;
+use crate::error::{ErrorKind, IpcError};
+use crate::pieces::{PIECE_MAP_CELLS, piece_map};
 
 /// Sent (without a payload) the first time in a run that any torrent uploads to other peers.
 /// Queued torrents share from the start, so this is when the user starts seeding.
@@ -168,6 +169,8 @@ pub(crate) struct ItemDownload {
     pub peers_seen: u32,
     /// Downloaded and verified bytes of its file.
     pub downloaded: u64,
+    /// Downloaded sections of this file, using the same cells as the player's seek bar.
+    pub piece_map: Vec<u8>,
     /// Its file's length, once the torrent is known.
     pub length: Option<u64>,
     /// Seconds until it is fully downloaded at the current rate.
@@ -240,6 +243,37 @@ pub(crate) struct DownloadsSnapshot {
     pub items: Vec<ItemDownload>,
     /// The connection.
     pub link: LinkUse,
+}
+
+/// A completed media file's location and progress while it is being saved.
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub(crate) struct FileSaveStatusDto {
+    /// Full path to the complete, normal video or audio file; null until saved.
+    pub path: Option<String>,
+    /// The completed file is being written in the background.
+    pub saving: bool,
+    /// A safe message if saving failed; it retries automatically.
+    pub error: Option<String>,
+}
+
+/// Reports the actual saved media location without downloading anything or starting the engine.
+#[tauri::command]
+pub(crate) async fn file_save_status(
+    app: State<'_, AppState>,
+    torrent_id: usize,
+    file_index: usize,
+) -> Result<FileSaveStatusDto, IpcError> {
+    let core = app
+        .started()
+        .ok_or_else(|| IpcError::new(ErrorKind::NotFound, "Unknown torrent."))?;
+    let status = core.engine.file_save_status(torrent_id, file_index).await?;
+    Ok(FileSaveStatusDto {
+        path: status.path.map(|path| path.to_string_lossy().into_owned()),
+        saving: status.saving,
+        error: status.error,
+    })
 }
 
 /// The latest status of every queued item and of the connection.
@@ -323,6 +357,7 @@ impl ItemDownload {
             peers_connecting: 0,
             peers_seen: 0,
             downloaded: 0,
+            piece_map: Vec::new(),
             length: None,
             eta_secs: None,
             startable: false,
@@ -615,6 +650,9 @@ impl Runtime {
             let Ok((stats, have)) = engine.stats_and_have(id).await else {
                 continue;
             };
+            if let Err(error) = engine.save_completed_files(id, &have) {
+                tracing::warn!(%error, "could not schedule completed media files");
+            }
             measured.insert(id, Measured { stats, have });
         }
         let total_bps: u64 = measured.values().map(|m| m.stats.download_bps).sum();
@@ -858,6 +896,17 @@ impl Runtime {
                 let is_active = active.contains(item.id.as_str());
                 let is_watching = watching(item);
                 let complete = r.is_some_and(FileReadiness::complete);
+                let piece_map = id
+                    .zip(r)
+                    .and_then(|(id, ready)| {
+                        let measured = measured.get(&id)?;
+                        let (geometry, span) = engine.file_geometry(id, ready.file).ok()?;
+                        let range = geometry.pieces_overlapping(
+                            span.offset_in_torrent..span.offset_in_torrent + span.len,
+                        );
+                        Some(piece_map(&measured.have, range, PIECE_MAP_CELLS))
+                    })
+                    .unwrap_or_default();
                 // Other files of the torrent being watched are never held back for it.
                 let background = id.is_some() && id != watched_torrent;
                 // The user's own pause shows before anything the downloader decided.
@@ -899,6 +948,7 @@ impl Runtime {
                     peers_connecting: m.map_or(0, |m| m.stats.peers_connecting),
                     peers_seen: m.map_or(0, |m| m.stats.peers_seen),
                     downloaded: r.map_or(0, |r| r.downloaded),
+                    piece_map,
                     length: r.map(|r| r.len),
                     eta_secs,
                     startable: r.is_some_and(|r| r.startable),

@@ -7,6 +7,17 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Completed video and audio downloads are reconstructed automatically into normal files with
+  their original names and formats. The file explorer shows each saved file's full location
+  with **Copy path**; download folder locations in Settings can also be selected and copied.
+
+### Changed
+
+- Queue download bars show the same green downloaded sections, partial chunks, and gaps as
+  the player's seek bar, while the status text keeps the total download percentage.
+
 ## [0.3.1] - 2026-10-27
 
 ### Added

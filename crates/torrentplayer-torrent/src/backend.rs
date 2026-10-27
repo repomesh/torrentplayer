@@ -231,6 +231,8 @@ pub struct StreamEngine {
     /// A second torrentplayer-swarm, started when first needed, that downloads single pictures for
     /// thumbnails (see [`StreamEngine::thumbnail`]), apart from the torrents being played.
     thumbnails: tokio::sync::OnceCell<Swarm>,
+    /// Normal media files reconstructed from completed piece caches.
+    completed: crate::completed::CompletedFiles,
 }
 
 /// A picture from inside a torrent, checked to be JPEG, PNG, or WebP.
@@ -424,6 +426,7 @@ impl StreamEngine {
             swarm_window,
             metadata: MetadataCache::default(),
             thumbnails: tokio::sync::OnceCell::new(),
+            completed: crate::completed::CompletedFiles::default(),
         };
         engine.report_rqbit_listener(None);
         Ok(engine)
@@ -1326,6 +1329,69 @@ impl StreamEngine {
         }
     }
 
+    /// Schedules normal video and audio files for every fully downloaded media entry.
+    /// The app calls this with each download snapshot. Copies run one at a time in the
+    /// background and use stored data only, so this never downloads unselected files.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the torrent is unknown.
+    pub fn save_completed_files(&self, id: TorrentId, have: &[bool]) -> Result<(), EngineError> {
+        let Handle::Swarm(torrent) = self.handle(id)? else {
+            return Ok(());
+        };
+        let info = self.info(id)?;
+        let progress = file_progress(&info, have);
+        let root = self.swarm_dir().join(&info.info_hash);
+        for file in &info.files {
+            if matches!(file.kind, FileKind::Video | FileKind::Audio)
+                && file.len > 0
+                && progress.get(file.index) == Some(&file.len)
+            {
+                self.completed.schedule(id, &torrent, &root, file);
+            }
+        }
+        Ok(())
+    }
+
+    /// The saved video or audio file's full location, or its reconstruction status.
+    /// librqbit already writes normal files; the streaming engine publishes a file after
+    /// all of its verified bytes have been combined.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the torrent or file is unknown.
+    pub async fn file_save_status(
+        &self,
+        id: TorrentId,
+        file: usize,
+    ) -> Result<crate::FileSaveStatus, EngineError> {
+        let info = self.info(id)?;
+        let entry = file_entry(&info, file)?;
+        let have = self.have_pieces(id).await?;
+        if !matches!(entry.kind, FileKind::Video | FileKind::Audio)
+            || file_progress(&info, &have).get(file) != Some(&entry.len)
+        {
+            return Ok(crate::FileSaveStatus::default());
+        }
+        match self.handle(id)? {
+            Handle::Swarm(_) => {
+                self.save_completed_files(id, &have)?;
+                Ok(self.completed.status(id, file))
+            }
+            Handle::Rqbit(_) => Ok(crate::FileSaveStatus {
+                path: Some(
+                    self.config
+                        .download_dir
+                        .join("librqbit")
+                        .join(&info.info_hash)
+                        .join(&entry.path),
+                ),
+                ..crate::FileSaveStatus::default()
+            }),
+        }
+    }
+
     /// Whether a torrent with this id is added. Cheaper than [`Self::info`] as a check.
     #[must_use]
     pub fn contains(&self, id: TorrentId) -> bool {
@@ -1384,7 +1450,7 @@ impl StreamEngine {
             }
         };
         // Stop every engine promptly, even when another one's cache is slow to flush.
-        tokio::join!(main, thumbnails, rqbit);
+        tokio::join!(self.completed.remove(None), main, thumbnails, rqbit);
     }
 
     /// Preloads a torrent: see [`StreamEngine::preload_with_peers`].
@@ -1761,6 +1827,7 @@ impl StreamEngine {
             }
             Handle::Swarm(torrent) => {
                 self.torrents().remove(&id);
+                self.completed.remove(Some(id)).await;
                 torrent.stop();
             }
         }

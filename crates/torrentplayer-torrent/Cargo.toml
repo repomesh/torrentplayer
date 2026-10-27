@@ -18,6 +18,8 @@ torrentplayer-prioritize.workspace = true
 torrentplayer-stream.workspace = true
 torrentplayer-swarm.workspace = true
 reqwest.workspace = true
+# Publishes reconstructed media atomically without replacing existing files.
+tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
@@ -27,7 +29,6 @@ url.workspace = true
 [dev-dependencies]
 torrentplayer-net = { workspace = true, features = ["test-util"] }
 proptest.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "fs"] }
 
 [lints]

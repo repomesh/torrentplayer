@@ -22,6 +22,7 @@
 
 mod backend;
 pub mod bandwidth;
+mod completed;
 pub mod details;
 mod engine;
 mod media;
@@ -36,6 +37,7 @@ pub use backend::{
     BackendKind, ENGINE_ENV_VAR, EngineChoice, Playback, StreamEngine, StreamEngineConfig,
     SwarmPlayback, Thumbnail, protected_magnet_peers,
 };
+pub use completed::FileSaveStatus;
 pub use engine::{
     Engine, EngineConfig, EngineError, FileEntry, MAX_FILES, Resolved, TorrentId, TorrentInfo,
     TorrentMedia, TorrentState, TorrentStats,

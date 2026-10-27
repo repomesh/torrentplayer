@@ -1,13 +1,13 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 <script lang="ts">
   import {
-    downloadedRuns,
     formatTime,
     fractionAt,
     playedFraction,
     thumbnailTime,
     type ThumbnailSource,
   } from '../seekbar';
+  import DownloadedChunks from './DownloadedChunks.svelte';
 
   interface Props {
     currentTime: number;
@@ -31,7 +31,6 @@
   let hover = $state<number | null>(null);
   let drag = $state<number | null>(null);
 
-  const runs = $derived(downloadedRuns(pieceMap));
   const played = $derived(drag ?? playedFraction(currentTime, duration));
   const known = $derived(Number.isFinite(duration) && duration > 0);
   const previewSecs = $derived(
@@ -138,14 +137,7 @@
   }}
 >
   <div class="track">
-    {#each runs as run (run.start)}
-      <div
-        class="downloaded"
-        style:left={pct(run.start)}
-        style:width={pct(run.end - run.start)}
-        style:opacity={run.opacity.toFixed(2)}
-      ></div>
-    {/each}
+    <DownloadedChunks cells={pieceMap} />
     <div class="played" style:width={pct(played)}></div>
   </div>
   {#if known}
@@ -190,14 +182,6 @@
   .bar:hover .track,
   .bar.dragging .track {
     height: 6px;
-  }
-
-  .downloaded {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    /* Green: already downloaded. */
-    background: #4f9f6a;
   }
 
   .played {

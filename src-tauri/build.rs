@@ -36,6 +36,7 @@ fn main() {
             "preload_next",
             "queue_readiness",
             "queue_downloads",
+            "file_save_status",
             "link_use",
             "library_items",
             "preview_file",

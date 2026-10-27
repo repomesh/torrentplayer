@@ -55,14 +55,18 @@ struct Course {
 
 /// A two-lecture course torrent, seeded on the loopback interface.
 async fn course(choice: EngineChoice) -> Course {
+    course_with_sizes(choice, FIRST, SECOND).await
+}
+
+async fn course_with_sizes(choice: EngineChoice, first: usize, second: usize) -> Course {
     let seed_dir = tempfile::tempdir().unwrap();
     let leech_dir = tempfile::tempdir().unwrap();
     let dir = seed_dir.path().join("course");
     tokio::fs::create_dir_all(&dir).await.unwrap();
-    tokio::fs::write(dir.join("Lecture 1.mp4"), test_data(FIRST, 1))
+    tokio::fs::write(dir.join("Lecture 1.mp4"), test_data(first, 1))
         .await
         .unwrap();
-    tokio::fs::write(dir.join("Lecture 2.mp4"), test_data(SECOND, 2))
+    tokio::fs::write(dir.join("Lecture 2.mp4"), test_data(second, 2))
         .await
         .unwrap();
     let created = create_torrent(
@@ -159,6 +163,71 @@ async fn eventually(what: &str, mut done: impl AsyncFnMut() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completed_files_are_saved_individually_across_shared_pieces() {
+    let first_len = PIECE as usize / 2 + 17;
+    let second_len = PIECE as usize * 2 + 29;
+    let c = course_with_sizes(EngineChoice::Auto, first_len, second_len).await;
+    let info = c.add().await;
+    let first = lecture(&info, "Lecture 1.mp4");
+    let second = lecture(&info, "Lecture 2.mp4");
+    assert_ne!(second.offset_in_torrent % u64::from(PIECE), 0);
+    c.engine.download_file(info.id, first.index).await.unwrap();
+    eventually("the first complete file", async || {
+        let status = c
+            .engine
+            .file_save_status(info.id, first.index)
+            .await
+            .unwrap();
+        assert!(status.error.is_none(), "{status:?}");
+        status.path.is_some()
+    })
+    .await;
+    let first_path = c
+        .engine
+        .file_save_status(info.id, first.index)
+        .await
+        .unwrap()
+        .path
+        .unwrap();
+    assert_eq!(
+        tokio::fs::read(first_path).await.unwrap(),
+        test_data(first_len, 1)
+    );
+    assert!(
+        c.engine
+            .file_save_status(info.id, second.index)
+            .await
+            .unwrap()
+            .path
+            .is_none()
+    );
+
+    c.engine.download_file(info.id, second.index).await.unwrap();
+    eventually("the second complete file", async || {
+        let status = c
+            .engine
+            .file_save_status(info.id, second.index)
+            .await
+            .unwrap();
+        assert!(status.error.is_none(), "{status:?}");
+        status.path.is_some()
+    })
+    .await;
+    let second_path = c
+        .engine
+        .file_save_status(info.id, second.index)
+        .await
+        .unwrap()
+        .path
+        .unwrap();
+    assert_eq!(
+        tokio::fs::read(second_path).await.unwrap(),
+        test_data(second_len, 2)
+    );
+    c.engine.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

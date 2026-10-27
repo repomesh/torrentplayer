@@ -495,8 +495,14 @@ export function linkUse(): Promise<LinkUse> {
 
 import type { FilePreviewDto } from './bindings/FilePreviewDto';
 import type { PreviewKind } from './bindings/PreviewKind';
+import type { FileSaveStatusDto } from './bindings/FileSaveStatusDto';
 
-export type { FilePreviewDto, PreviewKind };
+export type { FilePreviewDto, FileSaveStatusDto, PreviewKind };
+
+/** The complete media file's location, or its progress while being saved. */
+export function fileSaveStatus(torrentId: number, fileIndex: number): Promise<FileSaveStatusDto> {
+  return invoke<FileSaveStatusDto>('file_save_status', { torrentId, fileIndex });
+}
 
 /**
  * A preview of one file of an added torrent: a picture (`data:` URL), plain text (at most

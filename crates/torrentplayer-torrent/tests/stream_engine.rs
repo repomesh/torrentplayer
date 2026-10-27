@@ -42,7 +42,7 @@ fn test_data() -> Vec<u8> {
 
 struct Fixture {
     _seeder: Arc<Session>,
-    _dirs: (tempfile::TempDir, tempfile::TempDir),
+    dirs: (tempfile::TempDir, tempfile::TempDir),
     seeder_addr: SocketAddr,
     torrent: Bytes,
     data: Vec<u8>,
@@ -50,10 +50,14 @@ struct Fixture {
 }
 
 async fn fixture(choice: EngineChoice) -> Fixture {
+    fixture_named(choice, "lecture.mp4").await
+}
+
+async fn fixture_named(choice: EngineChoice, name: &str) -> Fixture {
     let seed_dir = tempfile::tempdir().unwrap();
     let leech_dir = tempfile::tempdir().unwrap();
     let data = test_data();
-    let file = seed_dir.path().join("lecture.mp4");
+    let file = seed_dir.path().join(name);
     tokio::fs::write(&file, &data).await.unwrap();
     let created = create_torrent(
         &file,
@@ -114,7 +118,7 @@ async fn fixture(choice: EngineChoice) -> Fixture {
     .unwrap();
     Fixture {
         _seeder: seeder,
-        _dirs: (seed_dir, leech_dir),
+        dirs: (seed_dir, leech_dir),
         seeder_addr,
         torrent,
         data,
@@ -130,6 +134,76 @@ impl Fixture {
             .await
             .unwrap()
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn completed_video_and_audio_become_normal_files_with_the_original_bytes() {
+    for name in ["lecture.mp4", "track.flac"] {
+        let f = fixture_named(EngineChoice::Auto, name).await;
+        let info = f.add().await;
+        let expected = f
+            .dirs
+            .1
+            .path()
+            .join("torrentplayer-swarm")
+            .join(&info.info_hash)
+            .join("files")
+            .join(name);
+
+        // Merely opening a torrent must not publish or request a partial media file.
+        let pending = f.engine.file_save_status(info.id, 0).await.unwrap();
+        assert!(pending.path.is_none());
+        assert!(!pending.saving);
+        assert!(!expected.exists());
+        f.engine.download_file(info.id, 0).await.unwrap();
+
+        let status = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                let (_, have) = f.engine.stats_and_have(info.id).await.unwrap();
+                // The desktop downloader performs this step for every torrent each tick.
+                f.engine.save_completed_files(info.id, &have).unwrap();
+                let status = f.engine.file_save_status(info.id, 0).await.unwrap();
+                assert!(status.error.is_none(), "{status:?}");
+                if status.path.is_some() {
+                    break status;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the complete media was never saved");
+        assert_eq!(status.path.as_deref(), Some(expected.as_path()));
+        assert_eq!(tokio::fs::read(&expected).await.unwrap(), f.data);
+        assert!(
+            expected
+                .parent()
+                .unwrap()
+                .parent()
+                .unwrap()
+                .join("pieces.dat")
+                .exists()
+        );
+        f.engine.shutdown().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn compatibility_engine_reports_its_existing_normal_media_file() {
+    let f = fixture(EngineChoice::Rqbit).await;
+    let info = f.add().await;
+    f.engine.download_file(info.id, 0).await.unwrap();
+    let path = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if let Some(path) = f.engine.file_save_status(info.id, 0).await.unwrap().path {
+                break path;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the compatibility engine did not finish downloading");
+    assert_eq!(tokio::fs::read(path).await.unwrap(), f.data);
+    f.engine.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

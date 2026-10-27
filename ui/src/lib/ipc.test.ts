@@ -43,6 +43,7 @@ describe('command wrappers', () => {
     await ipc.devAutoplay();
     await ipc.libraryItems();
     await ipc.previewFile(3, 2);
+    await ipc.fileSaveStatus(3, 2);
     await ipc.stopPreview();
     expect(invoke.mock.calls).toEqual([
       ['add_torrent_link', { link: 'magnet:?xt=urn:btih:abc' }],
@@ -58,6 +59,7 @@ describe('command wrappers', () => {
       ['dev_autoplay'],
       ['library_items'],
       ['preview_file', { torrentId: 3, fileIndex: 2 }],
+      ['file_save_status', { torrentId: 3, fileIndex: 2 }],
       ['stop_preview'],
     ]);
   });

@@ -26,6 +26,7 @@ function d(over: Partial<ItemDownload> = {}): ItemDownload {
     peersConnecting: 2,
     peersSeen: 80,
     downloaded: 370,
+    pieceMap: [],
     length: 1000,
     etaSecs: 240,
     startable: true,

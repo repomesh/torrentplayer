@@ -45,6 +45,7 @@
     type QueueItem,
     type TreeRow,
   } from '../queue';
+  import DownloadedChunks from './DownloadedChunks.svelte';
 
   interface Props {
     queue: Queue;
@@ -612,14 +613,14 @@
       {/if}
       {#if download}
         <span
-          class="bar {tone}"
-          title={barTitle(download, maxActive)}
+          class="bar"
+          title={`${barTitle(download, maxActive)} · Green sections are downloaded`}
           role="progressbar"
           aria-label="Downloaded"
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.floor((progress ?? 0) * 100)}
-          ><span style:transform={`scaleX(${String(progress ?? 0)})`}></span></span
+          ><DownloadedChunks cells={download.pieceMap} /></span
         >
       {:else if row.item !== null}
         <span class="bar placeholder" aria-hidden="true"></span>
@@ -1021,41 +1022,13 @@
   }
 
   .bar {
+    position: relative;
     display: block;
-    height: 2px;
+    height: 3px;
     margin-top: 0.15rem;
     overflow: hidden;
     border-radius: 1px;
-    background: rgb(255 255 255 / 8%);
-  }
-
-  .bar {
-    height: 3px;
-  }
-
-  /* Scaled, not sized, and not animated: a width transition lays out and repaints the panel at
-     the display's refresh rate for most of every 1 s update. */
-  .bar > span {
-    display: block;
-    height: 100%;
-    background: #6b6b78;
-    transform-origin: left;
-  }
-
-  .bar.playable {
-    background: rgb(111 191 127 / 22%);
-  }
-
-  .bar.playable > span {
-    background: #6fbf7f;
-  }
-
-  .bar.downloading {
-    background: rgb(232 197 106 / 18%);
-  }
-
-  .bar.downloading > span {
-    background: #e8c56a;
+    background: rgb(255 255 255 / 18%);
   }
 
   .pause[aria-pressed='true'] {
