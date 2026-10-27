@@ -265,10 +265,15 @@ You need:
   - Windows: Microsoft C++ Build Tools and WebView2 (preinstalled on Windows 11).
   - macOS: Xcode Command Line Tools.
   - Linux (Debian/Ubuntu):
+
     ```sh
     sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
-      libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+      gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
     ```
+
+    The GStreamer plugins are needed at run time: without them audio and video play silently or
+    not at all.
 
 Then:
 
