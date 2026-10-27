@@ -19,8 +19,8 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Queue download bars show the same green downloaded sections, partial chunks, and gaps as
   the player's seek bar, while the status text keeps the total download percentage.
-- **Copy path** is available beside each video or audio file in the file explorer, and long
-  saved locations keep their copy button visible within the preview panel.
+- **Copy path** appears beside video and audio files in the file explorer once each complete
+  file has been saved. Long saved locations keep their copy button visible within the preview panel.
 
 ## [0.3.1] - 2026-10-27
 

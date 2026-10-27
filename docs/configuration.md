@@ -138,8 +138,9 @@ default folder.
 
 As each video or audio file finishes downloading, the default engine saves a normal file with
 its original name and format under `torrentplayer-swarm/<torrent hash>/files/`. The file explorer
-shows the full **Saved file** location with **Copy path**, also available on each video or audio
-row. Pieces stay cached for playback and
+shows the full **Saved file** location with **Copy path**, also available on video or audio
+rows once the complete file has been saved. The button appears automatically as files finish.
+Pieces stay cached for playback and
 sharing, so the completed file uses additional disk space. Both are included in the storage
 limit and removed together when that torrent is cleared.
 

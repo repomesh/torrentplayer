@@ -80,8 +80,12 @@
   let preview = $state.raw<FilePreviewDto | null>(null);
   let previewError = $state<string | null>(null);
   let previewing = $state(false);
-  let savedFile = $state.raw<FileSaveStatusDto | null>(null);
-  let saveError = $state<string | null>(null);
+  let fileSaves = $state.raw<{
+    torrentId: number;
+    files: Record<number, FileSaveStatusDto>;
+  } | null>(null);
+  const saveStatuses = $derived(fileSaves?.torrentId === torrent.id ? fileSaves.files : {});
+  const savedFile = $derived(selected === null ? null : (saveStatuses[selected] ?? null));
   let copyingFile = $state<number | null>(null);
   let copiedFile = $state<number | null>(null);
   let copyMessage = $state<string | null>(null);
@@ -98,6 +102,7 @@
       if (torrent.id !== id) {
         return;
       }
+      fileSaves = { torrentId: id, files: { ...saveStatuses, [file.index]: status } };
       if (status.path === null) {
         copyMessage =
           status.error ??
@@ -131,37 +136,47 @@
     clearTimeout(copyTimer);
   });
 
-  // Follow the selected media until its normal file is published. Late replies from an old
-  // selection never replace the current file's location.
+  // Follow every media row until its complete file is published, including unselected files.
+  // Late replies from another torrent never reveal its saved locations here.
   $effect(() => {
     const id = torrent.id;
-    const file = selectedFile;
-    savedFile = null;
-    saveError = null;
-    if (file === null || !isPlayable(file)) {
-      return;
-    }
-    const index = file.index;
+    let pending = split.videos.map((file) => file.index);
+    fileSaves = { torrentId: id, files: {} };
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     async function follow(): Promise<void> {
-      try {
-        const status = await fileSaveStatus(id, index);
+      const retry: number[] = [];
+      // Limit outstanding requests when a course contains many media files.
+      for (let offset = 0; offset < pending.length; offset += 8) {
+        const indices = pending.slice(offset, offset + 8);
+        const results = await Promise.all(
+          indices.map(async (index) => {
+            try {
+              return { index, status: await fileSaveStatus(id, index) };
+            } catch (reason: unknown) {
+              return {
+                index,
+                status: { path: null, saving: false, error: errorMessage(reason) },
+              };
+            }
+          }),
+        );
         if (stopped) {
           return;
         }
-        savedFile = status;
-        saveError = null;
-        if (status.path !== null) {
-          return;
+        const files = { ...saveStatuses };
+        for (const { index, status } of results) {
+          files[index] = status;
+          if (status.path === null) {
+            retry.push(index);
+          }
         }
-      } catch (reason: unknown) {
-        if (stopped) {
-          return;
-        }
-        saveError = errorMessage(reason);
+        fileSaves = { torrentId: id, files };
       }
-      timer = setTimeout(() => void follow(), 1000);
+      pending = retry;
+      if (pending.length > 0) {
+        timer = setTimeout(() => void follow(), 1000);
+      }
     }
     void follow();
     return () => {
@@ -336,19 +351,21 @@
     {#if video}
       {@const queued = isQueued(file)}
       <span class="actions">
-        <button
-          type="button"
-          class="small"
-          disabled={copyingFile !== null}
-          aria-label={`Copy saved file path for ${fileName(file.path)}`}
-          title="Copy the completed file's location"
-          onclick={() => void copyFilePath(file)}
-          >{copyingFile === file.index
-            ? 'Copying…'
-            : copiedFile === file.index
-              ? 'Copied'
-              : 'Copy path'}</button
-        >
+        {#if saveStatuses[file.index]?.path}
+          <button
+            type="button"
+            class="small"
+            disabled={copyingFile !== null}
+            aria-label={`Copy saved file path for ${fileName(file.path)}`}
+            title="Copy the completed file's location"
+            onclick={() => void copyFilePath(file)}
+            >{copyingFile === file.index
+              ? 'Copying…'
+              : copiedFile === file.index
+                ? 'Copied'
+                : 'Copy path'}</button
+          >
+        {/if}
         <button
           type="button"
           class="small"
@@ -532,8 +549,7 @@
                 <CopyPath id="saved-file-location" path={savedFile.path} label="Saved file" />
               {:else}
                 <p class="note" role="status">
-                  {saveError ??
-                    savedFile?.error ??
+                  {savedFile?.error ??
                     (savedFile?.saving
                       ? 'Saving the completed file…'
                       : 'The location will appear when this file finishes downloading.')}
