@@ -3,7 +3,8 @@
 //! The engine session and per-torrent driver.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::SocketAddr;
+use std::io;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -24,16 +25,23 @@ use tracing::{debug, info, trace};
 
 use crate::dht::DhtNode;
 use crate::limit::RateLimiter;
-use crate::metainfo::Metainfo;
+use crate::metainfo::{BLOCK_LEN, Metainfo};
 use crate::reader::FileReader;
+use crate::reload::Rechecker;
 use crate::sched::{
-    Interest, InterestId, InterestKind, PeerKey, Request, Scheduler, SchedulerConfig,
+    BlockDigest, Interest, InterestId, InterestKind, PeerKey, PieceBudget, PieceCheck, Request,
+    Scheduler, SchedulerConfig,
 };
-use crate::store::PieceStore;
+use crate::store::{CacheFile, PieceStore};
 use crate::wire::{self, HANDSHAKE_LEN, Outgoing};
 
 /// How often the driver re-plans, refills queues, and checks timeouts.
 const TICK: Duration = Duration::from_millis(100);
+/// How often it does while there is nothing to download: the torrent is paused, or complete,
+/// or has no reader and every selected piece (see [`crate::sched::Scheduler::is_idle`]). Seeding
+/// torrents stay in the queue until paused, so most of them are idle. Anything that changes
+/// this wakes the driver at once.
+const IDLE_TICK: Duration = Duration::from_secs(1);
 /// Rebuild the rarest-first order every this many ticks.
 const BACKGROUND_REFRESH_TICKS: u32 = 10;
 /// Disconnect peers after this many timed-out requests (unless the swarm is thin).
@@ -65,8 +73,17 @@ const MAX_UPLOAD_READS: usize = 256;
 /// Incoming connections sending their handshake at once, across the engine; more are closed.
 const MAX_INBOUND_HANDSHAKES: usize = 32;
 
-/// The engine's torrents by info hash, for routing incoming connections.
-type Registry = Arc<Mutex<HashMap<[u8; 20], Weak<Shared>>>>;
+/// The engine's torrents by info hash.
+type Registry = Arc<Mutex<HashMap<[u8; 20], Registered>>>;
+
+/// A torrent's entry in the [`Registry`].
+struct Registered {
+    /// The latest instance, for routing incoming connections.
+    shared: Weak<Shared>,
+    /// Its piece cache file, which every live instance of the torrent shares: an earlier
+    /// instance may outlive a later one.
+    cache_file: Weak<CacheFile>,
+}
 
 /// Engine settings.
 // Independent switches, each read by a different part of the engine.
@@ -120,6 +137,10 @@ pub struct SwarmConfig {
     /// Allow web seeds on loopback and private addresses. Only for tests and benchmarks: a
     /// torrent could otherwise make TorrentPlayer send requests to the user's own network.
     pub allow_local_web_seeds: bool,
+    /// Announce to HTTP trackers on loopback and private addresses (and follow redirects
+    /// there). Only for tests and benchmarks with a local tracker: a magnet link could
+    /// otherwise make TorrentPlayer send requests to the user's own network.
+    pub allow_local_trackers: bool,
 }
 
 impl SwarmConfig {
@@ -145,6 +166,7 @@ impl SwarmConfig {
             network: None,
             enable_web_seeds: true,
             allow_local_web_seeds: false,
+            allow_local_trackers: false,
         }
     }
 }
@@ -154,7 +176,7 @@ impl SwarmConfig {
 pub enum SwarmError {
     /// The cache directory could not be created.
     #[error("could not create the piece cache: {0}")]
-    Storage(#[from] std::io::Error),
+    Storage(#[from] io::Error),
     /// No file with that index.
     #[error("unknown file")]
     UnknownFile,
@@ -276,6 +298,8 @@ pub struct Swarm {
     limiter: Option<Arc<RateLimiter>>,
     upload_limiter: Arc<RateLimiter>,
     upload_slots: Arc<Semaphore>,
+    /// Memory for partially downloaded pieces, shared by all torrents.
+    piece_budget: Arc<PieceBudget>,
     peer_id: [u8; 20],
     http: reqwest::Client,
     /// For web seeds: only public destinations, checked redirects.
@@ -283,6 +307,8 @@ pub struct Swarm {
     udp: Option<UdpTrackerClient>,
     dht: Option<Arc<DhtNode>>,
     torrents: Registry,
+    /// Checks the pieces kept from earlier sessions, for every torrent.
+    rechecker: Arc<Rechecker>,
     cancel: CancellationToken,
 }
 
@@ -304,18 +330,7 @@ impl Swarm {
     pub async fn start(cfg: SwarmConfig) -> Result<Self, SwarmError> {
         tokio::fs::create_dir_all(&cfg.download_dir).await?;
         let cancel = CancellationToken::new();
-        let mut http = reqwest::Client::builder()
-            .user_agent(concat!("TorrentPlayer/", env!("CARGO_PKG_VERSION")))
-            .connect_timeout(Duration::from_secs(10))
-            .timeout(Duration::from_secs(30));
-        if let Some(network) = &cfg.network {
-            http = network
-                .configure_http(http)
-                .map_err(|e| SwarmError::Trackers(e.to_string()))?;
-        }
-        let http = http
-            .build()
-            .map_err(|e| SwarmError::Trackers(e.to_string()))?;
+        let http = tracker_client(&cfg)?;
         let web = web_client(&cfg)?;
         let dht = cfg.enable_dht.then(|| {
             Arc::new(DhtNode::new(
@@ -328,6 +343,11 @@ impl Swarm {
             tokio::spawn(crate::dht::follow_policy(
                 Arc::clone(node),
                 network.subscribe(),
+            ));
+            tokio::spawn(crate::dht::follow_reachability(
+                Arc::clone(node),
+                network.clone(),
+                cfg.accept_incoming,
             ));
         }
         let torrents = Registry::default();
@@ -361,6 +381,7 @@ impl Swarm {
                     .map_or_else(RateLimiter::unlimited, RateLimiter::new),
             ),
             upload_slots: Arc::new(Semaphore::new(MAX_UPLOAD_READS)),
+            piece_budget: PieceBudget::new(cfg.scheduler.max_in_progress_bytes),
             cfg: Arc::new(cfg),
             peer_id: generate_peer_id(),
             http,
@@ -368,6 +389,7 @@ impl Swarm {
             udp,
             dht,
             torrents,
+            rechecker: Rechecker::new(),
             cancel,
         })
     }
@@ -381,11 +403,26 @@ impl Swarm {
     pub fn add(&self, meta: Metainfo, peers: Vec<SocketAddr>) -> Result<Torrent, SwarmError> {
         let meta = Arc::new(meta);
         let dir = self.cfg.download_dir.join(meta.info_hash_hex());
-        let store = PieceStore::create(&dir, meta.piece_count())?;
+        // Held until the new instance is registered, so two adds of one torrent cannot both
+        // open the cache file.
+        let mut torrents = self.torrents.lock().unwrap_or_else(PoisonError::into_inner);
+        // A previous instance still in use (by a reader finishing a request) keeps reading the
+        // cache file: share it instead of opening it again, which could truncate it under that
+        // reader. Any earlier instance counts, not only the latest, which may be gone while an
+        // older one is not.
+        let shared_store = torrents
+            .get(&meta.info_hash)
+            .and_then(|t| PieceStore::share(&t.cache_file));
+        let store = match shared_store {
+            Some(store) => store,
+            None => PieceStore::open(&dir, &meta)?,
+        };
+        let cache_file = store.cache_file();
         let shared = Arc::new(Shared {
-            sched: Mutex::new(Scheduler::new(
+            sched: Mutex::new(Scheduler::with_budget(
                 Arc::clone(&meta),
                 self.cfg.scheduler.clone(),
+                Arc::clone(&self.piece_budget),
             )),
             meta: Arc::clone(&meta),
             store,
@@ -394,7 +431,9 @@ impl Swarm {
             upload_limiter: Arc::clone(&self.upload_limiter),
             upload_slots: Arc::clone(&self.upload_slots),
             own_limit: RateLimiter::unlimited(),
-            upload_enabled: AtomicBool::new(true),
+            // Off until the caller enables it (see `Torrent::set_upload_enabled`), so peers that
+            // connect right after the add are never unchoked against the user's setting.
+            upload_enabled: AtomicBool::new(false),
             paused: AtomicBool::new(false),
             selected: Mutex::new(Vec::new()),
             peer_id: self.peer_id,
@@ -402,9 +441,11 @@ impl Swarm {
             wake: Notify::new(),
             seek_pending: AtomicBool::new(false),
             refresh_background: AtomicBool::new(true),
+            idle: AtomicBool::new(false),
             peers: Mutex::new(HashMap::new()),
             verdicts: Mutex::new(HashMap::new()),
             blame: Mutex::new(HashMap::new()),
+            peer_ips: Mutex::new(PeerIps::default()),
             smoothed: Mutex::new(Smoothed::default()),
             upload_smoothed: Mutex::new(Smoothed::default()),
             candidates: Mutex::new(Candidates::default()),
@@ -416,12 +457,18 @@ impl Swarm {
             downloaded_web: AtomicU64::new(0),
             cancel: self.cancel.child_token(),
         });
+        torrents.retain(|_, t| t.cache_file.strong_count() > 0);
+        torrents.insert(
+            meta.info_hash,
+            Registered {
+                shared: Arc::downgrade(&shared),
+                cache_file,
+            },
+        );
+        drop(torrents);
+        // Before any peer connects, so pieces kept from an earlier session are not requested.
+        self.rechecker.start(&shared);
         shared.add_candidates(peers);
-        {
-            let mut torrents = self.torrents.lock().unwrap_or_else(PoisonError::into_inner);
-            torrents.retain(|_, t| t.strong_count() > 0);
-            torrents.insert(meta.info_hash, Arc::downgrade(&shared));
-        }
         if let Some(node) = &self.dht {
             tokio::spawn(crate::dht::discover(
                 Arc::clone(node),
@@ -450,7 +497,7 @@ impl Swarm {
             Some(Trackers {
                 info_hash: Id20::new(meta.info_hash),
                 peer_id: Id20::new(self.peer_id),
-                urls: meta.trackers.iter().cloned().collect(),
+                urls: tracker_urls(&meta, self.cfg.allow_local_trackers),
                 shared: Arc::downgrade(&shared),
                 port: self.cfg.announce_port,
                 http: self.http.clone(),
@@ -478,9 +525,40 @@ impl Swarm {
         self.upload_limiter.set_rate(limit);
     }
 
-    /// Stops every torrent.
+    /// Stops every torrent, and marks their piece caches as ended cleanly, so the next session
+    /// trusts the pieces in them instead of checking every one before use. Blocks while the
+    /// caches that stored pieces since they were opened are flushed to disk. Async callers
+    /// should use [`Self::shutdown_async`] so a slow flush does not block their runtime.
     pub fn shutdown(&self) {
         self.cancel.cancel();
+        let caches: Vec<Arc<CacheFile>> = self
+            .torrents
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter_map(|t| t.cache_file.upgrade())
+            .collect();
+        for cache in caches {
+            match cache.seal() {
+                Ok(true) => {}
+                Ok(false) => debug!("piece cache left to be checked next time"),
+                Err(error) => tracing::warn!(%error, "could not mark a piece cache as complete"),
+            }
+        }
+    }
+
+    /// Stops every torrent and flushes its piece caches on a blocking worker.
+    ///
+    /// Unlike [`Self::shutdown`], this yields while storage is busy, so a caller can bound its
+    /// wait with a timeout. Dropping the future stops waiting, not a flush already started:
+    /// the worker owns the engine until it finishes. An interrupted flush leaves the cache
+    /// subject to the usual crash recovery checks on the next start.
+    pub async fn shutdown_async(&self) {
+        self.cancel.cancel();
+        let swarm = self.clone();
+        if let Err(error) = tokio::task::spawn_blocking(move || swarm.shutdown()).await {
+            tracing::warn!(%error, "piece cache shutdown worker failed");
+        }
     }
 }
 
@@ -556,8 +634,9 @@ impl Torrent {
     }
 
     /// Pauses or resumes the torrent. While paused nothing is requested (outstanding requests
-    /// are cancelled) and no new peers are dialed; connections stay open, so resuming is
-    /// immediate. Readers and the playhead wait until it resumes.
+    /// are cancelled), no new peers are dialed, and trackers are not announced to (resuming
+    /// announces again at once); connections stay open, so resuming is immediate. Readers and
+    /// the playhead wait until it resumes.
     pub fn set_paused(&self, paused: bool) {
         if self.shared.paused.swap(paused, Ordering::Relaxed) == paused {
             return;
@@ -583,7 +662,7 @@ impl Torrent {
     }
 
     /// Enables or disables serving verified pieces to peers. Existing peers are choked or
-    /// unchoked at once.
+    /// unchoked at once. Off when the torrent is added.
     pub fn set_upload_enabled(&self, enabled: bool) {
         // Serialize the state change and choke with the final upload enqueue. This prevents an
         // already-read block from slipping into a peer's queue after its choke.
@@ -807,6 +886,8 @@ pub(crate) struct Candidates {
     known: HashMap<SocketAddr, Known>,
     /// Peers being connected to or connected.
     active: HashSet<SocketAddr>,
+    /// Addresses of peers that sent bad data: never dialed, and refused when they connect.
+    pub(crate) banned_ips: HashSet<IpAddr>,
     /// TCP connection attempts in progress (limited by `max_connecting`).
     pub(crate) connecting: usize,
     /// Connected peers still exchanging handshakes. They no longer hold a connection slot but
@@ -849,7 +930,9 @@ impl Candidates {
     /// banned, waiting for a retry, or new while the list is full. Returns whether it was
     /// queued.
     fn offer(&mut self, addr: SocketAddr, preferred: bool) -> bool {
-        if !self.known.contains_key(&addr) && self.known.len() >= MAX_KNOWN {
+        if self.banned_ips.contains(&addr.ip())
+            || !self.known.contains_key(&addr) && self.known.len() >= MAX_KNOWN
+        {
             return false;
         }
         let known = self.known.entry(addr).or_default();
@@ -888,9 +971,20 @@ impl Candidates {
     /// Takes the next address to dial and counts the attempt. Returns it and whether this is
     /// the first attempt at it (a probe, with a short timeout).
     fn next(&mut self) -> Option<(SocketAddr, bool)> {
-        let addr = self.queues.iter_mut().find_map(VecDeque::pop_front)?;
+        let (addr, known) = loop {
+            let addr = self.queues.iter_mut().find_map(VecDeque::pop_front)?;
+            let known = self.known.get_mut(&addr);
+            if !self.banned_ips.contains(&addr.ip()) {
+                break (addr, known);
+            }
+            // Queued before its address was banned.
+            if let Some(known) = known {
+                known.queued = false;
+                known.banned = true;
+            }
+        };
         let mut first = false;
-        if let Some(known) = self.known.get_mut(&addr) {
+        if let Some(known) = known {
             known.queued = false;
             first = !known.tried;
             known.tried = true;
@@ -963,6 +1057,72 @@ struct Blame {
     banned: bool,
 }
 
+/// Counts a failed piece against the peers that sent it, given each one's failed pieces so far
+/// (`totals`), and returns those to ban: a peer that alone sent two bad pieces, or that took
+/// part in four and in more than any other source of this piece. A piece put together from
+/// several sources does not show which one was wrong; blaming them all would let one bad source
+/// (such as a web seed with a different file) get honest peers banned, so a tie bans nobody
+/// (smart ban settles it once the piece verifies, see [`Scheduler::on_verified`]). A piece with
+/// data from a source already banned says nothing about the others, so it is not counted.
+fn blame(blames: &mut HashMap<PeerKey, Blame>, totals: &[(PeerKey, u32)]) -> Vec<PeerKey> {
+    if totals
+        .iter()
+        .any(|(k, _)| blames.get(k).is_some_and(|b| b.banned))
+    {
+        return Vec::new();
+    }
+    let alone = totals.len() == 1;
+    let mut disconnect = Vec::new();
+    for &(key, total) in totals {
+        let entry = blames.entry(key).or_default();
+        if alone {
+            entry.sole += 1;
+        }
+        let worst = totals.iter().all(|&(k, t)| k == key || t < total);
+        if entry.sole >= 2 || (total >= 4 && worst) {
+            entry.banned = true;
+            disconnect.push(key);
+        }
+    }
+    disconnect
+}
+
+/// Peers that recently ended, whose addresses are still remembered: smart ban can name a peer
+/// only once a piece it spoiled verifies, possibly after it left.
+const RECENT_PEER_IPS: usize = 256;
+
+/// The IP address behind each peer key, for bans.
+#[derive(Debug, Default)]
+struct PeerIps {
+    live: HashMap<PeerKey, IpAddr>,
+    /// Ended peers, oldest first, at most [`RECENT_PEER_IPS`].
+    recent: VecDeque<(PeerKey, IpAddr)>,
+}
+
+impl PeerIps {
+    fn insert(&mut self, key: PeerKey, ip: IpAddr) {
+        self.live.insert(key, ip);
+    }
+
+    fn ended(&mut self, key: PeerKey) {
+        if let Some(ip) = self.live.remove(&key) {
+            if self.recent.len() >= RECENT_PEER_IPS {
+                self.recent.pop_front();
+            }
+            self.recent.push_back((key, ip));
+        }
+    }
+
+    fn get(&self, key: PeerKey) -> Option<IpAddr> {
+        self.live.get(&key).copied().or_else(|| {
+            self.recent
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, ip)| *ip)
+        })
+    }
+}
+
 /// Why the torrent itself disconnected a peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Verdict {
@@ -999,11 +1159,15 @@ pub(crate) struct Shared {
     pub(crate) wake: Notify,
     pub(crate) seek_pending: AtomicBool,
     refresh_background: AtomicBool,
+    /// The driver ticks slowly (see [`IDLE_TICK`]).
+    idle: AtomicBool,
     pub(crate) peers: Mutex<HashMap<PeerKey, mpsc::Sender<Outgoing>>>,
     /// Why the torrent disconnected a peer, for its task to report when it ends.
     verdicts: Mutex<HashMap<PeerKey, Verdict>>,
     /// Hash failures counted against each peer (see [`Shared::blame`]).
     blame: Mutex<HashMap<PeerKey, Blame>>,
+    /// Where each peer connected from (see [`Shared::ban`]).
+    peer_ips: Mutex<PeerIps>,
     /// The download rate behind [`Torrent::playback_estimate`].
     smoothed: Mutex<Smoothed>,
     /// The upload rate behind [`SwarmStats::upload_bps`].
@@ -1092,40 +1256,66 @@ impl Shared {
         debug!(peers = again, "network changed: retrying known peers");
     }
 
-    /// Counts a failed piece against the peers that sent it, and returns those to disconnect: a
-    /// peer that alone sent two bad pieces, or that took part in four and in more than any other
-    /// source of this piece. A piece put together from several sources does not show which one
-    /// was wrong; blaming them all would let one bad source (such as a web seed with a different
-    /// file) get honest peers banned. A piece with data from a source already banned says
-    /// nothing about the others, so it is not counted.
+    /// Counts a failed piece against the peers that sent it (see [`blame`]) and returns those to
+    /// ban.
     fn blame(&self, contributors: &[PeerKey]) -> Vec<PeerKey> {
-        let mut blame = self.blame.lock().unwrap_or_else(PoisonError::into_inner);
-        if contributors
-            .iter()
-            .any(|k| blame.get(k).is_some_and(|b| b.banned))
-        {
-            return Vec::new();
-        }
         let sched = self.sched();
         let totals: Vec<(PeerKey, u32)> = contributors
             .iter()
             .map(|&k| (k, sched.bad_pieces(k)))
             .collect();
         drop(sched);
-        let alone = totals.len() == 1;
-        let mut disconnect = Vec::new();
-        for &(key, total) in &totals {
-            let entry = blame.entry(key).or_default();
-            if alone {
-                entry.sole += 1;
-            }
-            let worst = totals.iter().all(|&(k, t)| k == key || t < total);
-            if entry.sole >= 2 || (total >= 4 && worst) {
-                entry.banned = true;
-                disconnect.push(key);
+        let mut blames = self.blame.lock().unwrap_or_else(PoisonError::into_inner);
+        blame(&mut blames, &totals)
+    }
+
+    /// Disconnects peers that sent bad data and refuses their IP addresses from now on, for
+    /// outgoing and incoming connections alike (an incoming peer's source port changes with
+    /// every connection).
+    fn ban(&self, keys: &[PeerKey]) {
+        if keys.is_empty() {
+            return;
+        }
+        {
+            let mut blames = self.blame.lock().unwrap_or_else(PoisonError::into_inner);
+            for &key in keys {
+                blames.entry(key).or_default().banned = true;
             }
         }
-        disconnect
+        let ips: Vec<IpAddr> = {
+            let addrs = self.peer_ips.lock().unwrap_or_else(PoisonError::into_inner);
+            keys.iter().filter_map(|&key| addrs.get(key)).collect()
+        };
+        self.candidates().banned_ips.extend(ips);
+        let mut peers = self.peers.lock().unwrap_or_else(PoisonError::into_inner);
+        for &key in keys {
+            // Dropping the sender ends the peer's writer, and so its connection.
+            if peers.remove(&key).is_some() {
+                self.set_verdict(key, Verdict::Banned);
+            }
+        }
+    }
+
+    /// Records the address of a connected peer, for [`Shared::ban`].
+    pub(crate) fn peer_connected(&self, key: PeerKey, addr: SocketAddr) {
+        self.peer_ips
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key, addr.ip());
+    }
+
+    /// Called when a peer's connection ends: its address is kept a little longer, for
+    /// [`Shared::ban`].
+    pub(crate) fn peer_disconnected(&self, key: PeerKey) {
+        self.peer_ips
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .ended(key);
+    }
+
+    /// Whether connections from `ip` are refused: a peer there sent bad data.
+    pub(crate) fn is_banned(&self, ip: IpAddr) -> bool {
+        self.candidates().banned_ips.contains(&ip)
     }
 
     /// Records why the torrent is disconnecting `key`.
@@ -1150,6 +1340,13 @@ impl Shared {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .len()
+    }
+
+    /// Whether a swarm of `live` peers (counted with [`Shared::live_peers`]) is thin. Web seeds
+    /// do not count: the guards keep BitTorrent peers while there are few of them, whatever web
+    /// seeds there are.
+    fn is_thin(&self, live: usize) -> bool {
+        live.saturating_sub(self.web_seeds.load(Ordering::Relaxed)) <= THIN_SWARM
     }
 
     /// Asks the driver to re-plan soon; `seek` also cancels requests that are no longer urgent.
@@ -1217,6 +1414,55 @@ impl Shared {
         );
     }
 
+    /// Reads part of a stored piece (see [`PieceStore::read`]). Blocking. A piece trusted from
+    /// an earlier session that fails its check on this first read is no longer counted as
+    /// stored, and is downloaded again.
+    pub(crate) fn read_piece(&self, piece: u32, offset: u32, buf: &mut [u8]) -> io::Result<()> {
+        let read = self.store.read(piece, offset, buf);
+        if let Err(error) = &read
+            && matches!(
+                error.kind(),
+                io::ErrorKind::InvalidData | io::ErrorKind::NotFound
+            )
+        {
+            let mut sched = self.sched();
+            if sched.have(piece) {
+                sched.lose(piece);
+                drop(sched);
+                debug!(piece, "a stored piece is bad; downloading it again");
+                self.refresh_background.store(true, Ordering::Relaxed);
+                self.request_replan(false);
+            }
+        }
+        read
+    }
+
+    /// Folds the bytes downloaded and uploaded so far into the smoothed rates.
+    fn update_rates(&self, now: Instant) {
+        self.smoothed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .update(now, self.downloaded.load(Ordering::Relaxed));
+        self.upload_smoothed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .update(now, self.uploaded.load(Ordering::Relaxed));
+    }
+
+    /// Tells every peer that `piece` is now verified.
+    pub(crate) fn announce_have(&self, piece: u32) {
+        let keys: Vec<PeerKey> = self
+            .peers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .keys()
+            .copied()
+            .collect();
+        for key in keys {
+            self.send(key, [Outgoing::Have(piece)]);
+        }
+    }
+
     pub(crate) fn send_cancels(&self, cancels: &[(PeerKey, Request)]) {
         for (key, r) in cancels {
             self.send(
@@ -1231,68 +1477,71 @@ impl Shared {
     }
 
     /// Verifies a completed piece on a blocking thread, stores it, and updates the scheduler.
+    /// Bans the peers the check shows sent bad data (see [`Scheduler::on_verified`]).
     pub(crate) fn complete_piece(self: &Arc<Self>, piece: u32, data: Vec<u8>) {
         let shared = Arc::clone(self);
+        let digests = self.sched().needs_block_digests(piece);
         tokio::spawn(async move {
             let check = Arc::clone(&shared);
             let len = data.len() as u64;
-            let verified = tokio::task::spawn_blocking(move || {
+            let checked = tokio::task::spawn_blocking(move || {
                 use sha1::Digest as _;
                 let ok = check
                     .meta
                     .piece_hash(piece)
                     .is_some_and(|expected| sha1::Sha1::digest(&data).as_slice() == expected);
-                if ok {
-                    check.store.write_piece(piece, &data).map(|()| true)
-                } else {
-                    Ok(false)
+                if !ok {
+                    return PieceCheck::Invalid(block_digests(&data));
+                }
+                match check.store.write_piece(piece, &data) {
+                    Ok(()) => PieceCheck::Valid(digests.then(|| block_digests(&data))),
+                    Err(error) => {
+                        tracing::warn!(%error, piece, "could not store piece");
+                        PieceCheck::NotStored
+                    }
                 }
             })
-            .await;
-            let ok = match verified {
-                Ok(Ok(ok)) => ok,
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, piece, "could not store piece");
-                    false
-                }
-                Err(error) => {
-                    tracing::warn!(%error, piece, "piece verification task failed");
-                    false
-                }
-            };
-            let bad_peers = shared.sched().on_verified(piece, ok);
-            if ok {
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, piece, "piece verification task failed");
+                PieceCheck::NotStored
+            });
+            let valid = matches!(checked, PieceCheck::Valid(_));
+            let failed = matches!(checked, PieceCheck::Invalid(_));
+            let verified = shared.sched().on_verified(piece, checked);
+            if valid {
                 trace!(piece, "piece verified");
                 shared.downloaded.fetch_add(len, Ordering::Relaxed);
                 shared.piece_done.notify_waiters();
-                let keys: Vec<PeerKey> = shared
-                    .peers
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .keys()
-                    .copied()
-                    .collect();
-                for key in keys {
-                    shared.send(key, [Outgoing::Have(piece)]);
+                shared.announce_have(piece);
+                if !verified.banned.is_empty() {
+                    debug!(
+                        piece,
+                        peers = ?verified.banned,
+                        "banning peers that sent bad blocks of a piece that now verified"
+                    );
+                    shared.ban(&verified.banned);
                 }
-            } else {
+            } else if failed {
                 debug!(
                     piece,
-                    sources = bad_peers.len(),
+                    sources = verified.failed_by.len(),
                     "piece failed its hash check"
                 );
-                let disconnect = shared.blame(&bad_peers);
-                for key in &disconnect {
-                    shared.set_verdict(*key, Verdict::Banned);
-                }
-                let mut peers = shared.peers.lock().unwrap_or_else(PoisonError::into_inner);
-                for key in disconnect {
-                    peers.remove(&key);
-                }
+                let disconnect = shared.blame(&verified.failed_by);
+                shared.ban(&disconnect);
             }
             shared.request_replan(false);
         });
     }
+}
+
+/// The digest of each block of a piece, for smart ban.
+fn block_digests(data: &[u8]) -> Vec<BlockDigest> {
+    use sha1::Digest as _;
+    data.chunks(BLOCK_LEN as usize)
+        .map(|block| sha1::Sha1::digest(block).into())
+        .collect()
 }
 
 /// What is needed to (re)start tracker announces for a torrent.
@@ -1438,18 +1687,33 @@ async fn next_policy(rx: &mut Option<watch::Receiver<Policy>>, last: Option<Poli
     }
 }
 
+/// Starts announcing to `trackers` under `policy` (see [`Trackers::start`]), unless the torrent
+/// is paused. Dropping the stream stops the announces.
+fn announce(
+    trackers: Option<&Trackers>,
+    policy: Option<Policy>,
+    paused: bool,
+) -> Option<BoxStream<'static, SocketAddr>> {
+    trackers.filter(|_| !paused)?.start(policy)
+}
+
 /// The per-torrent driver: re-plans, refills queues, handles timeouts, and connects peers.
 async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
-    let mut tick = tokio::time::interval(TICK);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Every TICK, or IDLE_TICK while there is nothing to download.
+    let mut next_tick = tokio::time::Instant::now();
     let mut ticks: u32 = 0;
     let mut policy_rx = shared.cfg.network.as_ref().map(Network::subscribe);
     let mut policy = policy_rx.as_mut().map(|rx| *rx.borrow_and_update());
-    let mut announces = trackers.as_ref().and_then(|t| t.start(policy));
+    let mut paused = shared.paused.load(Ordering::Relaxed);
+    let mut announces = announce(trackers.as_ref(), policy, paused);
     loop {
+        let mut ticked = false;
         tokio::select! {
             () = shared.cancel.cancelled() => break,
-            _ = tick.tick() => ticks = ticks.wrapping_add(1),
+            () = tokio::time::sleep_until(next_tick) => {
+                ticks = ticks.wrapping_add(1);
+                ticked = true;
+            }
             () = shared.wake.notified() => {}
             Some(addr) = async {
                 match announces.as_mut() {
@@ -1464,7 +1728,7 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
                     let resumed = now.traffic_allowed
                         && policy.is_some_and(|p| !p.traffic_allowed || p.epoch != now.epoch);
                     // Restart (or stop) announcing so tracker traffic follows the new mode.
-                    announces = trackers.as_ref().and_then(|t| t.start(Some(now)));
+                    announces = announce(trackers.as_ref(), Some(now), paused);
                     if resumed {
                         shared.requeue_known();
                     }
@@ -1473,17 +1737,15 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             }
         }
 
+        // A paused torrent neither downloads nor uploads, so it stops announcing; resuming
+        // announces it again (`started`) at once.
+        if shared.paused.load(Ordering::Relaxed) != paused {
+            paused = !paused;
+            announces = announce(trackers.as_ref(), policy, paused);
+        }
+
         let now = Instant::now();
-        shared
-            .smoothed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .update(now, shared.downloaded.load(Ordering::Relaxed));
-        shared
-            .upload_smoothed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .update(now, shared.uploaded.load(Ordering::Relaxed));
+        shared.update_rates(now);
         let seek = shared.seek_pending.swap(false, Ordering::Relaxed);
         let refresh = shared.refresh_background.swap(false, Ordering::Relaxed)
             || ticks.is_multiple_of(BACKGROUND_REFRESH_TICKS);
@@ -1494,7 +1756,7 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             .keys()
             .copied()
             .collect();
-        let (cancels, fills, unresponsive) = {
+        let (cancels, fills, unresponsive, idle) = {
             let mut sched = shared.sched();
             let mut cancels = sched.reprioritize(seek);
             if seek {
@@ -1504,13 +1766,19 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             cancels.extend(sched.tick(now, refresh));
             let unresponsive = sched.unresponsive_peers(MAX_TIMEOUTS);
             let fills = sched.fill_all(&keys, now);
-            (cancels, fills, unresponsive)
+            let idle = shared.paused.load(Ordering::Relaxed) || sched.is_idle();
+            (cancels, fills, unresponsive, idle)
         };
+        shared.idle.store(idle, Ordering::Relaxed);
+        // A wake-up can only bring the next tick forward: a burst of them (peers connecting,
+        // pieces verifying) must not hold it off.
+        let due = tokio::time::Instant::now() + if idle { IDLE_TICK } else { TICK };
+        next_tick = if ticked { due } else { next_tick.min(due) };
         if !unresponsive.is_empty() {
             let mut peers = shared.peers.lock().unwrap_or_else(PoisonError::into_inner);
             for key in unresponsive {
                 // In a thin swarm a slow peer is better than none: keep it.
-                if peers.len() <= THIN_SWARM {
+                if shared.is_thin(peers.len()) {
                     break;
                 }
                 // Dropping the sender ends the peer's writer, and so its connection.
@@ -1534,7 +1802,10 @@ async fn drive(shared: Arc<Shared>, trackers: Option<Trackers>) {
             connect_more(&shared, keys.len());
         }
     }
-    // Peer tasks watch the same token and exit.
+    // Peer tasks watch the same token and exit. Readers and stream handles may keep this
+    // torrent's state alive a while longer, so its partial pieces give their memory back to
+    // the other torrents now (blocks still arriving are counted as wasted).
+    let _ = shared.sched().set_paused(true);
     debug!("torrent driver stopped");
 }
 
@@ -1581,7 +1852,7 @@ async fn accept_incoming(
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .get(&hash)
-                    .and_then(Weak::upgrade)
+                    .and_then(|t| t.shared.upgrade())
             });
             if let Some(shared) = shared {
                 crate::peer::accept(shared, stream, addr, lease, theirs).await;
@@ -1629,7 +1900,7 @@ impl Shared {
     /// bursts seconds apart, look snubbed, and have its blocks requested again elsewhere.
     pub(crate) fn read_cap(&self) -> usize {
         if self.rate_limit().is_some() {
-            crate::metainfo::BLOCK_LEN as usize
+            BLOCK_LEN as usize
         } else {
             usize::MAX
         }
@@ -1676,14 +1947,16 @@ impl Shared {
 
     /// Makes room for a peer that connected to us: it counts as handshaking until
     /// [`Shared::handshake_finished`]. Refused at the peer limit (counting connections being
-    /// made), while paused, and once the torrent stopped.
-    pub(crate) fn reserve_inbound(&self) -> bool {
+    /// made), while paused, once the torrent stopped, and from a banned address.
+    pub(crate) fn reserve_inbound(&self, addr: SocketAddr) -> bool {
         if self.paused.load(Ordering::Relaxed) || self.cancel.is_cancelled() {
             return false;
         }
         let live = self.live_peers();
         let mut c = self.candidates();
-        if live + c.connecting + c.handshaking >= self.cfg.peer_limit {
+        if c.banned_ips.contains(&addr.ip())
+            || live + c.connecting + c.handshaking >= self.cfg.peer_limit
+        {
             return false;
         }
         c.handshaking += 1;
@@ -1703,6 +1976,17 @@ impl Shared {
         self.cfg.network.as_ref()?.incoming_port()
     }
 
+    /// What DHT peer discovery needs to pace its lookups.
+    pub(crate) fn dht_demand(&self) -> crate::dht::Demand {
+        crate::dht::Demand {
+            paused: self.paused.load(Ordering::Relaxed),
+            idle: self.idle.load(Ordering::Relaxed),
+            live_peers: self.live_peers(),
+            peer_limit: self.cfg.peer_limit,
+            listen_port: self.incoming_port(),
+        }
+    }
+
     /// Called by a peer task when the handshake after [`Shared::tcp_finished`] ends.
     pub(crate) fn handshake_finished(&self) {
         let mut c = self.candidates();
@@ -1711,7 +1995,7 @@ impl Shared {
 
     /// Called by a peer task when it ends, to schedule the next attempt.
     pub(crate) fn peer_finished(&self, addr: SocketAddr, end: PeerEnd) {
-        let thin = self.live_peers() <= THIN_SWARM;
+        let thin = self.is_thin(self.live_peers());
         self.candidates().finished(addr, end, thin, Instant::now());
     }
 }
@@ -1730,6 +2014,41 @@ impl TorrentStatsProvider for TrackerStats {
             torrent_state: TrackerCommsStatsState::Live,
         }
     }
+}
+
+/// The trackers of `meta` to announce to: HTTP ones on the user's own network (a literal
+/// non-public address or a `localhost` name) only if `allow_local`. Names are checked when
+/// they are resolved (see [`tracker_client`]). UDP trackers are not checked here.
+fn tracker_urls(meta: &Metainfo, allow_local: bool) -> HashSet<url::Url> {
+    meta.trackers
+        .iter()
+        .filter(|u| {
+            !matches!(u.scheme(), "http" | "https") || allow_local || crate::webseed::url_allowed(u)
+        })
+        .cloned()
+        .collect()
+}
+
+/// The HTTP client for trackers. Their URLs come from magnet links and torrent files, so unless
+/// [`SwarmConfig::allow_local_trackers`], as for web seeds: only public destinations, through
+/// the network manager's public-only bridge (or, without one, a resolver that drops non-public
+/// addresses), with checked redirects. Literal addresses are checked by [`tracker_urls`].
+fn tracker_client(cfg: &SwarmConfig) -> Result<reqwest::Client, SwarmError> {
+    let allow_local = cfg.allow_local_trackers;
+    let http = reqwest::Client::builder()
+        .user_agent(concat!("TorrentPlayer/", env!("CARGO_PKG_VERSION")))
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(30))
+        .redirect(crate::webseed::redirect_policy(allow_local));
+    match (&cfg.network, allow_local) {
+        (Some(network), false) => network.configure_http_public(http),
+        (Some(network), true) => network.configure_http(http),
+        (None, false) => Ok(http.dns_resolver(crate::webseed::PublicResolver)),
+        (None, true) => Ok(http),
+    }
+    .map_err(|e| SwarmError::Trackers(e.to_string()))?
+    .build()
+    .map_err(|e| SwarmError::Trackers(e.to_string()))
 }
 
 /// The HTTP client for web seeds: through the network manager's public-only bridge (or, without
@@ -1917,5 +2236,486 @@ mod tests {
         assert_eq!(c.known.len(), MAX_KNOWN);
         assert!(!c.offer(addr(u16::MAX), false), "full");
         assert!(!c.offer(addr(1), false), "still known and queued");
+    }
+
+    #[test]
+    fn a_banned_address_is_never_dialed_on_any_port() {
+        let mut c = Candidates::default();
+        let other = SocketAddr::from(([127, 0, 0, 2], 7));
+        c.offer(addr(1), false);
+        c.offer(other, false);
+        c.offer(addr(2), false);
+        c.banned_ips.insert(addr(1).ip());
+        assert!(!c.offer(addr(3), false), "another port of a banned address");
+        // Queued before the ban: skipped.
+        assert_eq!(take(&mut c), other);
+        assert!(c.next().is_none());
+        assert!(c.known[&addr(2)].banned);
+    }
+
+    #[test]
+    fn peer_addresses_outlive_their_connections_for_a_while() {
+        let mut ips = PeerIps::default();
+        ips.insert(1, addr(1).ip());
+        ips.ended(1);
+        assert_eq!(ips.get(1), Some(addr(1).ip()));
+        for key in 2..2 + RECENT_PEER_IPS as u64 {
+            ips.insert(key, addr(2).ip());
+            ips.ended(key);
+        }
+        assert_eq!(ips.get(1), None, "forgotten after enough others ended");
+        assert_eq!(ips.recent.len(), RECENT_PEER_IPS);
+    }
+
+    #[test]
+    fn a_peer_alone_with_two_bad_pieces_is_banned() {
+        let mut blames = HashMap::new();
+        assert!(blame(&mut blames, &[(1, 1)]).is_empty());
+        assert_eq!(blame(&mut blames, &[(1, 2)]), vec![1]);
+        // Pieces with its data say nothing about the others any more.
+        assert!(blame(&mut blames, &[(1, 3), (2, 9)]).is_empty());
+    }
+
+    #[test]
+    fn a_tie_never_bans_an_honest_peer() {
+        // An attacker spoils every piece an honest peer also sent blocks of: both are counted
+        // the same, and neither is banned however long it goes on (smart ban settles it).
+        let mut blames = HashMap::new();
+        for failures in 1..100 {
+            assert!(blame(&mut blames, &[(1, failures), (2, failures)]).is_empty());
+            assert!(blame(&mut blames, &[(2, failures), (1, failures), (3, 1)]).is_empty());
+        }
+    }
+
+    #[test]
+    fn the_worst_of_several_sources_is_banned_after_four_bad_pieces() {
+        let mut blames = HashMap::new();
+        assert!(blame(&mut blames, &[(1, 3), (2, 1)]).is_empty());
+        assert_eq!(blame(&mut blames, &[(1, 4), (2, 1)]), vec![1]);
+    }
+
+    #[tokio::test]
+    async fn a_re_add_keeps_the_cache_of_any_live_earlier_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = SwarmConfig::new(dir.path().to_path_buf());
+        cfg.enable_trackers = false;
+        cfg.enable_web_seeds = false;
+        let swarm = Swarm::start(cfg).await.unwrap();
+        let mut bytes =
+            b"d4:infod6:lengthi16384e4:name5:a.mp412:piece lengthi16384e6:pieces20:".to_vec();
+        bytes.extend_from_slice(&[0; 20]);
+        bytes.extend_from_slice(b"ee");
+        let meta = Metainfo::from_bytes(&bytes).unwrap();
+
+        // A is still read from (a stream request finishing) while B is added, stopped and gone.
+        let a = swarm.add(meta.clone(), Vec::new()).unwrap();
+        a.shared.store.write_piece(0, b"piece of a").unwrap();
+        let b = swarm.add(meta.clone(), Vec::new()).unwrap();
+        b.stop();
+        let gone = Arc::downgrade(&b.shared);
+        drop(b);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while gone.strong_count() > 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the stopped instance is dropped");
+
+        // Adding C must not truncate the cache file under A, and C has A's verified piece.
+        let c = swarm.add(meta, Vec::new()).unwrap();
+        let mut buf = [0u8; 10];
+        a.shared.store.read(0, 0, &mut buf).unwrap();
+        assert_eq!(&buf, b"piece of a");
+        assert_eq!(c.have_pieces(), vec![true]);
+        swarm.shutdown();
+    }
+
+    #[tokio::test]
+    async fn stopping_wakes_a_waiting_reader_and_gives_back_partial_pieces() {
+        let dir = tempfile::tempdir().unwrap();
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let mut bytes =
+            b"d4:infod6:lengthi65536e4:name5:a.mp412:piece lengthi16384e6:pieces80:".to_vec();
+        bytes.extend_from_slice(&[0; 80]);
+        bytes.extend_from_slice(b"ee");
+        let torrent = swarm
+            .add(Metainfo::from_bytes(&bytes).unwrap(), Vec::new())
+            .unwrap();
+        let mut reader = torrent.reader(0).unwrap();
+        // A peer (never connected) that has every piece starts the reader's pieces.
+        {
+            let mut sched = torrent.shared.sched();
+            sched.add_peer(1_000);
+            sched.on_bitfield(1_000, &[0xf0]);
+            sched.on_unchoke(1_000);
+            sched.reprioritize(false);
+            assert!(!sched.fill(1_000, Instant::now()).is_empty());
+        }
+        assert!(swarm.piece_budget.used() > 0);
+
+        let read = tokio::spawn(async move {
+            let mut buf = [0u8; 1024];
+            let result = reader.read_exact(&mut buf).await.map(|_| ());
+            (result, reader)
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        torrent.stop();
+        let (result, reader) = tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .expect("the read ends when the torrent stops")
+            .unwrap();
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::ConnectionAborted);
+        // The reader still holds the torrent, but no longer its share of the budget.
+        wait_for(
+            "the partial pieces are given back",
+            Duration::from_secs(5),
+            || swarm.piece_budget.used() == 0,
+        )
+        .await;
+
+        let gone = Arc::downgrade(&torrent.shared);
+        drop((reader, torrent));
+        wait_for("the torrent closes", Duration::from_secs(5), || {
+            gone.strong_count() == 0
+        })
+        .await;
+        swarm.shutdown();
+    }
+
+    const PIECES: [&[u8]; 3] = [b"zeroth..", b"first...", b"sec"];
+
+    #[tokio::test]
+    async fn shutdown_can_time_out_while_a_cache_is_locked_and_the_flush_can_finish() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta.clone(), Vec::new()).unwrap();
+        for (piece, data) in (0..).zip(PIECES) {
+            torrent.shared.store.write_piece(piece, data).unwrap();
+        }
+        let cache = torrent.shared.store.cache_file().upgrade().unwrap();
+        let shared = Arc::clone(&torrent.shared);
+        let (locked, ready) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            shared.store.while_index_locked(|| {
+                locked.send(()).unwrap();
+                // Also releases the lock if shutdown regresses to blocking the test runtime.
+                let _ = released.recv_timeout(Duration::from_secs(2));
+            });
+        });
+        ready.await.unwrap();
+
+        // A single-thread runtime cannot service this deadline if shutdown flushes inline.
+        // Drop the actual shutdown future on timeout, just as the app does on exit.
+        let result = tokio::time::timeout(Duration::from_millis(100), swarm.shutdown_async()).await;
+        if result.is_err() {
+            wait_for("the flush owns its cache", Duration::from_secs(5), || {
+                Arc::strong_count(&cache) > 2
+            })
+            .await;
+        }
+        let _ = release.send(());
+        holder.join().unwrap();
+        assert!(
+            result.is_err(),
+            "the blocked flush must not block the deadline"
+        );
+        assert!(
+            swarm.cancel.is_cancelled(),
+            "torrent work stops before flushing"
+        );
+        wait_for("the flush finishes", Duration::from_secs(5), || {
+            Arc::strong_count(&cache) == 2
+        })
+        .await;
+
+        let reopened = PieceStore::open(&dir.path().join(meta.info_hash_hex()), &meta).unwrap();
+        assert_eq!(
+            reopened.stored(),
+            vec![
+                (0, crate::store::Check::Trusted),
+                (1, crate::store::Check::Trusted),
+                (2, crate::store::Check::Trusted)
+            ],
+            "the detached flush still leaves a usable clean marker"
+        );
+    }
+
+    fn config(dir: &std::path::Path) -> SwarmConfig {
+        let mut cfg = SwarmConfig::new(dir.to_path_buf());
+        cfg.enable_trackers = false;
+        cfg.enable_web_seeds = false;
+        cfg
+    }
+
+    async fn wait_for(what: &str, within: Duration, mut done: impl FnMut() -> bool) {
+        tokio::time::timeout(within, async {
+            while !done() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out: {what}"));
+    }
+
+    /// A session that stored `pieces` of `meta` in `dir`, then ended: cleanly (the app quit) or
+    /// not (a crash: the engine was not shut down).
+    async fn earlier_session(
+        dir: &std::path::Path,
+        meta: &Metainfo,
+        pieces: &[&[u8]],
+        clean: bool,
+    ) {
+        let swarm = Swarm::start(config(dir)).await.unwrap();
+        let torrent = swarm.add(meta.clone(), Vec::new()).unwrap();
+        for (piece, data) in (0..).zip(pieces) {
+            torrent.shared.store.write_piece(piece, data).unwrap();
+        }
+        if clean {
+            swarm.shutdown();
+        } else {
+            torrent.stop();
+        }
+        let gone = Arc::downgrade(&torrent.shared);
+        drop(torrent);
+        wait_for("the torrent closes", Duration::from_secs(5), || {
+            gone.strong_count() == 0
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pieces_stored_before_a_clean_restart_are_used_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        earlier_session(dir.path(), &meta, &PIECES, true).await;
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta, Vec::new()).unwrap();
+        assert_eq!(
+            torrent.have_pieces(),
+            [true; 3],
+            "trusted, not checked first"
+        );
+        let mut all = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut torrent.reader(0).unwrap(), &mut all)
+            .await
+            .unwrap();
+        assert_eq!(all, PIECES.concat());
+        assert_eq!(torrent.stats().downloaded_bytes, 0, "nothing downloaded");
+        assert_eq!(
+            swarm.rechecker.peak(),
+            0,
+            "nothing checked in the background"
+        );
+        swarm.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pieces_stored_before_a_crash_are_checked_then_used() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        earlier_session(dir.path(), &meta, &PIECES, false).await;
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta, Vec::new()).unwrap();
+        wait_for("the stored pieces verify", Duration::from_secs(10), || {
+            torrent.have_pieces().iter().all(|h| *h)
+        })
+        .await;
+        let mut all = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut torrent.reader(0).unwrap(), &mut all)
+            .await
+            .unwrap();
+        assert_eq!(all, PIECES.concat());
+        assert_eq!(torrent.stats().downloaded_bytes, 0, "nothing downloaded");
+        swarm.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_trusted_piece_that_fails_when_read_is_downloaded_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        earlier_session(dir.path(), &meta, &PIECES, true).await;
+        // Damaged in place, keeping the cache file's length and modification time.
+        let data = dir.path().join(meta.info_hash_hex()).join("pieces.dat");
+        let mut bytes = std::fs::read(&data).unwrap();
+        let modified = std::fs::metadata(&data).unwrap().modified().unwrap();
+        bytes[9] ^= 0xff;
+        std::fs::write(&data, &bytes).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&data)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta, Vec::new()).unwrap();
+        assert_eq!(torrent.have_pieces(), [true; 3]);
+        let mut buf = [0u8; 8];
+        let error = torrent.shared.read_piece(1, 0, &mut buf).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            torrent.have_pieces(),
+            [true, false, true],
+            "to download again"
+        );
+        torrent.shared.read_piece(0, 0, &mut buf).unwrap();
+        assert_eq!(&buf, PIECES[0]);
+        swarm.shutdown();
+    }
+
+    /// `n` pieces of 8 bytes, different for each `seed`.
+    fn numbered(seed: u8, n: u8) -> Vec<Vec<u8>> {
+        (0..n).map(|i| vec![seed, i, 1, 2, 3, 4, 5, 6]).collect()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checks_after_a_crash_share_two_threads_across_the_engine() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut metas = Vec::new();
+        for seed in 0..8 {
+            let pieces = numbered(seed, 16);
+            let pieces: Vec<&[u8]> = pieces.iter().map(Vec::as_slice).collect();
+            let meta = crate::store::tests::meta(&pieces, 8);
+            earlier_session(dir.path(), &meta, &pieces, false).await;
+            metas.push(meta);
+        }
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrents: Vec<Torrent> = metas
+            .into_iter()
+            .map(|meta| swarm.add(meta, Vec::new()).unwrap())
+            .collect();
+        wait_for("every piece verifies", Duration::from_secs(10), || {
+            torrents.iter().all(|t| t.have_pieces().iter().all(|h| *h))
+        })
+        .await;
+        let peak = swarm.rechecker.peak();
+        assert!((1..=2).contains(&peak), "{peak} pieces checked at once");
+        swarm.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_playhead_and_the_torrent_being_read_are_checked_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut metas = Vec::new();
+        for seed in 0..2 {
+            let pieces = numbered(seed, 8);
+            let pieces: Vec<&[u8]> = pieces.iter().map(Vec::as_slice).collect();
+            let meta = crate::store::tests::meta(&pieces, 8);
+            earlier_session(dir.path(), &meta, &pieces, false).await;
+            metas.push(meta);
+        }
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        swarm.rechecker.set_limit(0);
+        let mut added = metas
+            .into_iter()
+            .map(|meta| swarm.add(meta, Vec::new()).unwrap());
+        let (first, second) = (added.next().unwrap(), added.next().unwrap());
+        // The torrent added second is played from piece 5.
+        second.set_playhead(0, 5 * 8, None).unwrap();
+        wait_for(
+            "the driver plans the playhead",
+            Duration::from_secs(5),
+            || second.shared.sched().urgent_pieces().first() == Some(&5),
+        )
+        .await;
+
+        let mut order = Vec::new();
+        while let Some((shared, piece)) = swarm.rechecker.take_next() {
+            let which = if Arc::ptr_eq(&shared, &second.shared) {
+                2
+            } else {
+                1
+            };
+            order.push((which, piece));
+        }
+        assert_eq!(order.first(), Some(&(2, 5)), "{order:?}");
+        let seconds = order.iter().take_while(|(which, _)| *which == 2).count();
+        assert_eq!(
+            seconds, 8,
+            "the torrent being read before the other: {order:?}"
+        );
+        assert_eq!(order.len(), 16);
+        assert!(!first.have_pieces()[0]);
+        swarm.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_corrupted_stored_piece_is_not_trusted_and_is_requested_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        earlier_session(dir.path(), &meta, &PIECES, false).await;
+        let data = dir.path().join(meta.info_hash_hex()).join("pieces.dat");
+        let mut bytes = std::fs::read(&data).unwrap();
+        bytes[9] ^= 0xff;
+        std::fs::write(&data, &bytes).unwrap();
+
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta, Vec::new()).unwrap();
+        wait_for(
+            "the stored pieces are checked",
+            Duration::from_secs(10),
+            || torrent.have_pieces() == [true, false, true] && torrent.shared.sched().is_idle(),
+        )
+        .await;
+        let mut buf = [0u8; 8];
+        assert!(torrent.shared.store.read(1, 0, &mut buf).is_err());
+
+        // A peer with every piece is asked for piece 1 only.
+        torrent.select_file(0).unwrap();
+        let mut sched = torrent.shared.sched();
+        sched.add_peer(99);
+        assert!(sched.on_bitfield(99, &[0xe0]));
+        sched.on_unchoke(99);
+        sched.tick(Instant::now(), true);
+        let requests = sched.fill(99, Instant::now());
+        drop(sched);
+        assert!(!requests.is_empty());
+        assert!(requests.iter().all(|r| r.piece == 1), "{requests:?}");
+        swarm.shutdown();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_driver_ticks_slowly_while_there_is_nothing_to_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = crate::store::tests::meta(&PIECES, 8);
+        let swarm = Swarm::start(config(dir.path())).await.unwrap();
+        let torrent = swarm.add(meta, Vec::new()).unwrap();
+        let idle = || torrent.shared.idle.load(Ordering::Relaxed);
+        // Less than IDLE_TICK: these changes take effect at once, not at the next slow tick.
+        let soon = IDLE_TICK / 2;
+
+        wait_for("idle with nothing selected", soon, idle).await;
+        torrent.select_file(0).unwrap();
+        wait_for("busy once a file is selected", soon, || !idle()).await;
+        torrent.set_paused(true);
+        wait_for("idle while paused", soon, idle).await;
+        torrent.set_paused(false);
+        wait_for("busy once resumed", soon, || !idle()).await;
+        torrent.deselect_file(0).unwrap();
+        wait_for("idle once deselected", soon, idle).await;
+        torrent.set_playhead(0, 0, None).unwrap();
+        wait_for("busy with a playhead", soon, || !idle()).await;
+
+        // Complete: idle even while playing.
+        for (piece, data) in (0..).zip(PIECES) {
+            torrent.shared.store.write_piece(piece, data).unwrap();
+            torrent
+                .shared
+                .sched()
+                .on_verified(piece, PieceCheck::Valid(None));
+        }
+        torrent.shared.request_replan(false);
+        wait_for("idle once complete", soon, idle).await;
+        torrent.set_playhead(0, 20, None).unwrap();
+        tokio::time::sleep(TICK * 3).await;
+        assert!(idle(), "nothing to download for the playhead");
+        swarm.shutdown();
     }
 }

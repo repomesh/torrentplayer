@@ -35,6 +35,18 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
       - name: Tests
         run: cargo test --workspace --all-features --locked
+      # The vendored crates are outside the workspace, so the step above skips their own tests.
+      # Each has a Cargo.lock with the workspace's versions: after changing Cargo.lock, copy it
+      # into vendor/<crate>/ and run `cargo metadata --offline` there to drop what it does not
+      # use. Examples are skipped (librqbit-dht's needs a tracing-subscriber feature it does not
+      # enable).
+      - name: Tests (vendored crates)
+        shell: bash
+        run: |
+          for crate in librqbit-dht librqbit-tracker-comms tokio-wireguard; do
+            cargo test --locked --manifest-path "vendor/$crate/Cargo.toml" \
+              --target-dir target/vendor --lib --tests
+          done
       - name: Check generated IPC bindings are committed
         shell: bash
         run: |
@@ -68,7 +80,7 @@ jobs:
         run: cargo doc --workspace --no-deps --locked
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
-          tool: mdbook
+          tool: mdbook@0.5.4
       - name: Build developer guide
         run: mdbook build docs
 
@@ -97,7 +109,7 @@ jobs:
       - run: rustup show active-toolchain || rustup toolchain install
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
-          tool: cargo-about
+          tool: cargo-about@0.9.2
       - name: Check THIRD_PARTY_NOTICES.md is up to date
         run: |
           cargo about generate --workspace --locked -c .cargo/about.toml .cargo/about.hbs -o THIRD_PARTY_NOTICES.md
@@ -147,7 +159,7 @@ jobs:
       - run: rustup component add llvm-tools
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
-          tool: cargo-llvm-cov
+          tool: cargo-llvm-cov@0.9.1
       - name: Measure coverage
         run: cargo llvm-cov --workspace --all-features --locked --lcov --output-path lcov.info
       - name: Write coverage summary
@@ -197,7 +209,7 @@ jobs:
           persist-credentials: false
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
         with:
-          tool: zizmor
+          tool: zizmor@1.30.1
       - run: zizmor --offline --format=github .github
 
   # Single required check for branch protection.

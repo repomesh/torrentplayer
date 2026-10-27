@@ -1,20 +1,22 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 <script lang="ts">
   /*
-   * The playlist beside the player: what is playing, the queue, and what plays next. It
+   * The playlist beside the player: what is playing, and the queue to pick from. It
    * collapses to a slim strip (Q toggles it), and is hidden in fullscreen.
    */
   import type { FileSummary } from '../bindings/FileSummary';
   import type { LibraryItem } from '../bindings/LibraryItem';
   import type { ReadinessState } from '../bindings/ReadinessState';
-  import { byId, describeLink, fastestItem, type DownloadsSnapshot } from '../downloads';
+  import { byId, describeLink, type DownloadsSnapshot } from '../downloads';
+  import type { NetworkStatus } from '../ipc';
+  import { followNetwork, queueBlockedNotice } from '../network';
   import {
-    currentIndex,
     groupKey,
+    SORT_KEYS,
     upcomingCount,
-    type DownloadOrder,
     type Queue,
     type QueueItem,
+    type SortKey,
   } from '../queue';
   import QueueList from './QueueList.svelte';
 
@@ -23,6 +25,9 @@
     collapsed: boolean;
     /** The queue item playing now, if the video playing came from the queue. */
     playingId: string | null;
+    playbackPaused?: boolean;
+    onTogglePlayback?: () => void;
+    onStopPlayback?: () => void;
     /** The file playing, when it did not come from the queue. */
     playingTitle: string | null;
     nextStatus: string | null;
@@ -41,11 +46,6 @@
     onPlayFile: (key: string, file: FileSummary) => void;
     onToggleFile: (key: string, file: FileSummary, queued: boolean) => void;
     onLoadFiles: (key: string) => void;
-    /** "Play ready videos first" (`playback.optimizeQueue`) and `playback.keepCourseOrder`. */
-    optimize: boolean;
-    keepCourseOrder: boolean;
-    onOptimize: (on: boolean) => void;
-    onKeepCourseOrder: (on: boolean) => void;
     /** Empties the queue (with Undo). */
     onClear: () => void;
     /** Background downloads of the queue (`queue_downloads`), once known. */
@@ -54,16 +54,19 @@
     watchProgress?: ReadonlyMap<string, LibraryItem>;
     /** Pauses or resumes background downloading of items. */
     onTogglePause?: (ids: readonly string[], paused: boolean) => void;
-    /** Skips (unticks) or restores items. */
-    onToggleSkip?: (ids: readonly string[], skipped: boolean) => void;
-    /** Sets how spare bandwidth is shared between items. */
-    onOrder?: (order: DownloadOrder) => void;
+    /** Reorders the queue once by `key` ("Sort by…"); it never re-sorts on its own. */
+    onSort?: (key: SortKey) => void;
+    /** Opens Settings → Network & VPN (from the banner shown while traffic is blocked). */
+    onNetworkSettings?: () => void;
   }
 
   let {
     queue,
     collapsed,
     playingId,
+    playbackPaused = false,
+    onTogglePlayback,
+    onStopPlayback,
     playingTitle,
     nextStatus,
     isBusy,
@@ -80,21 +83,25 @@
     onPlayFile,
     onToggleFile,
     onLoadFiles,
-    optimize,
-    keepCourseOrder,
-    onOptimize,
-    onKeepCourseOrder,
     onClear,
     downloads = null,
     watchProgress = new Map(),
     onTogglePause,
-    onToggleSkip,
-    onOrder,
+    onSort,
+    onNetworkSettings,
   }: Props = $props();
+
+  // The kill switch: while it blocks traffic, rows would say "Finding peers…" with no reason.
+  let network = $state<NetworkStatus | null>(null);
+  $effect(() =>
+    followNetwork((next) => {
+      network = next;
+    }),
+  );
+  const blockedNotice = $derived(queueBlockedNotice(network));
 
   const linkLine = $derived(downloads ? describeLink(downloads.link) : null);
   const byItem = $derived(byId(downloads));
-  const fastest = $derived(queue.order === 'fastest' ? fastestItem(downloads?.items ?? []) : null);
   const anyRunning = $derived(queue.items.some((i) => !i.paused));
 
   const upcoming = $derived(upcomingCount(queue));
@@ -105,6 +112,12 @@
   function closeMenu(): void {
     menuOpen = false;
     confirmClear = false;
+  }
+
+  /** After a menu action, focus returns to the button that opened the menu. */
+  function chose(): void {
+    closeMenu();
+    menuButton?.focus();
   }
 
   // A click outside the menu closes it.
@@ -131,7 +144,7 @@
       type="button"
       class="toggle"
       aria-expanded="false"
-      aria-label={`Show the queue${upcoming > 0 ? `, ${String(upcoming)} up next` : ''}`}
+      aria-label={`Show the queue${upcoming > 0 ? `, ${String(upcoming)} to play` : ''}`}
       title="Show the queue (Q)"
       onclick={onToggle}
     >
@@ -144,9 +157,9 @@
 {:else}
   <aside class="panel" aria-label="Queue">
     <header>
-      <h2>Queue</h2>
+      <h2 title="Shift+N plays the next video">Queue</h2>
       {#if upcoming > 0}
-        <span class="sub">{upcoming} up next</span>
+        <span class="sub">{upcoming} to play</span>
       {/if}
       <button
         bind:this={menuButton}
@@ -177,6 +190,9 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 6l-6 6 6 6" /></svg>
       </button>
     </header>
+    {#if queue.items.length > 0}
+      <p class="keys" aria-hidden="true">↑↓ move · Enter play · P pause · Del remove</p>
+    {/if}
 
     {#if menuOpen}
       <!-- A non-modal dialog: the player leaves keys inside dialogs alone. -->
@@ -193,48 +209,44 @@
           }
         }}
       >
-        <label title="Move videos that are ready to play ahead of those still downloading">
-          <input
-            type="checkbox"
-            checked={optimize}
-            onchange={(event: Event) => {
-              onOptimize((event.currentTarget as HTMLInputElement).checked);
-            }}
-          />
-          Play ready videos first
-        </label>
-        <label class:off={!optimize} title="Files of one torrent keep their order">
-          <input
-            type="checkbox"
-            checked={keepCourseOrder}
-            disabled={!optimize}
-            onchange={(event: Event) => {
-              onKeepCourseOrder((event.currentTarget as HTMLInputElement).checked);
-            }}
-          />
-          Keep each torrent's order
-        </label>
-        <hr />
+        {#if onSort}
+          <div class="sort" role="group" aria-labelledby="queue-sort-label">
+            <span id="queue-sort-label" class="menu-label"
+              >Sort by… <span class="hint">(once; drag to reorder after)</span></span
+            >
+            {#each SORT_KEYS as option (option.key)}
+              <button
+                type="button"
+                disabled={queue.items.length < 2}
+                onclick={() => {
+                  onSort(option.key);
+                  chose();
+                }}>{option.label}</button
+              >
+            {/each}
+          </div>
+          <hr />
+        {/if}
         {#if onTogglePause}
           <button
             type="button"
             disabled={queue.items.length === 0}
-            title="Background downloading only; playing a video still downloads it"
+            title="Stops downloading and uploading in the background until you resume; playing a video still works"
             onclick={() => {
               onTogglePause(
                 queue.items.map((i) => i.id),
                 anyRunning,
               );
-              closeMenu();
-            }}>{anyRunning ? 'Pause all downloads' : 'Resume all downloads'}</button
+              chose();
+            }}>{anyRunning ? 'Pause all (download and upload)' : 'Resume all'}</button
           >
         {/if}
         <button
           type="button"
-          disabled={currentIndex(queue) <= 0}
+          disabled={!queue.items.some((item) => item.played && item.id !== playingId)}
           onclick={() => {
             onClearPlayed();
-            closeMenu();
+            chose();
           }}>Clear played</button
         >
         {#if confirmClear}
@@ -245,7 +257,7 @@
               class="danger"
               onclick={() => {
                 onClear();
-                closeMenu();
+                chose();
               }}>Clear</button
             >
             <button
@@ -267,25 +279,19 @@
       </dialog>
     {/if}
 
-    {#if queue.items.length > 0 && onOrder}
-      <div class="downloads">
-        <div class="order" role="radiogroup" aria-label="Download the queue">
-          {#each [['inOrder', 'In order', 'Next items first, in queue order (series, albums, courses)'], ['fastest', 'Fastest first', 'Videos whose torrents download fastest first; a course keeps its order']] as [value, label, hint] (value)}
-            <button
-              type="button"
-              role="radio"
-              aria-checked={queue.order === value}
-              title={hint}
-              onclick={() => {
-                onOrder(value as DownloadOrder);
-              }}>{label}</button
-            >
-          {/each}
-        </div>
-        {#if linkLine}<p class="link" title="Measured from what all torrents download together">
-            {linkLine}
-          </p>{/if}
+    {#if blockedNotice}
+      <div class="blocked" role="status">
+        <p>{blockedNotice}</p>
+        {#if onNetworkSettings}
+          <button type="button" onclick={onNetworkSettings}>Network settings</button>
+        {/if}
       </div>
+    {/if}
+
+    {#if queue.items.length > 0 && linkLine}
+      <p class="link" title="Measured from what all torrents download together">
+        {linkLine}
+      </p>
     {/if}
 
     {#if playingTitle}
@@ -298,8 +304,8 @@
     <div class="body">
       {#if queue.items.length === 0}
         <p class="empty">
-          Nothing queued yet. Use <strong>Queue</strong> on a search result or a file to line up what
-          plays next.
+          Nothing queued yet. Use <strong>Queue</strong> on a search result or a file to line up videos
+          to watch.
         </p>
       {:else}
         {#if playingId === null && playingTitle === null}
@@ -320,6 +326,9 @@
         <QueueList
           {queue}
           {playingId}
+          {playbackPaused}
+          {onTogglePlayback}
+          {onStopPlayback}
           {nextStatus}
           {isBusy}
           {readiness}
@@ -335,10 +344,9 @@
           {onRemoveGroup}
           {onChooseFiles}
           downloads={byItem}
-          {fastest}
           {watchProgress}
           {onTogglePause}
-          {onToggleSkip}
+          maxActive={downloads?.link.maxActive ?? null}
         />
       {/if}
     </div>
@@ -456,37 +464,40 @@
     stroke-linejoin: round;
   }
 
-  .downloads {
-    display: grid;
-    gap: 0.35rem;
+  .blocked {
     margin: 0 0.6rem 0.5rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid #6b3a30;
+    border-radius: 0.5rem;
+    background: rgb(232 144 122 / 8%);
+    font-size: 0.8rem;
+    line-height: 1.4;
   }
 
-  .order {
-    display: flex;
-    padding: 0.15rem;
-    border-radius: 0.45rem;
-    background: rgb(255 255 255 / 5%);
+  .blocked p {
+    margin: 0 0 0.4rem;
+    color: var(--text);
   }
 
-  .order button {
-    flex: 1;
-    padding: 0.25rem 0.4rem;
+  .blocked button {
+    padding: 0.2rem 0.55rem;
+    border: 1px solid #6b3a30;
     border-radius: 0.35rem;
-    font-size: 0.75rem;
+    color: #e8907a;
   }
 
-  .order button[aria-checked='true'] {
-    background: rgb(255 255 255 / 10%);
-    color: var(--text);
+  .blocked button:hover {
+    background: rgb(232 144 122 / 10%);
   }
 
-  .order button:hover {
-    color: var(--text);
+  .keys {
+    margin: -0.35rem 0.9rem 0.5rem;
+    color: var(--text-muted);
+    font-size: 0.7rem;
   }
 
   .link {
-    margin: 0;
+    margin: 0 0.6rem 0.5rem;
     color: var(--text-muted);
     font-size: 0.72rem;
     line-height: 1.35;
@@ -556,8 +567,8 @@
     font-size: 0.85rem;
   }
 
-  .menu label,
-  .menu > button {
+  .menu > button,
+  .sort > button {
     display: flex;
     align-items: center;
     gap: 0.5rem;
@@ -568,28 +579,30 @@
     cursor: pointer;
   }
 
-  .menu label:hover,
-  .menu > button:hover:not(:disabled) {
+  .menu > button:hover:not(:disabled),
+  .sort > button:hover:not(:disabled) {
     background: rgb(255 255 255 / 6%);
   }
 
-  .menu label.off {
-    opacity: 0.55;
-  }
-
-  .menu > button:disabled {
+  .menu > button:disabled,
+  .sort > button:disabled {
     cursor: default;
     opacity: 0.4;
   }
 
-  .menu input {
-    margin: 0;
-    accent-color: var(--accent);
+  .sort {
+    display: grid;
+    gap: 0.15rem;
   }
 
-  .menu input:focus-visible {
-    outline: 2px solid var(--accent);
-    outline-offset: 1px;
+  .menu-label {
+    padding: 0.3rem 0.5rem 0.1rem;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+  }
+
+  .menu-label .hint {
+    color: var(--text-muted);
   }
 
   .menu hr {

@@ -2,7 +2,7 @@
 
 //! Loopback helpers for tests (feature `test-util`): a SOCKS5 proxy that records what it
 //! relays and can be stopped and restarted on the same port, and a recording TCP relay to put
-//! in front of a seeder to see who connects to it.
+//! in front of a seeder to see who connects to it, and a fake UPnP router.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr};
@@ -13,6 +13,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::socks5::{self, Reply, ServerAuth, Target};
+#[path = "test_gateway.rs"]
+mod gateway;
+pub use gateway::TestGateway;
 #[path = "test_udp_proxy.rs"]
 mod udp;
 pub use udp::TestUdpProxy;

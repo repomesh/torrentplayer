@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use secrecy::zeroize::Zeroize;
 use secrecy::{ExposeSecret, SecretString};
@@ -208,6 +208,31 @@ impl SecretStatus {
 pub struct KeyringStore {
     service: String,
     legacy: Option<String>,
+    entries: Arc<dyn Entries>,
+}
+
+/// The entries behind a [`KeyringStore`]: the OS credential store, or a fake in tests.
+trait Entries: Send + Sync + fmt::Debug {
+    fn get(&self, service: &str, account: &str) -> keyring::Result<String>;
+    fn set(&self, service: &str, account: &str, value: &str) -> keyring::Result<()>;
+    fn delete(&self, service: &str, account: &str) -> keyring::Result<()>;
+}
+
+#[derive(Debug)]
+struct OsEntries;
+
+impl Entries for OsEntries {
+    fn get(&self, service: &str, account: &str) -> keyring::Result<String> {
+        keyring::Entry::new(service, account)?.get_password()
+    }
+
+    fn set(&self, service: &str, account: &str, value: &str) -> keyring::Result<()> {
+        keyring::Entry::new(service, account)?.set_password(value)
+    }
+
+    fn delete(&self, service: &str, account: &str) -> keyring::Result<()> {
+        keyring::Entry::new(service, account)?.delete_credential()
+    }
 }
 
 impl KeyringStore {
@@ -217,6 +242,7 @@ impl KeyringStore {
         Self {
             service: service.into(),
             legacy: None,
+            entries: Arc::new(OsEntries),
         }
     }
 
@@ -228,31 +254,38 @@ impl KeyringStore {
         self
     }
 
-    fn entry(&self, key: SecretKey) -> Result<keyring::Entry, SecretError> {
-        keyring::Entry::new(&self.service, key.account()).map_err(|e| map_keyring(key, &e))
+    /// Reads the entry for `key` under `service`, if there is one.
+    fn read(&self, service: &str, key: SecretKey) -> Result<Option<SecretString>, SecretError> {
+        match self.entries.get(service, key.account()) {
+            Ok(mut value) => {
+                let secret = SecretString::from(value.as_str());
+                value.zeroize();
+                Ok(Some(secret))
+            }
+            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(e) => Err(map_keyring(key, &e)),
+        }
     }
 
-    fn legacy_entry(&self, key: SecretKey) -> Option<keyring::Entry> {
-        keyring::Entry::new(self.legacy.as_deref()?, key.account()).ok()
+    /// Removes the entry for `key` under `service`. Removing one that is not there succeeds.
+    fn delete(&self, service: &str, key: SecretKey) -> Result<(), SecretError> {
+        match self.entries.delete(service, key.account()) {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(e) => Err(map_keyring(key, &e)),
+        }
     }
 
     /// Moves a legacy entry to the current service. Returns its value, if there was one.
     fn take_legacy(&self, key: SecretKey) -> Result<Option<SecretString>, SecretError> {
-        let Some(legacy) = self.legacy_entry(key) else {
+        let Some(legacy) = self.legacy.as_deref() else {
             return Ok(None);
         };
-        let secret = match legacy.get_password() {
-            Ok(mut value) => {
-                let secret = SecretString::from(value.as_str());
-                value.zeroize();
-                secret
-            }
-            Err(keyring::Error::NoEntry) => return Ok(None),
-            Err(e) => return Err(map_keyring(key, &e)),
+        let Some(secret) = self.read(legacy, key)? else {
+            return Ok(None);
         };
         // Removed only once the copy is stored, so a failure loses nothing.
         if self.set(key, &secret).is_ok() {
-            let _ = legacy.delete_credential();
+            let _ = self.delete(legacy, key);
         }
         Ok(Some(secret))
     }
@@ -264,32 +297,28 @@ impl SecretStore for KeyringStore {
     }
 
     fn set(&self, key: SecretKey, value: &SecretString) -> Result<(), SecretError> {
-        self.entry(key)?
-            .set_password(value.expose_secret())
+        self.entries
+            .set(&self.service, key.account(), value.expose_secret())
             .map_err(|e| map_keyring(key, &e))
     }
 
     fn get(&self, key: SecretKey) -> Result<Option<SecretString>, SecretError> {
-        match self.entry(key)?.get_password() {
-            Ok(mut value) => {
-                let secret = SecretString::from(value.as_str());
-                value.zeroize();
-                Ok(Some(secret))
-            }
-            Err(keyring::Error::NoEntry) => self.take_legacy(key),
-            Err(e) => Err(map_keyring(key, &e)),
+        match self.read(&self.service, key)? {
+            Some(secret) => Ok(Some(secret)),
+            None => self.take_legacy(key),
         }
     }
 
     fn clear(&self, key: SecretKey) -> Result<(), SecretError> {
-        // A cleared secret must not come back from the legacy service.
-        if let Some(legacy) = self.legacy_entry(key) {
-            let _ = legacy.delete_credential();
-        }
-        match self.entry(key)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(e) => Err(map_keyring(key, &e)),
-        }
+        // A cleared secret must not come back from the legacy service, so a legacy entry that
+        // cannot be removed fails the clear: the user is told, rather than seeing the secret
+        // return on the next read.
+        let current = self.delete(&self.service, key);
+        let legacy = match self.legacy.as_deref() {
+            Some(legacy) => self.delete(legacy, key),
+            None => Ok(()),
+        };
+        current.and(legacy)
     }
 }
 
@@ -452,5 +481,95 @@ mod tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(names.len(), SecretKey::ALL.len());
+    }
+
+    /// Credential store entries in memory, for [`KeyringStore`] without the OS store.
+    #[derive(Debug, Default)]
+    struct FakeEntries {
+        values: Mutex<HashMap<(String, String), String>>,
+        /// Deletes under this service fail, as from a locked store.
+        refuse_delete: Mutex<Option<String>>,
+    }
+
+    impl FakeEntries {
+        fn value(&self, service: &str, key: SecretKey) -> Option<String> {
+            let values = self.values.lock().unwrap();
+            values
+                .get(&(service.to_owned(), key.account().to_owned()))
+                .cloned()
+        }
+    }
+
+    impl Entries for FakeEntries {
+        fn get(&self, service: &str, account: &str) -> keyring::Result<String> {
+            let values = self.values.lock().unwrap();
+            let entry = (service.to_owned(), account.to_owned());
+            values.get(&entry).cloned().ok_or(keyring::Error::NoEntry)
+        }
+
+        fn set(&self, service: &str, account: &str, value: &str) -> keyring::Result<()> {
+            let mut values = self.values.lock().unwrap();
+            values.insert((service.to_owned(), account.to_owned()), value.to_owned());
+            Ok(())
+        }
+
+        fn delete(&self, service: &str, account: &str) -> keyring::Result<()> {
+            if self.refuse_delete.lock().unwrap().as_deref() == Some(service) {
+                return Err(keyring::Error::NoStorageAccess("locked".into()));
+            }
+            let mut values = self.values.lock().unwrap();
+            let entry = (service.to_owned(), account.to_owned());
+            values
+                .remove(&entry)
+                .map(|_| ())
+                .ok_or(keyring::Error::NoEntry)
+        }
+    }
+
+    fn fake_keyring() -> (KeyringStore, Arc<FakeEntries>) {
+        let entries = Arc::new(FakeEntries::default());
+        let store = KeyringStore {
+            entries: Arc::clone(&entries) as Arc<dyn Entries>,
+            ..KeyringStore::new(KEYRING_SERVICE).with_legacy(LEGACY_KEYRING_SERVICE)
+        };
+        (store, entries)
+    }
+
+    #[test]
+    fn legacy_entries_move_on_read_and_clearing_removes_both() {
+        let (store, entries) = fake_keyring();
+        let key = SecretKey::WireGuardPrivateKey;
+        entries
+            .set(LEGACY_KEYRING_SERVICE, key.account(), KEY)
+            .unwrap();
+        assert_eq!(store.get(key).unwrap().unwrap().expose_secret(), KEY);
+        assert_eq!(entries.value(KEYRING_SERVICE, key).as_deref(), Some(KEY));
+        assert_eq!(entries.value(LEGACY_KEYRING_SERVICE, key), None, "moved");
+
+        // A legacy entry left behind is removed with the current one.
+        entries
+            .set(LEGACY_KEYRING_SERVICE, key.account(), KEY)
+            .unwrap();
+        store.clear(key).unwrap();
+        assert!(store.get(key).unwrap().is_none());
+        store.clear(key).unwrap();
+    }
+
+    #[test]
+    fn a_legacy_entry_that_cannot_be_removed_fails_the_clear() {
+        let (store, entries) = fake_keyring();
+        let key = SecretKey::WireGuardPresharedKey;
+        store.set(key, &SecretString::from(KEY.to_owned())).unwrap();
+        entries
+            .set(LEGACY_KEYRING_SERVICE, key.account(), KEY)
+            .unwrap();
+        *entries.refuse_delete.lock().unwrap() = Some(LEGACY_KEYRING_SERVICE.to_owned());
+        // Reported, rather than the secret coming back from the legacy service unannounced.
+        assert_eq!(store.clear(key), Err(SecretError::Refused));
+        assert_eq!(entries.value(KEYRING_SERVICE, key), None);
+
+        *entries.refuse_delete.lock().unwrap() = None;
+        store.clear(key).unwrap();
+        assert!(store.get(key).unwrap().is_none(), "nothing to resurrect");
     }
 }

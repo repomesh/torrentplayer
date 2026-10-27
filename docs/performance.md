@@ -67,7 +67,7 @@ Use the native Windows release binary to include Windows filesystem behavior. Th
 accepts a Windows `.exe` path from WSL and translates the output paths:
 
 ```sh
-python3 scripts/benchmark-streaming.py --binary target/agent-net/release/torrentplayer-bench.exe \
+python3 scripts/benchmark-streaming.py --binary target/release/torrentplayer-bench.exe \
   --scenario 4k-rate --scenario large-file --runs 5
 ```
 
@@ -194,8 +194,13 @@ within 30 seconds or the benchmark stops with the network's reason instead of me
 swarm. Starting a tunnel per run reconnected to the VPN server every few seconds, and some
 servers then stop completing handshakes. If the tunnel or proxy drops later, the manager
 reconnects by itself: each run first waits up to 90 seconds for traffic to flow again, and an
-entry that cannot start reports "tunnel down". The kill switch stays on, so nothing leaves
-outside the tunnel or proxy.
+entry that cannot start reports "tunnel down". The kill switch stays on, and everything a
+public run sends goes through the network manager: both engines' peer, tracker, and DHT
+traffic, and the suite's download of an entry's `.torrent` link, which likewise waits for
+traffic to flow and fails rather than connect directly. As in the app, that download (and
+every redirect it follows) only goes to public hosts, never to `localhost` or a private,
+loopback, or link-local address, also without these options. Only the loopback connections
+between the simulated player and the stream server stay on the machine.
 
 The engines run as the app runs them in these modes. librqbit has no DHT, listener, or UDP of
 its own and reaches peers through the network's loopback bridge; it only takes magnet links
@@ -509,3 +514,78 @@ of the same cold path measured 3123 / 15805 and 1348 / 16445 for metadata: the p
 much noisier than earlier in the day, and the difference between identical configurations
 shows the spread. The swarm engine kept its saved state and still found its first peer sooner
 with it: 2344 / 3921 against 12095 / 12991 cold (three runs each).
+
+**DHT lookups in 0.3.1**, swarm engine, `--seeks 0.5 --download-mibps 4`, medians / p95 in
+ms of three runs per row, cold DHT unless noted; the DHT-only rows were repeated three times,
+interleaved, as were the Sintel ones, and each cell lists the sets:
+
+| Source                                   | Before: first peer                       | After: first peer                     | Before: start-up  | After: start-up  |
+| ---------------------------------------- | ---------------------------------------- | ------------------------------------- | ----------------- | ---------------- |
+| Ubuntu server ISO `.torrent`, DHT only   | 12160 / 39270, 4380 / 8747, 1974 / 3730  | 1131 / 1415, 836 / 1904, 737 / 898    | 12657, 5310, 2933 | 1844, 2048, 2444 |
+| same, saved DHT state (`--dht-state`)    | 2509 / 3258                              | 2049 / 2967                           | 3649              | 2810             |
+| same, with its trackers                  | 481 / 570                                | 488 / 549                             | 3348              | 2562             |
+| Sintel, trackerless magnet (metadata)    | 3066 / 3732, 5425 / 15026, 6774 / 9913   | 2541 / 3151, 2907 / 4064, 2656 / 4106 | 685, 733, 686     | 3834, 924, 697   |
+| Sintel magnet through WireGuard (2 runs) | failed: "input address stream exhausted" | metadata 2340 / 3797                  | –                 | 1822 / 3415      |
+| Ubuntu, DHT only, through WireGuard (2)  | 3115 / 3187                              | 1045 / 2699                           | 3820              | 2202             |
+
+Peers seen per session were about the same or higher (289–368 before, 351–382 after, for the
+Ubuntu ISO), and live peers stayed near the peer limit. Three changes made the difference. The
+vendored librqbit-dht sent every lookup query twice and waited for both replies, so each hop
+took two round trips: in a standalone measurement the first peer from a populated routing
+table took 0.27 s instead of 0.51 s once it sent each query once. A lookup used to ask the 8
+closest nodes the routing table had when it started and, once it had asked any, nothing more
+for up to 60 s (`n` × 7.5 s with `n` < 8 roots), so a cold node that started its lookup from
+the first few bootstrap contacts could wait half a minute; torrentplayer-swarm now runs single
+lookups that wait up to a second for 8 roots, and looks up again 20 s after one ends while a
+torrent wants peers. Through WireGuard, a trackerless magnet's metadata fetch got only the
+first 20 DHT peers, all stale or unreachable in the failing runs; it now gets up to 200.
+
+Datagrams (counted by a standalone node with a counting transport, IPv4, public DHT): one
+lookup costs 700–1000 queries; the node's own maintenance (pings, bucket refreshes) is about
+0.1 per second. Before, every torrent's lookup was repeated every 60 s for as long as it was
+in the engine, about 1,100 datagrams a minute (some 19 per second) for each torrent, paused and
+complete ones included. Now a paused torrent, or one with nothing to download, sends none
+(one lookup every 15 minutes while it announces itself), a downloading torrent with enough
+peers one lookup every 5 minutes (about 3 per second), and one that wants peers one every 20 s
+to 5 minutes. Start-up times above include other 0.3.1 changes to the engine; the first-peer
+and metadata times depend on the DHT alone. The Sintel magnet's start-up is noisy because its
+swarm is small (about 10 live peers).
+
+**DHT A/B, one change at a time.** Each change was switched by a temporary environment variable
+in one build, and the two behaviours alternated (A, B, A, B, ...) on the public DHT, so drift in
+the swarm or the time of day hits both alike. A small program added the torrent to
+torrentplayer-swarm (DHT only: no trackers, no web seeds, 0.5 MiB/s, its largest file selected)
+and sampled its statistics; "first" is the first live peer in ms, "live" and "seen" the peers at
+10 s and 60 s. Values are listed per run, A first.
+
+| Change (A → B)                                                               | Torrent             | First live peer, ms                                         | Live at 10 s / 60 s                       | Seen at 60 s                  | MiB in 60 s                         |
+| ---------------------------------------------------------------------------- | ------------------- | ----------------------------------------------------------- | ----------------------------------------- | ----------------------------- | ----------------------------------- |
+| Endless lookup → paced single lookups                                        | Sintel              | 2451, 1838, 3653 → 1830, 1836, 2456                         | 10/31, 12/23, 14/20 → 12/26, 11/24, 8/23  | 418, 388, 375 → 387, 394, 361 | 26.4, 26.6, 26.3 → 27.7, 27.3, 26.8 |
+| Endless lookup → paced single lookups                                        | Ubuntu ISO          | 1831, 1642, 39379 → 1221, 1427, 1643                        | 35/40, 27/38, 0/40 → 32/40, 31/40, 28/39  | 379, 293, 337 → 352, 358, 327 | 22.8, 27.8, 8.2 → 26.0, 28.2, 25.5  |
+| Read-write → read-only (BEP 43), 9 runs each, median                         | Sintel              | 3049 → 3273 (one A run 20388)                               | seen at 10 s: 279 → 256                   | –                             | –                                   |
+| Read-write → read-only (BEP 43), 9 runs each, median                         | Ubuntu ISO          | 1032 → 1021 (one A run 17719)                               | seen at 10 s: 385 → 402                   | –                             | –                                   |
+| Reply timeout 10 s → 5 s (rejected)                                          | Sintel              | 1218, 3675, 2649 → 3061, 4069, 3659                         | 15/30, 11/27, 12/22 → 11/28, 13/25, 9/20  | 397, 474, 374 → 410, 375, 321 | 25.7, 26.3, 27.3 → 26.6, 26.3, 27.2 |
+| Reply timeout 10 s → 5 s (rejected)                                          | Ubuntu ISO          | 1228, 1020, 1427 → 815, 2031, 1630                          | 29/40, 28/40, 26/40 → 31/38, 30/40, 34/40 | 388, 416, 439 → 401, 391, 415 | 26.5, 26.2, 27.8 → 27.2, 26.0, 27.8 |
+| Roots: any known node → answered nodes only (rejected), 10 runs each, median | Sintel / Ubuntu ISO | 3266 → 3157 (one B run found no peer in 15 s) / 1120 → 1428 | –                                         | –                             | –                                   |
+
+The vendored DHT's double query, measured with a standalone node (the endless lookup in both
+arms, Ubuntu ISO info hash, three alternating rounds): the first peer of a cold lookup took
+1258, 1830, 2917 ms sending each query twice and 1404, 1446, 1308 ms sending it once; 2 s after
+the start the lookup had found 3, 101, 1 peers against 353, 361, 223; it sent 1339, 1222, 1606
+queries in 55 s against 617, 801, 844, and found 323, 393, 366 unique peers against 384, 419, 360.
+
+Trackerless Sintel magnet through WireGuard (seven alternating runs each, swarm engine):
+handing the metadata fetch the first 20 DHT peers fetched the metadata in 1 run of 7 (the
+others failed with "input address stream exhausted" or found no peer); up to 200 (118–200 in
+these runs) fetched it in 6 of 7, in 2.6–12.3 s.
+
+Incoming peers with UPnP in Direct mode on the development machine (Ubuntu ISO, three
+alternating runs, incoming off → on): the first live peer at 2048, 1229, 2451 → 1014, 1630,
+1028 ms, live peers at 60 s 40, 39, 39 → 40, 40, 38, seen 359, 334, 369 → 342, 367, 352, and
+0.41, 0.41, 0.42 → 0.47, 0.44, 0.40 MiB/s. UPnP discovery found no gateway ("discovered 0
+endpoints") in every run, and no peer connected in (no inbound connection at 50 s), so the
+announcement could not help there; the differences are noise. Since then the DHT announces and
+turns read-write only while the port is shown to be reachable, by a confirmed UPnP mapping or
+a peer that connected in (see `docs/network.md`), so on that machine the node stays read-only
+with incoming peers on and sends no `announce_peer`: its DHT traffic is that of the
+incoming-off runs.

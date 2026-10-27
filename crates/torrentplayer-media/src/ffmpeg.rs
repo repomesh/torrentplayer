@@ -10,6 +10,8 @@
 //!   and a `-format_whitelist` of plain media containers, so a playlist (HLS, DASH, concat) or
 //!   a reference inside the file cannot make them open another file or host, which would also
 //!   get around the network mode and kill switch.
+//! - No proxy: FFmpeg's HTTP client follows `http_proxy`, which would send the loopback URL
+//!   and its token to the proxy, so [`ffmpeg_command`] removes those variables.
 //! - No standard input, no console window, a time limit, and bounded output. The process is
 //!   killed when the call is dropped (a newer request, a timeout).
 //! - Their output is parsed strictly: the probe's JSON into bounded numbers, a thumbnail only
@@ -263,17 +265,21 @@ fn thumbnail_args(url: &str, at_secs: f64, width: u32) -> Vec<OsString> {
     args
 }
 
-/// Runs `program` and returns its standard output, at most `max_out` bytes.
-async fn run(
-    name: &'static str,
-    program: &Path,
-    args: &[OsString],
-    max_out: usize,
-    timeout: Duration,
-) -> Result<Vec<u8>, FfmpegError> {
+/// Environment variables FFmpeg's HTTP client follows. The input is a loopback URL with a
+/// private token, so with a proxy set FFmpeg would send that URL (token included) to the proxy.
+pub const PROXY_ENV: [&str; 4] = ["http_proxy", "HTTP_PROXY", "no_proxy", "NO_PROXY"];
+
+/// A command that runs `program` (ffmpeg or ffprobe) on a loopback stream: the proxy
+/// variables ([`PROXY_ENV`]) removed, no standard input, standard output and error piped, no
+/// console window on Windows, and the process killed when the child is dropped. Every
+/// TorrentPlayer FFmpeg run starts from this; the caller adds the arguments.
+#[must_use]
+pub fn ffmpeg_command(program: &Path) -> Command {
     let mut command = Command::new(program);
+    for name in PROXY_ENV {
+        command.env_remove(name);
+    }
     command
-        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -284,6 +290,19 @@ async fn run(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    command
+}
+
+/// Runs `program` and returns its standard output, at most `max_out` bytes.
+async fn run(
+    name: &'static str,
+    program: &Path,
+    args: &[OsString],
+    max_out: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>, FfmpegError> {
+    let mut command = ffmpeg_command(program);
+    command.args(args);
     let mut child = command.spawn().map_err(|e| FfmpegError::Spawn(name, e))?;
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     let work = async {
@@ -464,6 +483,26 @@ fn find(name: &str, dirs: &[PathBuf]) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_ignore_proxy_variables() {
+        let command = ffmpeg_command(Path::new("ffprobe"));
+        let removed: Vec<_> = command
+            .as_std()
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(name, _)| name.to_string_lossy().into_owned())
+            .collect();
+        for name in PROXY_ENV {
+            // Windows compares names case-insensitively, so `http_proxy` and `HTTP_PROXY` may be
+            // one entry there.
+            assert!(
+                removed.iter().any(|r| r.eq_ignore_ascii_case(name)),
+                "{name} is removed: {removed:?}"
+            );
+        }
+        assert!(command.get_kill_on_drop());
+    }
 
     fn strings(args: &[OsString]) -> Vec<String> {
         args.iter()

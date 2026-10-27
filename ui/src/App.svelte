@@ -19,19 +19,18 @@
   import OpenTorrent from './lib/components/OpenTorrent.svelte';
   import Player from './lib/components/Player.svelte';
   import PlaylistPanel from './lib/components/PlaylistPanel.svelte';
-  import UpNext from './lib/components/UpNext.svelte';
   import VpnHint from './lib/components/VpnHint.svelte';
   import SettingsPage from './lib/components/settings/SettingsPage.svelte';
   import type { FileSummary } from './lib/bindings/FileSummary';
   import { fileName, isPlayable, playTarget, readTorrentFile } from './lib/files';
   import { dismissVpnHint, followSeedingStarted, followVpnHint, showVpnHint } from './lib/vpnHint';
   import { explorerTorrents, torrentKeys, type ExplorerTorrent } from './lib/explorer';
+  import { byId } from './lib/downloads';
   import {
     addTorrentFile,
     addTorrentLink,
     devAutoplay,
     errorMessage,
-    getSettings,
     loadQueue,
     preloadNext,
     preloadStatus,
@@ -41,7 +40,6 @@
     startStream,
     stopStream,
     streamStats,
-    updateSettings,
     type DownloadsSnapshot,
     type LibraryItem,
     type PreloadStatusDto,
@@ -51,7 +49,7 @@
     type TorrentSummary,
     type ReadinessState,
   } from './lib/ipc';
-  import { followLibrary, libraryKey } from './lib/library';
+  import { followLibrary, libraryKey, resumeStart } from './lib/library';
   import {
     back,
     canGoBack,
@@ -72,35 +70,38 @@
   } from './lib/nav';
   import {
     QueueSaver,
-    clearPlayed,
     clipTitle,
     emptyQueue,
     enqueue,
     findEntry,
     groupKey,
-    markPlayed,
     moveGroup,
     newItemId,
     nextItem,
-    optimizeQueue,
-    putFirst,
-    queueEntryState,
-    remove,
+    playbackEnded,
     restoreOrder,
+    queueForPlayback,
+    queueEntryState,
+    removeItem,
+    restoreRemoved,
+    resolveTorrent,
     sanitizeQueue,
     setCurrent,
-    setOrder,
     setPaused,
-    setSkipped,
+    sortQueue,
+    SORT_KEYS,
+    type SortKey,
     upcomingCount,
-    type DownloadOrder,
+    type MainFile,
     type Queue,
     type QueueItem,
+    type Removed,
   } from './lib/queue';
   import { preloadActive, preloadLabel } from './lib/search';
   import type { SettingsSection } from './lib/settings';
-  import { Countdown, shouldPreloadNext } from './lib/upnext';
+  import { preloadTarget, shouldPreloadNext } from './lib/upnext';
   import { TorrentLoads, torrentLoadKeys } from './lib/torrent-loads';
+  import { Toasts, type Toast } from './lib/toasts';
 
   /** The video open in the player (it may be hidden while the user browses). */
   interface NowPlaying {
@@ -112,6 +113,8 @@
     autoSeeks: number[];
     /** Where to continue when the player is shown again. */
     resumeAt: number;
+    /** `Continuing from 12:34`, shown over the video when it continued from a saved position. */
+    resumeChip: string | null;
     /** The queue item playing, if it came from the queue. */
     queueId: string | null;
   }
@@ -120,7 +123,6 @@
   const PLAYLIST_KEY = 'torrentplayer.playlistOpen';
   /** How often the next queued video's preload conditions are checked while playing. */
   const NEXT_CHECK_MS = 2000;
-  const TOAST_MS = 4500;
 
   let history = $state.raw(initialHistory(HOME));
   const view = $derived(history.current);
@@ -131,6 +133,9 @@
   const sources: Record<number, string> = {};
   let lastTorrentId = $state<number | null>(null);
   let nowPlaying = $state.raw<NowPlaying | null>(null);
+  let player: { togglePlayback: () => void; checkpoint: () => Promise<void> } | undefined =
+    $state();
+  let playbackPaused = $state(true);
   /** The player's latest position, updated many times a second, so not reactive. */
   const playback = { position: 0, duration: Number.NaN };
 
@@ -153,39 +158,28 @@
     request: number;
     source: string;
     infoHash: string | null;
+    queueId?: string;
   } | null>(null);
   let addError = $state<string | null>(null);
   let playError = $state<string | null>(null);
   let starting = $state.raw<{ request: number; torrentId: number; fileIndex: number } | null>(null);
   // Stream starts change download priorities, so only that short stage is serialized.
   let streamStart: Promise<void> = Promise.resolve();
+  let streamStop: Promise<void> = Promise.resolve();
+  let queueLoaded: Promise<void> = Promise.resolve();
   let playlistOpen = $state(readPlaylistOpen());
-  let toast = $state<{ message: string; error: boolean; undo: (() => void) | null } | null>(null);
-  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+  let toasts = $state.raw<readonly Toast[]>([]);
+  const toaster = new Toasts((list) => {
+    toasts = list;
+  });
   let announcement = $state('');
-  // The VPN note, once per run, when the first torrent starts seeding in Direct mode.
+  // The VPN note, once per run, when the first torrent starts uploading in Direct mode.
   // It disappears as soon as it no longer applies (dismissed anywhere, or another mode chosen).
   let vpnHintApplies = $state(false);
   let seedingHintOpen = $state(false);
   let seedingHintShown = false;
   let seedingHintError = $state<string | null>(null);
   const seedingHint = $derived(seedingHintOpen && vpnHintApplies);
-
-  let upNext = $state<{ item: QueueItem; secondsLeft: number } | null>(null);
-  const countdown = new Countdown(
-    (secondsLeft) => {
-      if (upNext) {
-        upNext = { ...upNext, secondsLeft };
-      }
-    },
-    () => {
-      const item = upNext?.item;
-      upNext = null;
-      if (item) {
-        void playQueueItem(item);
-      }
-    },
-  );
 
   // The next item's preload: asked once per (stream, item); its status shown in the queue.
   let nextPreloadKey: string | null = null;
@@ -207,10 +201,11 @@
     view.name === 'torrent' ? (torrents.find((t) => t.id === view.torrentId) ?? null) : null,
   );
   const next = $derived(nextItem(queue));
+  const toPreload = $derived(preloadTarget(queue));
   const nextStatus = $derived(next ? preloadLabel(nextPreload, next.infoHash ?? '') : null);
   const playingId = $derived(nowPlaying?.queueId ?? null);
 
-  // --- Queue groups, readiness, and "play ready videos first" --------------------------
+  // --- Queue groups and readiness --------------------------------------------------------
 
   /** How often readiness is asked for while the queue is shown. */
   const READINESS_MS = 4000;
@@ -218,10 +213,6 @@
 
   /** How ready queued items are to play, by item id (items in torrents not added: absent). */
   let readiness = $state.raw<ReadonlyMap<string, ReadinessState>>(new Map());
-  /** `playback.optimizeQueue` and `playback.keepCourseOrder`, re-read while the queue shows. */
-  let prefs = $state({ optimizeQueue: false, keepCourseOrder: true });
-  /** The ready items the queue was last arranged for, so it only moves when that changes. */
-  let arrangedFor = '';
   /** The torrent whose videos "Choose files…" shows. */
   let chooser = $state.raw<TorrentSummary | null>(null);
   const queueShown = $derived(view.name === 'player' && (playlistOpen || nowPlaying === null));
@@ -249,14 +240,11 @@
       fileIndex: item.fileIndex,
     }));
     try {
-      const [answers, saved] = await Promise.all([queueReadiness(items), getSettings()]);
-      prefs.optimizeQueue = saved.settings.playback.optimizeQueue;
-      prefs.keepCourseOrder = saved.settings.playback.keepCourseOrder;
+      const answers = await queueReadiness(items);
       readiness = new Map(answers.map((a) => [a.id, a.state]));
     } catch {
       return;
     }
-    arrange();
   }
 
   /** How often background downloads are read while the queue is shown. */
@@ -264,15 +252,33 @@
   /** What each queued item downloads in the background, and how the link is shared. */
   let downloads = $state.raw<DownloadsSnapshot | null>(null);
 
-  // Background downloads are read every second while the queue is on screen.
+  /** Whether the window is on screen (not minimized): the queue's polls stop while it is not. */
+  let pageVisible = $state(document.visibilityState === 'visible');
   $effect(() => {
-    if (!queueShown) {
+    const follow = (): void => {
+      pageVisible = document.visibilityState === 'visible';
+    };
+    document.addEventListener('visibilitychange', follow);
+    return () => {
+      document.removeEventListener('visibilitychange', follow);
+    };
+  });
+
+  // Background downloads are read every second while the queue is on screen. A snapshot equal
+  // to the last one is dropped, so idle rows (paused, finished) don't re-render every second.
+  $effect(() => {
+    if (!queueShown || !pageVisible) {
       return;
     }
+    let last = '';
     const refresh = (): void => {
       queueDownloads().then(
         (snapshot) => {
-          downloads = snapshot;
+          const json = JSON.stringify(snapshot);
+          if (json !== last) {
+            last = json;
+            downloads = snapshot;
+          }
         },
         () => undefined,
       );
@@ -286,7 +292,7 @@
 
   // Readiness is read every few seconds while the queue is on screen.
   $effect(() => {
-    if (!queueShown) {
+    if (!queueShown || !pageVisible) {
       return;
     }
     untrack(() => void refreshReadiness());
@@ -296,67 +302,29 @@
     };
   });
 
-  /**
-   * "Play ready videos first": moves ready items up when the set of ready items changes (not
-   * on every check, so the user's own reordering stands until something new is ready).
-   */
-  function arrange(): void {
-    if (!prefs.optimizeQueue) {
-      arrangedFor = '';
-      return;
-    }
-    const ready = new Set(
-      [...readiness].filter(([, state]) => state !== 'waiting').map(([id]) => id),
-    );
-    const signature = [...ready].sort().join(' ');
-    if (signature === arrangedFor) {
-      return;
-    }
-    arrangedFor = signature;
-    const { queue: arranged, moved } = optimizeQueue(queue, ready, prefs.keepCourseOrder);
-    if (moved.length === 0) {
-      return;
-    }
+  /** "Sort by…": reorders the queue once, with Undo. Nothing re-sorts it later. */
+  function sortBy(key: SortKey): void {
     const before = queue;
-    queue = arranged;
-    const first = queue.items.find((i) => i.id === moved[0]);
-    showToast(
-      moved.length === 1 && first
-        ? `Moved up: ${first.title} is ready to play`
-        : `Moved up: ${String(moved.length)} videos ready to play`,
-      {
-        undo: () => {
-          queue = restoreOrder(queue, before);
-        },
+    const sorted = sortQueue(queue, key, byId(downloads));
+    const label = SORT_KEYS.find((k) => k.key === key)?.label ?? key;
+    if (sorted === before) {
+      showToast(`Already in that order: ${label}`);
+      return;
+    }
+    queue = sorted;
+    showToast(`Sorted by ${label}`, {
+      undo: () => {
+        queue = restoreOrder(queue, before);
       },
-    );
-  }
-
-  function setPlaybackPref(key: 'optimizeQueue' | 'keepCourseOrder', on: boolean): void {
-    prefs[key] = on;
-    arrangedFor = '';
-    updateSettings({ playback: { [key]: on } })
-      .then(() => {
-        arrange();
-      })
-      .catch((reason: unknown) => {
-        showToast(`The setting could not be saved: ${errorMessage(reason)}`, { error: true });
-      });
+    });
   }
 
   function removeGroup(key: string): void {
-    const before = queue;
     const items = queue.items.filter((i) => groupKey(i) === key);
-    queue = items.reduce((q, item) => remove(q, item.id), queue);
-    const playing = nowPlaying;
-    if (playing && items.some((i) => i.id === playing.queueId)) {
-      nowPlaying = { ...playing, queueId: null };
-    }
-    showToast(`Removed ${String(items.length)} files`, {
-      undo: () => {
-        queue = before;
-      },
-    });
+    removeQueueItems(
+      items.map((i) => i.id),
+      `Removed ${String(items.length)} ${items.length === 1 ? 'video' : 'videos'}`,
+    );
   }
 
   /** "Choose files…": shows the torrent's videos, adding it first if it is not open yet. */
@@ -400,18 +368,19 @@
   );
 
   function chooseFile(torrent: TorrentSummary, file: FileSummary, queued: boolean): void {
-    const entry = findEntry(queue, {
-      source: sourceOf(torrent),
-      infoHash: torrent.infoHash,
-      fileIndex: file.index,
-    });
+    const entry = findEntry(
+      queue,
+      {
+        source: sourceOf(torrent),
+        infoHash: torrent.infoHash,
+        fileIndex: file.index,
+      },
+      mainFile,
+    );
     if (queued && !entry) {
       queue = enqueue(queue, itemsFor(torrent, [file]), lectureOrder(torrent)).queue;
     } else if (!queued && entry) {
-      queue = remove(queue, entry.id);
-      if (nowPlaying?.queueId === entry.id) {
-        nowPlaying = { ...nowPlaying, queueId: null };
-      }
+      removeFromQueue(entry.id);
     }
   }
 
@@ -434,10 +403,6 @@
       chooser = null;
       return;
     }
-    if (upNext) {
-      cancelUpNext();
-      return;
-    }
     if (canGoBack(history)) {
       go(back(history));
     }
@@ -458,7 +423,12 @@
     if (!fromPlayer && next.current.name === 'player' && nowPlaying) {
       if (nowPlaying.stream.streamId === shownStream) {
         // Shown again: the player remounts and continues where the video was.
-        nowPlaying = { ...nowPlaying, startedAt: performance.now(), resumeAt: playback.position };
+        nowPlaying = {
+          ...nowPlaying,
+          startedAt: performance.now(),
+          resumeAt: playback.position,
+          resumeChip: null,
+        };
       }
       shownStream = nowPlaying.stream.streamId;
     }
@@ -480,9 +450,6 @@
       if (active instanceof HTMLElement && el.contains(active)) {
         focused[key] = active;
       }
-    }
-    if (view.name === 'player') {
-      cancelUpNext();
     }
   }
 
@@ -625,7 +592,37 @@
       // A torrent opened from a file is saved as a magnet link with its trackers.
       sources[torrent.id] = source ?? torrent.magnet;
     }
+    // Its queued items learn its hash, and entries that turn out to play the same file merge.
+    const resolved = resolveTorrent(
+      queue,
+      { source: sourceOf(torrent), infoHash: torrent.infoHash },
+      mainFile,
+    );
+    queue = resolved.queue;
+    const playingId = nowPlaying?.queueId;
+    const mergedInto = playingId == null ? undefined : resolved.merged.get(playingId);
+    if (nowPlaying && mergedInto !== undefined) {
+      nowPlaying = { ...nowPlaying, queueId: mergedInto };
+    }
+    const pendingId = pendingPlayback?.queueId;
+    const pendingMerged = pendingId === undefined ? undefined : resolved.merged.get(pendingId);
+    if (pendingPlayback && pendingMerged !== undefined) {
+      pendingPlayback = { ...pendingPlayback, queueId: pendingMerged };
+    }
   }
+
+  /**
+   * The file a queued `null` file index (a search result's main video) plays in an opened
+   * torrent, so the queue can tell it is the same entry as that file; null while the torrent's
+   * files are unknown.
+   */
+  const mainFile: MainFile = (item) => {
+    const keys = torrentLoadKeys(item.source, item.infoHash);
+    const torrent = torrents.find((t) =>
+      torrentLoadKeys(sourceOf(t), t.infoHash).some((key) => keys.includes(key)),
+    );
+    return torrent === undefined ? null : (playTarget(torrent, null)?.index ?? null);
+  };
 
   function sourceOf(torrent: TorrentSummary): string {
     return sources[torrent.id] ?? torrent.magnet;
@@ -717,8 +714,10 @@
 
   /** Closes the open stream. `forget` also drops the player from the history. */
   async function closeStream(forget: boolean): Promise<void> {
-    cancelUpNext();
     const streamId = nowPlaying?.stream.streamId;
+    const checkpoint = streamId === undefined ? Promise.resolve() : player?.checkpoint();
+    // Attach the handler before unmounting the player; the final report precedes stop_stream.
+    const saved = Promise.resolve(checkpoint).catch(() => undefined);
     if (nowPlaying) {
       nowPlaying = null;
     }
@@ -728,64 +727,59 @@
       void arrived();
     }
     if (streamId !== undefined) {
-      await stopStream(streamId).catch(() => undefined);
+      const previous = streamStop;
+      streamStop = (async () => {
+        await previous;
+        await saved;
+        await stopStream(streamId).catch(() => undefined);
+      })();
     }
+    await streamStop;
+  }
+
+  function stopPlayback(): void {
+    selection += 1;
+    pendingPlayback = null;
+    void closeStream(false);
   }
 
   /**
    * The queue entry of a file that starts playing. Played from search, a torrent's files or the
-   * file chooser (`first`), it is added to the queue, or moved, to the front, so what plays is
-   * always queued and everything else stays up next. A file of a queued torrent played from
-   * the queue (`group`) joins its torrent's items in lecture order. Otherwise it is the file's
-   * entry if it is queued.
+   * file chooser (`first`), it is added at the front. Existing entries keep their place.
+   * A new file selected inside the queue (`group`) joins its torrent in lecture order.
    */
   function enterQueue(
     torrent: TorrentSummary,
     file: FileSummary,
-    where: 'first' | 'group' | undefined,
+    where: 'first' | 'group' | 'existing' | undefined,
   ): string | null {
     const [item] = itemsFor(torrent, [file]);
     if (item === undefined) {
       return null;
     }
-    if (where === 'first') {
-      const placed = putFirst(queue, item);
-      queue = placed.queue;
-      return placed.id;
-    }
-    if (where === 'group') {
-      queue = enqueue(queue, [item], lectureOrder(torrent)).queue;
-    }
-    return findEntry(queue, item)?.id ?? null;
-  }
-
-  function formatResumeTime(seconds: number): string {
-    const total = Math.max(0, Math.floor(seconds));
-    const hours = Math.floor(total / 3600);
-    const minutes = Math.floor((total % 3600) / 60);
-    const rest = (total % 60).toString().padStart(2, '0');
-    return hours > 0
-      ? `${String(hours)}:${minutes.toString().padStart(2, '0')}:${rest}`
-      : `${String(minutes)}:${rest}`;
+    const placed = queueForPlayback(queue, item, where, mainFile, lectureOrder(torrent));
+    queue = placed.queue;
+    return placed.id;
   }
 
   async function play(
     torrent: TorrentSummary,
     file: FileSummary,
     options: {
-      queueId?: string | null;
+      fromQueue?: boolean;
       queue?: 'first' | 'group';
       autoSeeks?: number[];
       request?: number;
     } = {},
   ): Promise<boolean> {
     const request = options.request ?? ++selection;
+    await queueLoaded;
     if (request !== selection) {
       return false;
     }
     lastTorrentId = torrent.id;
     if (nowPlaying?.torrent.id === torrent.id && nowPlaying.file.index === file.index) {
-      const queueId = options.queueId ?? enterQueue(torrent, file, options.queue);
+      const queueId = enterQueue(torrent, file, options.fromQueue ? 'existing' : options.queue);
       if (queueId !== null) {
         queue = setCurrent(queue, queueId);
         nowPlaying = { ...nowPlaying, queueId };
@@ -806,6 +800,13 @@
       if (request !== selection) {
         return false;
       }
+      const queueId = enterQueue(torrent, file, options.fromQueue ? 'existing' : options.queue);
+      if (queueId === null && options.fromQueue) {
+        return false;
+      }
+      if (queueId === null || !queue.items.some((item) => item.id === queueId)) {
+        throw new Error('The queue is full. Remove an item before playing another file.');
+      }
       // Close the old stream before starting another on the same torrent: its stop clears
       // priorities. A superseded start is also stopped before the next one begins.
       await closeStream(false);
@@ -813,22 +814,17 @@
         return false;
       }
       const stream = await startStream(torrent.id, file.index);
-      if (request !== selection) {
+      if (request !== selection || !queue.items.some((item) => item.id === queueId)) {
         await stopStream(stream.streamId).catch(() => undefined);
         return false;
       }
-      const saved = stream.resumePositionSecs;
-      const resumeAt =
-        saved !== null &&
-        globalThis.confirm(
-          `Resume ${stream.fileName} from ${formatResumeTime(saved)}?\n\nChoose Cancel to start from the beginning.`,
-        )
-          ? saved
-          : 0;
+      // No question: with "Resume where I left off" on it continues (the chip offers to start
+      // over); with it off, the backend sends no position.
+      const { startAt: resumeAt, chip: resumeChip } = resumeStart(stream.resumePositionSecs);
       playback.position = resumeAt;
       playback.duration = Number.NaN;
       // The file becomes the queue's current item, wherever it was played from.
-      const queueId = options.queueId ?? enterQueue(torrent, file, options.queue);
+      playbackPaused = true;
       nowPlaying = {
         torrent,
         file,
@@ -836,11 +832,10 @@
         startedAt,
         autoSeeks: options.autoSeeks ?? [],
         resumeAt,
+        resumeChip,
         queueId,
       };
-      if (queueId !== null) {
-        queue = setCurrent(queue, queueId);
-      }
+      queue = setCurrent(queue, queueId);
       navigate({ name: 'player' });
       // Already on the player (the next video of the queue): it has been shown now.
       shownStream = stream.streamId;
@@ -850,6 +845,10 @@
         return false;
       }
       playError = errorMessage(reason);
+      if (nowPlaying) {
+        showToast(playError, { error: true });
+        return false;
+      }
       // Nothing is playing now, so the player is no longer a place to go back to.
       const onPlayer = view.name === 'player';
       history = prune(history, (v) => v.name !== 'player', {
@@ -941,7 +940,7 @@
     what: string,
     order?: (a: QueueItem, b: QueueItem) => number,
   ): void {
-    const { queue: after, added } = enqueue(queue, items, order);
+    const { queue: after, added } = enqueue(queue, items, order, mainFile);
     if (added === 0) {
       showToast(items.length === 1 ? 'Already in the queue' : 'Already queued');
       return;
@@ -949,7 +948,7 @@
     queue = after;
     showToast(added === 1 ? `Queued ${what}` : `Queued ${String(added)} videos`, {
       undo: () => {
-        queue = items.reduce((q, item) => remove(q, item.id), queue);
+        removeQueueItems(items.map((item) => item.id));
       },
     });
   }
@@ -966,8 +965,8 @@
           torrentName: null,
           sizeBytes: result.sizeBytes,
           paused: false,
-          skipped: false,
           played: false,
+          addedAt: Date.now(),
         },
       ],
       clipTitle(result.title),
@@ -985,8 +984,8 @@
       torrentName: clipTitle(torrent.name),
       sizeBytes: file.length,
       paused: false,
-      skipped: false,
       played: false,
+      addedAt: Date.now(),
     }));
   }
 
@@ -1007,35 +1006,58 @@
 
   function isQueued(torrent: TorrentSummary, file: FileSummary): boolean {
     return (
-      findEntry(queue, {
-        source: sourceOf(torrent),
-        infoHash: torrent.infoHash,
-        fileIndex: file.index,
-      }) !== null
+      findEntry(
+        queue,
+        {
+          source: sourceOf(torrent),
+          infoHash: torrent.infoHash,
+          fileIndex: file.index,
+        },
+        mainFile,
+      ) !== null
     );
   }
 
   function removeFromQueue(id: string): void {
-    const before = queue;
     const item = queue.items.find((i) => i.id === id);
-    queue = remove(queue, id);
-    if (nowPlaying?.queueId === id) {
-      nowPlaying = { ...nowPlaying, queueId: null };
-    }
     if (item) {
-      showToast(`Removed ${item.title}`, {
-        undo: () => {
-          queue = before;
-        },
-      });
+      removeQueueItems([id], `Removed ${item.title}`);
     }
+  }
+
+  /** Every removal path stops an affected stream; Undo only restores queue membership. */
+  function removeQueueItems(ids: readonly string[], message?: string): void {
+    if (pendingPlayback?.queueId && ids.includes(pendingPlayback.queueId)) {
+      selection += 1;
+      pendingPlayback = null;
+    }
+    if (nowPlaying?.queueId && ids.includes(nowPlaying.queueId)) {
+      stopPlayback();
+    }
+    const removed: Removed[] = [];
+    for (const id of ids) {
+      const result = removeItem(queue, id);
+      queue = result.queue;
+      if (result.removed) {
+        removed.push(result.removed);
+      }
+    }
+    if (removed.length === 0 || message === undefined) {
+      return;
+    }
+    showToast(message, {
+      undo: () => {
+        for (const item of [...removed].reverse()) {
+          queue = restoreRemoved(queue, item, mainFile);
+        }
+      },
+    });
   }
 
   /** Plays a queued item: adds its torrent again if needed (a preloaded one is reused). */
   async function playQueueItem(item: QueueItem): Promise<void> {
-    cancelUpNext();
     const request = ++selection;
-    pendingPlayback = { request, source: item.source, infoHash: item.infoHash };
+    pendingPlayback = { request, source: item.source, infoHash: item.infoHash, queueId: item.id };
     try {
       const torrent = await fetchTorrent(item.source, item.infoHash);
       if (request !== selection) {
@@ -1052,7 +1074,7 @@
         navigate({ name: 'torrent', torrentId: torrent.id });
         return;
       }
-      const played = await play(torrent, file, { queueId: item.id, request });
+      const played = await play(torrent, file, { fromQueue: true, request });
       if (!played && request === selection) {
         navigate({ name: 'torrent', torrentId: torrent.id });
       }
@@ -1080,33 +1102,11 @@
     }
   });
 
-  // --- Up next --------------------------------------------------------------------------
+  // --- End of a video -------------------------------------------------------------------
 
+  /** The video stops on its last frame; the user picks what plays next. */
   function onEnded(): void {
-    const finished = nowPlaying?.queueId;
-    if (finished !== null && finished !== undefined) {
-      queue = markPlayed(queue, finished);
-    }
-    const item = nextItem(queue);
-    const stream = nowPlaying?.stream.streamId;
-    if (!item || stream === undefined) {
-      return;
-    }
-    getSettings()
-      .then((v) => v.settings.playback.autoplayNext)
-      .catch(() => true)
-      .then((autoplay) => {
-        if (autoplay && nowPlaying?.stream.streamId === stream && view.name === 'player') {
-          upNext = { item, secondsLeft: 0 };
-          countdown.start();
-        }
-      })
-      .catch(() => undefined);
-  }
-
-  function cancelUpNext(): void {
-    countdown.cancel();
-    upNext = null;
+    queue = playbackEnded(queue, nowPlaying?.queueId ?? null);
   }
 
   function onTime(currentTime: number, duration: number): void {
@@ -1116,10 +1116,6 @@
     }
     playback.position = currentTime;
     playback.duration = duration;
-    // Seeking back after the end cancels the countdown.
-    if (upNext && Number.isFinite(duration) && currentTime < duration - 2) {
-      cancelUpNext();
-    }
   }
 
   /**
@@ -1128,7 +1124,7 @@
    */
   $effect(() => {
     const playing = nowPlaying;
-    const item = next;
+    const item = toPreload;
     if (!playing || !item) {
       return;
     }
@@ -1207,11 +1203,31 @@
   // --- Toasts, keys, and the window --------------------------------------------------
 
   function showToast(message: string, options: { error?: boolean; undo?: () => void } = {}): void {
-    clearTimeout(toastTimer);
-    toast = { message, error: options.error ?? false, undo: options.undo ?? null };
-    toastTimer = setTimeout(() => {
-      toast = null;
-    }, TOAST_MS);
+    toaster.show(message, options);
+  }
+
+  /**
+   * Keeps the toasts visible in fullscreen: they move into the fullscreen element while there
+   * is one, and back afterwards.
+   */
+  function followFullscreen(node: HTMLElement): () => void {
+    const home = node.parentElement;
+    const anchor = document.createComment('toasts');
+    node.before(anchor);
+    const move = (): void => {
+      const host = document.fullscreenElement;
+      if (host !== null) {
+        host.append(node);
+      } else if (node.parentElement !== home) {
+        anchor.after(node);
+      }
+    };
+    move();
+    document.addEventListener('fullscreenchange', move);
+    return () => {
+      document.removeEventListener('fullscreenchange', move);
+      anchor.remove();
+    };
   }
 
   function readPlaylistOpen(): boolean {
@@ -1333,11 +1349,7 @@
       library = items;
     });
     const stopVpnHint = followVpnHint((network) => {
-      vpnHintApplies = showVpnHint(
-        network.mode,
-        network.vpnHintDismissed,
-        network.vpnAdapterModeRemoved,
-      );
+      vpnHintApplies = showVpnHint(network.mode, network.vpnHintDismissed, network.hold !== null);
     });
     const stopSeeding = followSeedingStarted(() => {
       // Used up only once it is actually shown.
@@ -1346,12 +1358,12 @@
         seedingHintOpen = true;
       }
     });
-    loadQueue()
+    queueLoaded = loadQueue()
       .then((saved) => {
         const loaded = sanitizeQueue(saved);
         persisted = loaded;
         // Anything queued while loading goes after the saved items (and is saved).
-        queue = enqueue(loaded, queue.items).queue;
+        queue = enqueue(loaded, queue.items, undefined, mainFile).queue;
       })
       .catch(() => {
         persisted = queue;
@@ -1375,8 +1387,7 @@
       .catch(() => undefined);
 
     return () => {
-      countdown.cancel();
-      clearTimeout(toastTimer);
+      toaster.clear();
       clearTimeout(nextPreloadTimer);
       stopLibrary();
       stopVpnHint();
@@ -1424,6 +1435,7 @@
             queue,
             { source: result.link, infoHash: result.infoHash, fileIndex },
             playingId,
+            mainFile,
           )}
         onSearch={(id: number | null) => {
           addError = null;
@@ -1477,6 +1489,9 @@
             onQueue={(file: FileSummary) => {
               queueFiles(torrent, [file]);
             }}
+            onRemove={(file: FileSummary) => {
+              chooseFile(torrent, file, false);
+            }}
             onQueueAll={(files: FileSummary[]) => {
               queueFiles(torrent, files);
             }}
@@ -1489,6 +1504,9 @@
               {queue}
               collapsed={!playlistOpen && nowPlaying !== null}
               {playingId}
+              {playbackPaused}
+              onTogglePlayback={() => player?.togglePlayback()}
+              onStopPlayback={stopPlayback}
               playingTitle={nowPlaying && nowPlaying.queueId === null
                 ? nowPlaying.stream.fileName
                 : null}
@@ -1508,11 +1526,9 @@
               onTogglePause={(ids: readonly string[], paused: boolean) => {
                 queue = setPaused(queue, ids, paused);
               }}
-              onToggleSkip={(ids: readonly string[], skipped: boolean) => {
-                queue = setSkipped(queue, ids, skipped);
-              }}
-              onOrder={(order: DownloadOrder) => {
-                queue = setOrder(queue, order);
+              onSort={sortBy}
+              onNetworkSettings={() => {
+                openSettings('network');
               }}
               filesOf={(key: string) => torrentOf(key)?.files ?? null}
               {playingFile}
@@ -1529,25 +1545,20 @@
                 }
               }}
               onLoadFiles={(key: string) => void loadTorrent(key)}
-              optimize={prefs.optimizeQueue}
-              onOptimize={(on: boolean) => {
-                setPlaybackPref('optimizeQueue', on);
-              }}
-              keepCourseOrder={prefs.keepCourseOrder}
-              onKeepCourseOrder={(on: boolean) => {
-                setPlaybackPref('keepCourseOrder', on);
-              }}
               onClear={() => {
-                const before = queue;
-                queue = emptyQueue();
-                showToast('Cleared the queue', {
-                  undo: () => {
-                    queue = before;
-                  },
-                });
+                removeQueueItems(
+                  queue.items.map((i) => i.id),
+                  'Cleared the queue',
+                );
               }}
               onClearPlayed={() => {
-                queue = clearPlayed(queue);
+                const ids = queue.items
+                  .filter((item) => item.played && item.id !== playingId)
+                  .map((item) => item.id);
+                removeQueueItems(
+                  ids,
+                  `Cleared ${String(ids.length)} played ${ids.length === 1 ? 'video' : 'videos'}`,
+                );
               }}
             />
             <div class="stage" bind:this={stageEl}>
@@ -1555,10 +1566,12 @@
                 {@const playing = nowPlaying}
                 {#key playing.stream.streamId}
                   <Player
+                    bind:this={player}
                     stream={playing.stream}
                     startedAt={playing.startedAt}
                     autoSeeks={playing.autoSeeks}
                     startAt={playing.resumeAt}
+                    resumeChip={playing.resumeChip}
                     fullscreenTarget={stageEl}
                     audio={playing.file.kind === 'audio'
                       ? { title: fileName(playing.file.path), album: playing.torrent.name }
@@ -1566,28 +1579,20 @@
                     onBack={goBack}
                     {onEnded}
                     {onTime}
-                  >
-                    {#if upNext}
-                      <UpNext
-                        title={upNext.item.title}
-                        secondsLeft={upNext.secondsLeft}
-                        onPlayNow={() => {
-                          const item = upNext?.item;
-                          cancelUpNext();
-                          if (item) {
-                            void playQueueItem(item);
-                          }
-                        }}
-                        onCancel={cancelUpNext}
-                      />
-                    {/if}
-                  </Player>
+                    onPauseChange={(paused: boolean) => {
+                      if (nowPlaying?.stream.streamId === playing.stream.streamId) {
+                        playbackPaused = paused;
+                      }
+                    }}
+                    nextTitle={next?.title ?? null}
+                    onPlayNext={playNext}
+                  />
                 {/key}
               {:else}
                 <!-- Between two videos of the queue, or after playback failed. -->
                 <p class="between" aria-live="polite">
                   {pendingPlayback?.request === selection || starting?.request === selection
-                    ? 'Starting the next video…'
+                    ? 'Starting the video…'
                     : 'Pick something from the queue or search.'}
                 </p>
               {/if}
@@ -1629,10 +1634,18 @@
           }
         }}
         onPlay={(file: FileSummary) => {
+          // `torrent` is derived from `chooser`: read it before clearing `chooser`, after which
+          // it reads null.
+          const chosen = torrent;
           chooser = null;
-          void play(torrent, file, { queue: 'first' });
+          void play(chosen, file, { queue: 'first' });
         }}
         onClose={() => {
+          // Closing the dialog on unmount fires `close` late: after Play it must not cancel the
+          // playback Play just started.
+          if (chooser === null) {
+            return;
+          }
           selection += 1;
           chooser = null;
         }}
@@ -1641,7 +1654,7 @@
 
     {#if seedingHint}
       <div class="seeding-hint" role="status">
-        <strong>Seeding started</strong>
+        <strong>Sharing started</strong>
         <VpnHint
           onDismiss={() => {
             seedingHintError = null;
@@ -1661,25 +1674,67 @@
       </div>
     {/if}
 
-    {#if toast}
-      <div class="toast" class:error={toast.error} role={toast.error ? 'alert' : 'status'}>
-        <span>{toast.message}</span>
-        {#if toast.undo}
-          {@const undo = toast.undo}
-          <button
-            type="button"
-            class="link"
-            onclick={() => {
-              undo();
-              toast = null;
-            }}>Undo</button
-          >
-        {/if}
+    <!-- Always rendered, so screen readers know the live regions before a toast arrives. -->
+    <div class="toasts" class:raised={view.name === 'player'} {@attach followFullscreen}>
+      <div class="stack" role="alert">
+        {#each toasts.filter((t) => t.error) as t (t.id)}
+          <!-- eslint-disable-next-line @typescript-eslint/no-confusing-void-expression -- a local snippet is typed as returning void -->
+          {@render toastView(t)}
+        {/each}
       </div>
-    {/if}
+      <div class="stack" role="status">
+        {#each toasts.filter((t) => !t.error) as t (t.id)}
+          <!-- eslint-disable-next-line @typescript-eslint/no-confusing-void-expression -- a local snippet is typed as returning void -->
+          {@render toastView(t)}
+        {/each}
+      </div>
+    </div>
   </main>
 </div>
 <p class="sr-only" aria-live="polite">{announcement}</p>
+
+{#snippet toastView(t: Toast)}
+  <div
+    class="toast"
+    class:error={t.error}
+    role="group"
+    aria-label="Notification"
+    onmouseenter={() => {
+      toaster.hold(t.id);
+    }}
+    onmouseleave={() => {
+      toaster.release(t.id);
+    }}
+    onfocusin={() => {
+      toaster.hold(t.id);
+    }}
+    onfocusout={() => {
+      toaster.release(t.id);
+    }}
+  >
+    <span title={t.message}>{t.message}</span>
+    {#if t.undo}
+      <button
+        type="button"
+        class="link"
+        onclick={() => {
+          toaster.undo(t.id);
+        }}>Undo</button
+      >
+    {/if}
+    <button
+      type="button"
+      class="close"
+      aria-label="Close"
+      title="Close"
+      onclick={() => {
+        toaster.dismiss(t.id);
+      }}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 7l10 10M17 7 7 17" /></svg>
+    </button>
+  </div>
+{/snippet}
 
 <style>
   .app {
@@ -1732,23 +1787,75 @@
     font-size: 0.72rem;
   }
 
-  .toast {
+  .toasts {
     position: absolute;
     z-index: 10;
     bottom: 2.75rem;
     left: 50%;
     display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    width: min(32rem, calc(100% - 2rem));
+    pointer-events: none;
+    transform: translateX(-50%);
+  }
+
+  /* Over the video, above its controls (also in fullscreen). */
+  .toasts.raised {
+    bottom: 6rem;
+  }
+
+  .stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.4rem;
+    width: 100%;
+  }
+
+  .toast {
+    display: flex;
     align-items: center;
     gap: 0.75rem;
-    max-width: min(32rem, calc(100% - 2rem));
-    padding: 0.55rem 0.9rem;
+    max-width: 100%;
+    padding: 0.4rem 0.4rem 0.4rem 0.9rem;
+    pointer-events: auto;
     border: 1px solid rgb(255 255 255 / 8%);
     border-radius: 0.6rem;
     background: rgb(22 22 28 / 96%);
     box-shadow: 0 0.5rem 1.5rem rgb(0 0 0 / 40%);
     color: var(--text);
     font-size: 0.875rem;
-    transform: translateX(-50%);
+  }
+
+  .toast .close {
+    display: inline-flex;
+    padding: 0.25rem;
+    border: none;
+    border-radius: 0.35rem;
+    background: none;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+
+  .toast .close:hover {
+    color: var(--text);
+    background: rgb(255 255 255 / 6%);
+  }
+
+  .toast .close:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  .toast .close svg {
+    width: 0.85rem;
+    height: 0.85rem;
+    fill: none;
+    stroke: currentcolor;
+    stroke-width: 1.8;
+    stroke-linecap: round;
   }
 
   .seeding-hint {

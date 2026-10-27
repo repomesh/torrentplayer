@@ -4,23 +4,25 @@
    * The network indicator, from the backend's real state: gray when direct, green when traffic
    * goes through the proxy or WireGuard tunnel, yellow while that is being checked, red when the
    * kill switch pauses traffic or the settings cannot work. Beside it, the public address the
-   * internet sees (unless turned off in Settings → Network), hidden until the eye button reveals
+   * internet sees (unless turned off in Settings → Network & VPN), hidden until the eye button reveals
    * it (remembered); the tooltip has the mode, endpoint, public IPv4 and IPv6, uptime, and latest
-   * events; clicking opens Settings → Network. In Direct mode, a "VPN recommended" button opens
-   * the VPN note (see `src/lib/vpnHint.ts`) until it is dismissed. After an update from the
-   * removed VPN adapter mode, a "VPN adapter mode removed" button opens that notice instead (see
-   * `src/lib/removedMode.ts`), open from the start, until it is dismissed.
+   * events; clicking opens Settings → Network & VPN. In Direct mode, a "VPN recommended" button opens
+   * the VPN note (see `src/lib/vpnHint.ts`) until it is dismissed. While traffic is held after an
+   * update from the removed VPN adapter mode or because the settings could not be read, a button
+   * naming why opens that notice instead (see `src/lib/networkHold.ts`), open from the start,
+   * until it is dismissed.
    */
   import { onMount } from 'svelte';
   import { errorMessage, type NetworkStatus, type PublicIp } from '../ipc';
   import { describeNetwork, describePublicIp, followNetwork, followPublicIp } from '../network';
-  import { dismissRemovedModeNotice, removedModeHolds } from '../removedMode';
+  import type { NetworkHold } from '../bindings/NetworkHold';
+  import { HOLD_BUTTON, dismissHoldNotice, holdApplies } from '../networkHold';
   import { dismissVpnHint, followVpnHint, showVpnHint } from '../vpnHint';
-  import RemovedModeNotice from './RemovedModeNotice.svelte';
+  import NetworkHoldNotice from './NetworkHoldNotice.svelte';
   import VpnHint from './VpnHint.svelte';
 
   interface Props {
-    /** Opens Settings → Network. Without it the indicator is not clickable. */
+    /** Opens Settings → Network & VPN. Without it the indicator is not clickable. */
     onOpen?: () => void;
   }
 
@@ -58,14 +60,14 @@
   let hintOpen = $state(false);
   let hintError = $state<string | null>(null);
   let hintBox: HTMLElement | undefined = $state();
-  // The removed-mode notice: pending until dismissed, open until closed. Unknown (false) until
+  // The hold notice: pending until dismissed, open until closed. Unknown (null) until
   // the settings are known.
-  let removed = $state(false);
+  let hold = $state<NetworkHold | null>(null);
   let removedHeld = $state(false);
   let removedOpen = $state(true);
   let removedError = $state<string | null>(null);
   let removedBox: HTMLElement | undefined = $state();
-  const hint = $derived(status !== null && showVpnHint(status.mode, hintDismissed, removed));
+  const hint = $derived(status !== null && showVpnHint(status.mode, hintDismissed, hold !== null));
 
   // Closed whenever the note stops applying, so it never reopens by itself.
   $effect(() => {
@@ -93,9 +95,9 @@
 
   function dismissRemoved(): void {
     removedError = null;
-    dismissRemovedModeNotice()
+    dismissHoldNotice()
       .then(() => {
-        removed = false;
+        hold = null;
       })
       .catch((reason: unknown) => {
         removedError = `The setting could not be saved: ${errorMessage(reason)}`;
@@ -130,8 +132,8 @@
     });
     const stopHint = followVpnHint((network) => {
       hintDismissed = network.vpnHintDismissed;
-      removed = network.vpnAdapterModeRemoved;
-      removedHeld = removedModeHolds(network);
+      hold = network.hold;
+      removedHeld = holdApplies(network);
     });
     return () => {
       stopStatus();
@@ -180,7 +182,7 @@
 />
 
 {#snippet vpn()}
-  {#if removed}
+  {#if hold}
     <span class="vpn" bind:this={removedBox}>
       <button
         type="button"
@@ -189,7 +191,7 @@
         aria-controls={removedId}
         onclick={() => {
           removedOpen = !removedOpen;
-        }}>VPN adapter mode removed</button
+        }}>{HOLD_BUTTON[hold]}</button
       >
       {#if removedOpen}
         <div
@@ -203,7 +205,8 @@
             }
           }}
         >
-          <RemovedModeNotice
+          <NetworkHoldNotice
+            reason={hold}
             held={removedHeld}
             onDismiss={dismissRemoved}
             onOpen={onOpen

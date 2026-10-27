@@ -12,7 +12,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 /// Whether `ip` is a globally routable unicast address: not unspecified, loopback, private,
 /// link-local, shared (carrier-grade NAT), documentation, benchmarking, multicast, broadcast, or
 /// otherwise reserved. IPv4-mapped and 6to4 IPv6 addresses are judged by the IPv4 address they
-/// carry.
+/// carry; Teredo ones never count as public.
 #[must_use]
 pub fn is_public_ip(ip: IpAddr) -> bool {
     match ip {
@@ -50,8 +50,12 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         return false;
     }
     match (s[0], s[1]) {
-        // Documentation.
-        (0x2001, 0x0db8) => false,
+        // Documentation (2001:db8::/32), Teredo (2001::/32: a tunnel to an IPv4 host that
+        // cannot be judged here), and benchmarking (2001:2::/48).
+        (0x2001, 0x0db8 | 0x0000) => false,
+        (0x2001, 0x0002) if s[2] == 0 => false,
+        // Documentation (3fff::/20).
+        (0x3fff, second) if second < 0x1000 => false,
         // 6to4: judged by the IPv4 address it carries.
         (0x2002, _) => {
             let [hi, lo] = [s[1].to_be_bytes(), s[2].to_be_bytes()];
@@ -61,12 +65,32 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     }
 }
 
+/// The address a local socket of the given family binds to: every interface (the unspecified
+/// address), or loopback when [`NetworkOptions::loopback_only`](crate::NetworkOptions) is set
+/// for tests.
+pub(crate) fn local_ip(v6: bool, loopback_only: bool) -> IpAddr {
+    match (v6, loopback_only) {
+        (false, false) => Ipv4Addr::UNSPECIFIED.into(),
+        (true, false) => Ipv6Addr::UNSPECIFIED.into(),
+        (false, true) => Ipv4Addr::LOCALHOST.into(),
+        (true, true) => Ipv6Addr::LOCALHOST.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn public(s: &str) -> bool {
         is_public_ip(s.parse().unwrap())
+    }
+
+    #[test]
+    fn local_sockets_bind_every_interface_unless_tests_ask_for_loopback() {
+        assert_eq!(local_ip(false, false), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(local_ip(true, false), IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(local_ip(false, true), IpAddr::V4(Ipv4Addr::LOCALHOST));
+        assert_eq!(local_ip(true, true), IpAddr::V6(Ipv6Addr::LOCALHOST));
     }
 
     #[test]
@@ -105,6 +129,9 @@ mod tests {
             "2606:4700::1111",
             "2a00:1450:4001::200e",
             "2002:0808:0808::1",
+            "2001:4860:4860::8888",
+            "2001:2:1::1",
+            "3fff:1000::1",
         ] {
             assert!(public(ok), "{ok}");
         }
@@ -119,6 +146,11 @@ mod tests {
             "::ffff:192.168.0.1",
             "64:ff9b::7f00:1",
             "2002:c0a8:0101::1",
+            "2001::5ef5:79fd",
+            "2001:0:4136:e378:8000:63bf:3fff:fdd2",
+            "2001:2::1",
+            "3fff::1",
+            "3fff:fff:ffff::1",
         ] {
             assert!(!public(bad), "{bad}");
         }

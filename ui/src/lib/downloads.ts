@@ -52,9 +52,10 @@ function peers(n: number): string {
 
 /**
  * One line about an item's download: `↓ 2.4 MB/s · 14 peers · 37% · 4 min left`, or what it
- * waits for. Null when there is nothing to say (an unknown, untouched item).
+ * waits for. `maxActive` is the limit of downloads at once, when known. Null when there is
+ * nothing to say (an unknown, untouched item).
  */
-export function describeDownload(d: ItemDownload): string | null {
+export function describeDownload(d: ItemDownload, maxActive: number | null = null): string | null {
   const parts: string[] = [];
   const pct = percent(d);
   switch (d.state) {
@@ -74,7 +75,8 @@ export function describeDownload(d: ItemDownload): string | null {
       break;
     }
     case 'complete':
-      parts.push('Downloaded');
+      // Finished torrents keep sharing until the user pauses or removes them.
+      parts.push(d.uploading ? 'Downloaded · sharing with others' : 'Downloaded');
       break;
     case 'connecting':
       parts.push(
@@ -90,23 +92,20 @@ export function describeDownload(d: ItemDownload): string | null {
     case 'queued':
       parts.push(
         d.waitReason === 'playback'
-          ? 'Paused while the video playing catches up'
+          ? 'Waiting for playback: the video playing needs the bandwidth'
           : d.waitReason === 'limit'
-            ? 'Waiting: your limit of downloads at once'
+            ? maxActive === null
+              ? 'Waiting: your limit of downloads at once (Settings → Bandwidth)'
+              : `Waiting: up to ${String(maxActive)} queued videos download at once (Settings → Bandwidth)`
             : 'Waiting',
       );
       if (pct !== null && d.downloaded > 0) {
         parts.push(pct);
       }
       break;
-    case 'skipped':
-      // The row already says Skipped; say only what is kept.
-      if (pct !== null && d.downloaded > 0) {
-        parts.push(`${pct} downloaded`);
-      }
-      break;
     case 'paused':
-      parts.push('Paused');
+      // Only the user pauses; nothing resumes it but the user.
+      parts.push('Paused by you');
       if (pct !== null && d.downloaded > 0) {
         parts.push(pct);
       }
@@ -117,8 +116,9 @@ export function describeDownload(d: ItemDownload): string | null {
       );
       break;
   }
-  // Sharing with other peers, whatever else it is doing.
-  if (d.uploadBps > 0) {
+  // Sharing with other peers, whatever else it is doing. A paused video in a torrent that
+  // keeps sharing for its other videos shows no upload of its own.
+  if (d.uploadBps > 0 && d.state !== 'paused') {
     parts.push(`↑ ${formatRate(d.uploadBps)}`);
   }
   return parts.length === 0 ? null : parts.join(' · ');
@@ -146,35 +146,62 @@ export function toneOf(d: ItemDownload): Tone {
   return 'waiting';
 }
 
+/**
+ * An item's download as shown: pausing and resuming show at once, before the backend's next
+ * report (about a second later). The user's pause shows first, as there.
+ */
+export function withPause(paused: boolean, d: ItemDownload | undefined): ItemDownload | undefined {
+  if (d === undefined || d.state === 'watching') {
+    return d;
+  }
+  if (paused) {
+    return d.state === 'paused'
+      ? d
+      : { ...d, state: 'paused', downloadBps: 0, uploadBps: 0, etaSecs: null };
+  }
+  return d.state === 'paused' ? { ...d, state: 'queued' } : d;
+}
+
+/**
+ * The progress bar's tooltip: the user's pause, what a waiting item waits for (its status line),
+ * or what the colour means.
+ */
+export function barTitle(d: ItemDownload, maxActive: number | null = null): string {
+  switch (d.state) {
+    case 'paused':
+      return 'Paused by you';
+    case 'queued':
+    case 'starting':
+    case 'failed':
+      return describeDownload(d, maxActive) ?? 'Waiting';
+    default:
+      break;
+  }
+  switch (toneOf(d)) {
+    case 'playable':
+      return 'Ready to play';
+    case 'downloading':
+      return 'Downloading, not ready to play yet';
+    case 'waiting':
+      return 'Waiting for peers';
+  }
+}
+
 /** Whether an item is moving data now (for a live progress bar). */
 export function isMoving(d: ItemDownload): boolean {
   return MOVING.has(d.state);
 }
 
-/** Whether the pause button applies: the item can still download and is not being watched. */
-export function canPause(d: ItemDownload | undefined): boolean {
-  return (
-    d === undefined || (d.state !== 'complete' && d.state !== 'watching' && d.state !== 'skipped')
-  );
-}
-
 /**
- * The item downloading fastest, when at least two download and it is clearly ahead (half as
- * fast again as the next): a hint that it would play smoothest now.
+ * Whether the pause button applies: anything but the video being watched. Pausing stops both
+ * downloading and sharing, so it applies to finished items too.
  */
-export function fastestItem(items: readonly ItemDownload[]): string | null {
-  const moving = items
-    .filter((d) => d.state === 'downloading' && d.downloadBps > 0)
-    .sort((a, b) => b.downloadBps - a.downloadBps);
-  const [first, second] = moving;
-  if (first === undefined || second === undefined) {
-    return null;
-  }
-  return first.downloadBps >= second.downloadBps * 1.5 ? first.id : null;
+export function canPause(d: ItemDownload | undefined): boolean {
+  return d?.state !== 'watching';
 }
 
 /**
- * A summary of the connection: `Connection ≈ 12 MB/s · 9.8 MB/s in use · 3 downloading`, plus
+ * A summary of the connection: `Speed ≈ 12 MB/s · 9.8 MB/s in use · 3 downloading`, plus
  * how playback is doing when a video plays.
  */
 export function describeLink(link: LinkUse): string | null {
@@ -183,7 +210,7 @@ export function describeLink(link: LinkUse): string | null {
   }
   const parts: string[] = [];
   if (link.capacityBps > 0) {
-    parts.push(`Connection ≈ ${formatRate(link.capacityBps)}`);
+    parts.push(`Speed ≈ ${formatRate(link.capacityBps)}`);
   }
   parts.push(`${formatRate(link.usedBps)} in use`);
   if (link.active > 0) {
@@ -196,9 +223,9 @@ export function describeLink(link: LinkUse): string | null {
   if (link.playbackNeedBps !== null) {
     parts.push(
       link.pressure === 'starving'
-        ? 'queue paused for playback'
+        ? 'queue held for the video playing'
         : link.pressure === 'guarded'
-          ? 'playback first'
+          ? 'the video playing comes first'
           : 'playback has enough',
     );
   }

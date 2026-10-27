@@ -165,7 +165,8 @@ pub enum Playability {
     /// be Dolby or DTS if the title does not say.
     Likely,
     /// HEVC outside MP4 (plays only where the system has a hardware HEVC decoder), or Dolby or
-    /// DTS audio named in the title (the picture plays without sound).
+    /// DTS audio named in the title when the app cannot convert it (the picture plays without
+    /// sound).
     Unlikely,
     /// A container or codec the webview cannot decode at all.
     NeedsFullPlayer,
@@ -206,6 +207,10 @@ pub struct Quality {
     pub suspect_size: bool,
     /// Video or not.
     pub kind: ContentKind,
+    /// Whether the app converts Dolby and DTS audio to stereo AAC (it has the bundled FFmpeg),
+    /// so the built-in player plays it with sound. Not parsed from the title:
+    /// [`crate::results::build_response`] sets it. See [`Quality::converted_audio`].
+    pub converts_audio: bool,
 }
 
 /// Total size below which a "4K" torrent is flagged as suspect. Real 2160p video runs at
@@ -253,6 +258,7 @@ impl Quality {
             audio,
             suspect_size,
             kind,
+            converts_audio: false,
         }
     }
 
@@ -262,10 +268,20 @@ impl Quality {
         self.source == Some(Source::Cam)
     }
 
-    /// The audio codec named in the title, if the built-in player cannot decode it.
+    /// The audio codec named in the title, if the built-in player plays it without sound: it
+    /// cannot decode it, and the app cannot convert it ([`Quality::converts_audio`]).
     #[must_use]
     pub fn silent_audio(&self) -> Option<Audio> {
-        self.audio.filter(|a| !a.plays_in_webview())
+        self.audio
+            .filter(|a| !a.plays_in_webview() && !self.converts_audio)
+    }
+
+    /// The audio codec named in the title, if the built-in player plays it only because the app
+    /// converts it to stereo AAC.
+    #[must_use]
+    pub fn converted_audio(&self) -> Option<Audio> {
+        self.audio
+            .filter(|a| !a.plays_in_webview() && self.converts_audio)
     }
 
     /// Whether the built-in player can be expected to play it.
@@ -796,5 +812,33 @@ mod tests {
         );
         assert_eq!(Audio::Dts.label(), "DTS");
         assert!(!Audio::TrueHd.plays_in_webview() && Audio::Web.plays_in_webview());
+    }
+
+    #[test]
+    fn converted_dolby_and_dts_audio_plays() {
+        let converted = |title: &str| Quality {
+            converts_audio: true,
+            ..q(title)
+        };
+        let ddp = converted("Movie.2024.1080p.WEB-DL.DDP5.1.H.264.mp4");
+        assert_eq!(ddp.silent_audio(), None);
+        assert_eq!(ddp.converted_audio(), Some(Audio::DolbyDigitalPlus));
+        assert_eq!(ddp.playability(), Playability::Plays);
+        assert_eq!(
+            converted("Movie 2024 1080p DTS mkv").playability(),
+            Playability::Likely
+        );
+        assert_eq!(
+            converted("Movie 2024 1080p TrueHD x265 mkv").playability(),
+            Playability::Unlikely,
+            "HEVC outside MP4 still may not play"
+        );
+        assert_eq!(
+            converted("Movie 2024 DTS avi").playability(),
+            Playability::NeedsFullPlayer
+        );
+        let aac = converted("Movie 2024 720p AAC mp4");
+        assert_eq!(aac.converted_audio(), None);
+        assert_eq!(aac.playability(), Playability::Plays);
     }
 }

@@ -23,8 +23,6 @@ export type SettingsSection =
 export const LIMITS = {
   speed: [0.5, 3],
   rateKib: [0, 1024 * 1024],
-  seedRatio: [0, 100],
-  seedTimeMinutes: [0, 525_600],
   peerLimit: [5, 500],
   maxDownloads: [0, 100],
   cacheLimitGb: [1, 100_000],
@@ -86,7 +84,10 @@ export function downloadDirProblem(dir: string): string | null {
   if (dir.startsWith('\\\\?\\') || dir.startsWith('\\\\.\\')) {
     return 'Device paths are not supported; choose a normal folder.';
   }
-  const windows = /^[A-Za-z]:[\\/]/.test(dir) || /^\\\\[^\\]+\\[^\\]+/.test(dir);
+  if (/^[\\/]{2}/.test(dir)) {
+    return 'Network folders are not supported; choose a folder on this computer.';
+  }
+  const windows = /^[A-Za-z]:[\\/]/.test(dir);
   if (!windows && !dir.startsWith('/')) {
     return 'Enter a full path (for example D:\\Lectures or /home/me/Lectures).';
   }
@@ -116,15 +117,6 @@ const RULES: Record<string, Check> = {
   ),
   'bandwidth.downloadLimitKib': range(LIMITS.rateKib, 'The largest limit is 1 GiB/s.'),
   'bandwidth.uploadLimitKib': range(LIMITS.rateKib, 'The largest limit is 1 GiB/s.'),
-  'bandwidth.seedRatioTarget': range(
-    LIMITS.seedRatio,
-    'Choose a ratio between 0 and 100 (0 keeps seeding).',
-    false,
-  ),
-  'bandwidth.seedTimeLimitMinutes': range(
-    LIMITS.seedTimeMinutes,
-    'Choose up to 525600 minutes (one year), or 0 for no time limit.',
-  ),
   'bandwidth.peerLimit': range(LIMITS.peerLimit, 'Choose between 5 and 500 peers.'),
   'bandwidth.maxDownloads': range(
     LIMITS.maxDownloads,
@@ -233,8 +225,8 @@ export type Availability = 'live' | 'restart' | 'later';
 const RESTART = new Set(['storage.downloadDir', 'advanced.engine', 'bandwidth.peerLimit']);
 
 const LATER = new Set([
-  // Player features not built yet (the default speed, resume positions, the debug overlay key,
-  // and the queue's autoplay and ordering apply now).
+  // Player features not built yet (the default speed, resume positions, and the debug overlay
+  // key apply now).
   'playback.hardwareDecoding',
   // Search sources and filters not built yet (the adult filter and preloading apply now).
   'search.sources.emberglow',

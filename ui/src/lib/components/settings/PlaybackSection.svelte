@@ -41,49 +41,6 @@
     </select>
   </Field>
   <Field
-    id="playback-autoplay"
-    label="Play the next item in the queue automatically"
-    path="playback.autoplayNext"
-  >
-    <Toggle
-      id="playback-autoplay"
-      checked={p.autoplayNext}
-      onchange={(v) => {
-        update('playback.autoplayNext', v);
-      }}
-    />
-  </Field>
-  <Field
-    id="playback-optimize-queue"
-    label="Play ready videos first"
-    path="playback.optimizeQueue"
-    help="Queued videos that are downloaded, or whose start and end are, move ahead of those still waiting. The video playing never moves."
-  >
-    <Toggle
-      id="playback-optimize-queue"
-      checked={p.optimizeQueue}
-      describedby="playback-optimize-queue-help"
-      onchange={(v) => {
-        update('playback.optimizeQueue', v);
-      }}
-    />
-  </Field>
-  <Field
-    id="playback-course-order"
-    label="Keep each torrent's order"
-    path="playback.keepCourseOrder"
-    help="Files of one torrent keep their order when ready videos move up."
-  >
-    <Toggle
-      id="playback-course-order"
-      checked={p.keepCourseOrder}
-      describedby="playback-course-order-help"
-      onchange={(v) => {
-        update('playback.keepCourseOrder', v);
-      }}
-    />
-  </Field>
-  <Field
     id="playback-resume"
     label="Resume where I left off"
     path="playback.resumePosition"
@@ -128,22 +85,5 @@
       }}
     />
   </Field>
-  <Field
-    id="playback-hwdec"
-    label="Hardware decoding"
-    path="playback.hardwareDecoding"
-    help="Uses the graphics card to decode video when it is known to be safe. Applies with the libmpv player."
-  >
-    <select
-      id="playback-hwdec"
-      value={p.hardwareDecoding}
-      aria-describedby="playback-hwdec-help"
-      onchange={(e: Event) => {
-        update('playback.hardwareDecoding', (e.currentTarget as HTMLSelectElement).value);
-      }}
-    >
-      <option value="auto">Automatic</option>
-      <option value="off">Off (software)</option>
-    </select>
-  </Field>
+  <!-- Hardware decoding (playback.hardwareDecoding) is hidden: no player applies it yet. -->
 </section>

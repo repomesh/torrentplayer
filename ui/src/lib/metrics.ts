@@ -74,4 +74,9 @@ export class PlaybackTimer {
   get firstFrameSeen(): boolean {
     return this.#firstFrameDone;
   }
+
+  /** Whether a seek is being timed: a later frame completes it. */
+  get seekPending(): boolean {
+    return this.#seekAt !== null;
+  }
 }

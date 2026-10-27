@@ -49,7 +49,6 @@ function queued(hash: string | null, id: string, source = 'magnet:x'): QueueItem
     title: `Video ${id}`,
     torrentName: hash === null ? null : `Torrent ${hash}`,
     paused: false,
-    skipped: false,
     played: false,
     sizeBytes: 1,
   };
@@ -85,7 +84,6 @@ describe('explorerTorrents', () => {
         queued(null, 'x', 'https://dl/x'),
       ],
       current: null,
-      order: 'inOrder' as const,
     };
     const list = explorerTorrents(queue, opened, keyOf);
     expect(list.map((e) => [e.name, e.queued, e.torrent?.name ?? null])).toEqual([
@@ -103,7 +101,6 @@ describe('explorerTorrents', () => {
     const queue = {
       items: [queued(null, 'x', opened.magnet)],
       current: null,
-      order: 'inOrder' as const,
     };
     const list = explorerTorrents(queue, [opened], keyOf);
     expect(list).toHaveLength(1);

@@ -63,10 +63,8 @@ impl TcpStream {
 
             let socket = IO::new(
                 interface.clone(),
-                Socket::new(
-                    SocketBuffer::new(vec![0; interface.options().tcp.recv_buffer_size]),
-                    SocketBuffer::new(vec![0; interface.options().tcp.send_buffer_size]),
-                ),
+                // Modified for TorrentPlayer: the socket gets the timeout and keep-alive options.
+                TcpListener::new_socket(&interface),
                 Some(allocation),
             );
 
@@ -293,11 +291,24 @@ impl fmt::Debug for TcpStream {
 }
 
 impl TcpListener {
-    fn socket(interface: &Interface, allocation: Allocation) -> Socket<'static> {
+    /// Modified for TorrentPlayer: a socket with the interface's buffers, timeout, and
+    /// keep-alive (see `TcpOptions`).
+    fn new_socket(interface: &Interface) -> Socket<'static> {
+        let options = &interface.options().tcp;
         let mut socket = Socket::new(
-            SocketBuffer::new(vec![0; interface.options().tcp.recv_buffer_size]),
-            SocketBuffer::new(vec![0; interface.options().tcp.send_buffer_size]),
+            SocketBuffer::new(vec![0; options.recv_buffer_size]),
+            SocketBuffer::new(vec![0; options.send_buffer_size]),
         );
+        let duration = |d: time::Duration| {
+            smoltcp::time::Duration::from_millis(u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        };
+        socket.set_timeout(options.timeout.map(duration));
+        socket.set_keep_alive(options.keep_alive.map(duration));
+        socket
+    }
+
+    fn socket(interface: &Interface, allocation: Allocation) -> Socket<'static> {
+        let mut socket = Self::new_socket(interface);
         socket.listen(allocation.address()).unwrap();
         socket
     }

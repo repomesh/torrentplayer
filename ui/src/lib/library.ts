@@ -3,6 +3,7 @@
 /** Playback-library helpers and its event-driven subscription. */
 
 import { listen } from '@tauri-apps/api/event';
+import { formatClock } from './format';
 import { LIBRARY_CHANGED_EVENT, libraryItems, type LibraryItem } from './ipc';
 
 /** Stable key for a playable file. */
@@ -56,6 +57,18 @@ export function resumePosition(item: LibraryItem): number | null {
   return item.positionSecs;
 }
 
+/**
+ * Where a new stream starts, and the chip over the video that says so. The backend offers a
+ * saved position only while "Resume where I left off" is on: then playback continues there
+ * without asking, and the chip offers to start over. Otherwise it starts at the beginning.
+ */
+export function resumeStart(saved: number | null): { startAt: number; chip: string | null } {
+  if (saved === null || !Number.isFinite(saved) || saved <= 0) {
+    return { startAt: 0, chip: null };
+  }
+  return { startAt: saved, chip: `Continuing from ${formatClock(saved)}` };
+}
+
 export interface LibraryCourse {
   key: string;
   name: string;
@@ -79,7 +92,8 @@ export function groupLibrary(items: readonly LibraryItem[]): LibraryCourse[] {
 
 /**
  * Reads the current library and follows individual changes until the returned function is
- * called. Changes that race the initial read are overlaid on its result.
+ * called. Changes that race the initial read are overlaid on its result. A failed read is tried
+ * once more; if that fails too, the library starts empty and still follows changes.
  */
 export function followLibrary(onItems: (items: LibraryItem[]) => void): () => void {
   let stopped = false;
@@ -87,6 +101,7 @@ export function followLibrary(onItems: (items: LibraryItem[]) => void): () => vo
   let pending: LibraryItem[] = [];
   let unlisten: (() => void) | null = null;
   let loading = false;
+  let retried = false;
   const loadInitial = (): void => {
     if (stopped || loading) {
       return;
@@ -102,12 +117,20 @@ export function followLibrary(onItems: (items: LibraryItem[]) => void): () => vo
         onItems(current);
       })
       .catch(() => {
-        // Event delivery can still keep the view useful if the initial read alone failed.
-        if (!stopped && pending.length > 0) {
-          current = pending.reduce(mergeLibrary, []);
-          pending = [];
-          onItems(current);
+        if (stopped) {
+          return;
         }
+        if (!retried) {
+          retried = true;
+          loading = false;
+          loadInitial();
+          return;
+        }
+        // Event delivery can still keep the view useful if the initial read alone failed;
+        // without a base list, changes would wait in `pending` forever.
+        current = pending.reduce(mergeLibrary, []);
+        pending = [];
+        onItems(current);
       });
   };
   listen<LibraryItem>(LIBRARY_CHANGED_EVENT, (event) => {

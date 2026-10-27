@@ -18,12 +18,12 @@ import {
   type PublicIp,
 } from './ipc';
 
-/** Gray (direct), green (protected), yellow (checking), or red (paused or failed). */
+/** Gray (direct), green (protected), yellow (checking), or red (blocked or failed). */
 export type NetworkTone = 'direct' | 'protected' | 'pending' | 'blocked';
 
 export interface NetworkSummary {
   tone: NetworkTone;
-  /** For example `Protected · 10.64.0.1` or `Kill switch: traffic paused (…)`. */
+  /** For example `Protected · 10.64.0.1` or `Kill switch: traffic blocked (…)`. */
   label: string;
   /** Lines for the tooltip: mode, endpoint, uptime, the latest events. */
   details: string[];
@@ -100,7 +100,7 @@ export function describeNetwork(status: NetworkStatus, nowMs: number): NetworkSu
       break;
     case 'killSwitchActive':
       tone = 'blocked';
-      label = `Kill switch: traffic paused (${state.reason})`;
+      label = `Kill switch: traffic blocked (${state.reason})`;
       break;
     case 'error':
       tone = 'blocked';
@@ -108,12 +108,12 @@ export function describeNetwork(status: NetworkStatus, nowMs: number): NetworkSu
       // a settings change (the removed VPN adapter mode).
       label =
         status.mode === 'direct'
-          ? `Traffic paused: ${state.reason}`
+          ? `Traffic blocked: ${state.reason}`
           : `Network error: ${state.reason}`;
       break;
     case 'disconnected':
       tone = 'blocked';
-      label = 'Network stopped · traffic paused';
+      label = 'Network stopped · traffic blocked';
       break;
   }
 
@@ -125,7 +125,7 @@ export function describeNetwork(status: NetworkStatus, nowMs: number): NetworkSu
     details.push(`Connected for ${formatUptime(nowMs - status.connectedSinceMs)}`);
   }
   if (status.killSwitchEngaged) {
-    details.push('Kill switch: torrent traffic is paused until the connection works.');
+    details.push('Kill switch: torrent traffic is blocked until the connection works.');
   } else if (status.mode !== 'direct' && !status.udpAllowed) {
     details.push('DHT and UDP trackers are off in this mode.');
   }
@@ -136,14 +136,14 @@ export function describeNetwork(status: NetworkStatus, nowMs: number): NetworkSu
   return { tone, label, details };
 }
 
-/** Whether torrent traffic is paused because a protected mode is not connected. */
+/** Whether torrent traffic is blocked because a protected mode is not connected. */
 export function trafficPaused(status: NetworkStatus | null): boolean {
   return status !== null && status.killSwitchEngaged;
 }
 
 /**
  * What the player says instead of "Buffering…" when the kill switch is the reason, or null
- * when traffic is not paused.
+ * when traffic is not blocked.
  */
 export function pausedMessage(status: NetworkStatus | null): string | null {
   if (status === null || !trafficPaused(status)) {
@@ -153,8 +153,21 @@ export function pausedMessage(status: NetworkStatus | null): string | null {
     return 'Connecting to the VPN or proxy…';
   }
   return status.mode === 'direct'
-    ? 'Traffic paused — confirm the network change in Settings'
-    : 'VPN/proxy disconnected — traffic paused';
+    ? 'Traffic blocked — choose a connection in Settings → Network & VPN'
+    : 'VPN/proxy disconnected — downloads blocked until it reconnects';
+}
+
+/**
+ * The banner above the queue while torrent traffic is blocked, or null when it is not: rows
+ * would otherwise say "Finding peers…" with no hint why.
+ */
+export function queueBlockedNotice(status: NetworkStatus | null): string | null {
+  if (status === null || !trafficPaused(status)) {
+    return null;
+  }
+  return status.mode === 'direct'
+    ? 'Downloads are blocked until you choose a connection in Network & VPN settings.'
+    : 'Downloads are blocked: the VPN or proxy is not connected. They continue by themselves when it reconnects.';
 }
 
 /**
@@ -233,7 +246,7 @@ export function describeIncoming(status: IncomingPeersStatus): string {
     case 'idle':
       return `Not listening: ${status.reason}`;
     case 'paused':
-      return 'Closed while traffic is paused';
+      return 'Closed while traffic is blocked';
     case 'unsupported':
       return `Not available: ${status.reason}`;
     case 'failed':

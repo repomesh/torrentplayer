@@ -695,6 +695,33 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn audio_positions_skip_subtitle_tracks() {
+        // FFmpeg's `0:a:N` counts audio tracks only, wherever the subtitle tracks are.
+        let sub = || track(17, "S_TEXT/UTF8", None);
+        let f = file(&[
+            info(),
+            el(
+                TRACKS,
+                &[
+                    sub(),
+                    track(1, "V_MPEG4/ISO/AVC", None),
+                    sub(),
+                    track(2, "A_AAC/MPEG4/LC", Some(false)),
+                    sub(),
+                    track(2, "A_AC3", Some(true)),
+                    sub(),
+                ]
+                .concat(),
+            ),
+        ]);
+        let report = parse_all(f).unwrap();
+        assert_eq!(report.subtitles.len(), 4);
+        let positions: Vec<_> = report.audio.iter().map(|t| t.position).collect();
+        assert_eq!(positions, [0, 1]);
+        assert_eq!(report.primary().unwrap().position, 1);
+    }
+
+    #[test]
     fn reads_the_duration_from_info() {
         let with_info = |info: Vec<u8>| {
             let f = file(&[info, el(TRACKS, &track(2, "A_AAC", None))]);

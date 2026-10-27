@@ -1,19 +1,29 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 /**
- * When to preload the next queued video, and the countdown before it plays.
+ * When to preload the next queued video. It only downloads: nothing plays it until the user
+ * does.
  *
  * Preloading the next video shares bandwidth with the current one, so it waits until the
  * current file cannot starve: it is fully downloaded, or playback is nearly over and the rest
  * of the file will arrive well before the end.
  */
 
+import { nextItem, type Queue, type QueueItem } from './queue';
+
+/**
+ * The queue item to preload: its next item ({@link nextItem}, what Shift+N plays), unless the
+ * user paused it, since preloading downloads.
+ */
+export function preloadTarget(queue: Queue): QueueItem | null {
+  const next = nextItem(queue);
+  return next !== null && !next.paused ? next : null;
+}
+
 /** Playback time left at which the next video may start preloading. */
 export const PRELOAD_NEXT_LEAD_SECS = 120;
 /** The rest of the file must arrive this many times faster than it plays. */
 const SAFETY_FACTOR = 2;
-/** Seconds the "Up next" countdown runs before the next video plays. */
-export const AUTOPLAY_COUNTDOWN_SECS = 5;
 
 export interface NextPreloadInput {
   /** Downloaded and verified bytes of the current file. */
@@ -43,47 +53,25 @@ export function shouldPreloadNext(input: NextPreloadInput): boolean {
   return (missing / downloadBps) * SAFETY_FACTOR < remaining;
 }
 
-/** A cancellable countdown that ticks once a second, then calls `onDone`. */
-export class Countdown {
-  #timer: ReturnType<typeof setInterval> | undefined;
-  #left = 0;
-  readonly #onTick: (secondsLeft: number) => void;
-  readonly #onDone: () => void;
+/** The card over a finished video: what plays next, if anything, and which button leads. */
+export interface EndCard {
+  heading: 'Finished';
+  /** `Next: Lecture 3`, or null when the queue has nothing next. */
+  next: string | null;
+  /** The button that takes focus: "Play next" when there is a next video, else "Replay". */
+  primary: 'next' | 'replay';
+}
 
-  constructor(onTick: (secondsLeft: number) => void, onDone: () => void) {
-    this.#onTick = onTick;
-    this.#onDone = onDone;
-  }
+export function endCard(nextTitle: string | null): EndCard {
+  return nextTitle === null
+    ? { heading: 'Finished', next: null, primary: 'replay' }
+    : { heading: 'Finished', next: `Next: ${nextTitle}`, primary: 'next' };
+}
 
-  /** Seconds left, or 0 when not running. */
-  get secondsLeft(): number {
-    return this.#left;
-  }
-
-  get running(): boolean {
-    return this.#timer !== undefined;
-  }
-
-  /** Starts (or restarts) the countdown from `seconds`. */
-  start(seconds: number = AUTOPLAY_COUNTDOWN_SECS): void {
-    this.cancel();
-    this.#left = Math.max(1, Math.round(seconds));
-    this.#onTick(this.#left);
-    this.#timer = setInterval(() => {
-      this.#left -= 1;
-      if (this.#left > 0) {
-        this.#onTick(this.#left);
-        return;
-      }
-      this.cancel();
-      this.#onDone();
-    }, 1000);
-  }
-
-  /** Stops without calling `onDone`. */
-  cancel(): void {
-    clearInterval(this.#timer);
-    this.#timer = undefined;
-    this.#left = 0;
-  }
+/**
+ * Whether the end card takes focus when it appears: only when focus was on the player (or on
+ * nothing, after a click on the video), never taking it from the queue or a menu.
+ */
+export function endCardTakesFocus(focusOnPlayer: boolean, focusOnPage: boolean): boolean {
+  return focusOnPlayer || !focusOnPage;
 }

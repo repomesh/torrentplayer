@@ -5,7 +5,10 @@
 //! - Pictures (JPEG, PNG, WebP by their bytes, within the thumbnail size limits) as `data:` URLs.
 //! - Text and subtitles (`.txt`, `.nfo`, `.md`, `.srt`, …) as plain text, at most 64 KiB.
 //! - Videos as a stream URL for a still frame, only when the file's start and end are already
-//!   downloaded, so showing it downloads nothing new.
+//!   downloaded, so the frame comes from stored data. The URL serves the whole file like the
+//!   player's (`StreamEngine::media_source`): the webview's read-ahead past the downloaded start
+//!   can download a little more of it. A stored-only source (`StreamEngine::stored_media`) would
+//!   abort that read mid-response instead, which the webview can report as a media error.
 //! - Everything else (PDFs, archives, HTML) as metadata only: nothing is rendered, executed, or
 //!   opened.
 //!
@@ -75,7 +78,86 @@ pub(crate) struct FilePreviewDto {
 #[derive(Debug, Default)]
 pub(crate) struct PreviewState {
     latest: Latest,
-    published: Mutex<Option<StreamId>>,
+    published: Mutex<Option<Published>>,
+}
+
+/// A video preview's stream, and the torrent it belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Published {
+    id: StreamId,
+    /// Lowercase info hash.
+    info_hash: String,
+}
+
+impl PreviewState {
+    /// The info hash of the torrent whose video preview is showing, so cache clean-up keeps
+    /// it (see `settings::protected_hashes`).
+    pub(crate) fn previewed_hash(&self) -> Option<String> {
+        self.lock().as_ref().map(|p| p.info_hash.clone())
+    }
+
+    /// Records a newly published preview video, returning the stream it replaces.
+    #[cfg(test)]
+    fn publish(&self, id: StreamId, info_hash: &str) -> Option<StreamId> {
+        let published = Published {
+            id,
+            info_hash: info_hash.to_ascii_lowercase(),
+        };
+        self.lock().replace(published).map(|p| p.id)
+    }
+
+    /// [`PreviewState::publish`] for the preview numbered `generation`, unless a newer preview
+    /// began or the explorer closed since: then `Err(id)`, the stream to withdraw. Checked
+    /// under the lock [`stop_preview`] takes, so a stopped preview is never recorded.
+    fn publish_current(
+        &self,
+        generation: u64,
+        id: StreamId,
+        info_hash: &str,
+    ) -> Result<Option<StreamId>, StreamId> {
+        let mut guard = self.lock();
+        if !self.latest.is_current(generation) {
+            return Err(id);
+        }
+        let published = Published {
+            id,
+            info_hash: info_hash.to_ascii_lowercase(),
+        };
+        Ok(guard.replace(published).map(|p| p.id))
+    }
+
+    /// Forgets the preview video, returning its stream to withdraw.
+    fn take(&self) -> Option<StreamId> {
+        self.lock().take().map(|p| p.id)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Published>> {
+        self.published
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Ends the explorer's preview when it closes: stops a preview still waiting, and withdraws the
+/// preview video's stream, so its torrent is no longer kept from cache clean-up.
+#[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri passes managed state by value"
+)]
+pub(crate) fn stop_preview(state: State<'_, PreviewState>, app: State<'_, AppState>) {
+    stop_preview_of_closed_page(&state, app.started().map(|core| &**core));
+}
+
+/// Ends the preview of a page that is gone (reloaded, or its renderer crashed), like
+/// [`stop_preview`].
+pub(crate) fn stop_preview_of_closed_page(state: &PreviewState, core: Option<&Core>) {
+    state.latest.cancel();
+    if let Some(id) = state.take()
+        && let Some(core) = core
+    {
+        core.server.unpublish(id);
+    }
 }
 
 /// What a file can be previewed as, by its kind, name, and size.
@@ -122,7 +204,7 @@ pub(crate) async fn preview_file(
     torrent_id: usize,
     file_index: usize,
 ) -> Result<FilePreviewDto, IpcError> {
-    let stopped = state.latest.begin();
+    let (generation, stopped) = state.latest.begin_numbered();
     let core = Arc::clone(
         app.started()
             .ok_or_else(|| IpcError::new(ErrorKind::NotFound, "Unknown torrent."))?,
@@ -135,8 +217,14 @@ pub(crate) async fn preview_file(
         .ok_or_else(|| IpcError::new(ErrorKind::NotFound, "Unknown file."))?
         .clone();
     let kind = preview_kind(entry.kind, &entry.path, entry.len);
+    // A video previewed before is no longer shown.
+    if kind != PreviewKind::Video
+        && let Some(previous) = state.take()
+    {
+        core.server.unpublish(previous);
+    }
     if kind == PreviewKind::Video {
-        return Ok(video_preview(&state, &core, torrent_id, file_index).await);
+        return Ok(video_preview(&state, &core, generation, torrent_id, file_index).await);
     }
     if kind == PreviewKind::None {
         return Ok(FilePreviewDto::default());
@@ -185,6 +273,7 @@ pub(crate) async fn preview_file(
 async fn video_preview(
     state: &PreviewState,
     core: &Core,
+    generation: u64,
     torrent_id: TorrentId,
     file_index: usize,
 ) -> FilePreviewDto {
@@ -201,14 +290,18 @@ async fn video_preview(
     let Ok(media) = core.engine.media_source(torrent_id, file_index).await else {
         return FilePreviewDto::default();
     };
+    let Ok(info) = core.engine.info(torrent_id) else {
+        return FilePreviewDto::default();
+    };
     let published = core.server.publish(media);
-    let previous = state
-        .published
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .replace(published.id);
-    if let Some(previous) = previous {
-        core.server.unpublish(previous);
+    match state.publish_current(generation, published.id, &info.info_hash) {
+        Ok(Some(previous)) => core.server.unpublish(previous),
+        Ok(None) => {}
+        // A newer preview began, or the explorer closed, while this one waited.
+        Err(withdrawn) => {
+            core.server.unpublish(withdrawn);
+            return FilePreviewDto::default();
+        }
     }
     FilePreviewDto {
         kind: Some(PreviewKind::Video),
@@ -227,6 +320,40 @@ fn note(text: &str) -> FilePreviewDto {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_previewed_torrent_is_known_until_the_preview_ends() {
+        let state = PreviewState::default();
+        assert_eq!(state.previewed_hash(), None);
+        assert_eq!(state.publish(7, "ABCDEF"), None);
+        assert_eq!(state.previewed_hash().as_deref(), Some("abcdef"));
+        assert_eq!(
+            state.publish(8, "123456"),
+            Some(7),
+            "the older stream is withdrawn"
+        );
+        assert_eq!(state.previewed_hash().as_deref(), Some("123456"));
+        assert_eq!(state.take(), Some(8));
+        assert_eq!(state.previewed_hash(), None, "no longer kept from clean-up");
+        assert_eq!(state.take(), None);
+    }
+
+    #[test]
+    fn a_preview_stopped_while_it_waited_is_not_recorded() {
+        let state = PreviewState::default();
+        let first = state.latest.begin_numbered().0;
+        // The explorer closed (stop_preview) before the video was ready.
+        state.latest.cancel();
+        assert_eq!(state.publish_current(first, 7, "ABCDEF"), Err(7));
+        assert_eq!(state.previewed_hash(), None, "nothing kept from clean-up");
+
+        // An older preview finishing after a newer one began is withdrawn, not shown.
+        let older = state.latest.begin_numbered().0;
+        let newer = state.latest.begin_numbered().0;
+        assert_eq!(state.publish_current(newer, 9, "123456"), Ok(None));
+        assert_eq!(state.publish_current(older, 8, "ABCDEF"), Err(8));
+        assert_eq!(state.previewed_hash().as_deref(), Some("123456"));
+    }
 
     #[test]
     fn previews_only_safe_kinds_within_limits() {

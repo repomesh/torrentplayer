@@ -7,21 +7,21 @@
 //! audio track the player would play, and writes fragmented MP4 with the original timestamps.
 //! Its output is published as a live stream on the app's stream server, and the player feeds it
 //! to Media Source Extensions. Each seek outside what is buffered starts a new conversion from
-//! there; the previous one is stopped.
+//! there; the previous one is stopped (FFmpeg is killed, which also ends its output's response if
+//! the player is still reading it).
 
 use std::collections::VecDeque;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::process::Stdio;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use serde::Serialize;
 use tauri::State;
 use tokio::io::{AsyncRead, AsyncReadExt as _, ReadBuf};
-use tokio::process::{Child, ChildStdout, Command};
+use tokio::process::{Child, ChildStdout};
 use torrentplayer_stream::{LiveSource, MediaSource, ServerConfig, StreamId, StreamServer};
 use ts_rs::TS;
 
@@ -41,6 +41,9 @@ const LOG_LINES: usize = 8;
 const LOG_LINE_BYTES: usize = 2048;
 /// Read size while waiting for the initialization segment.
 const READ_CHUNK: usize = 64 * 1024;
+/// FFmpeg gives up on its input after this long without data, in microseconds (`-rw_timeout`).
+/// Longer than the seek-bar tools' timeout: the input waits for pieces still downloading.
+const INPUT_TIMEOUT_US: &str = "60000000";
 
 /// A converted stream, for the player's Media Source Extensions.
 #[derive(Debug, Clone, Serialize, TS)]
@@ -83,6 +86,37 @@ pub(crate) struct Converter {
     input_url: String,
     /// The current conversion's output on the app's stream server.
     pub(crate) output: Option<StreamId>,
+    /// The current conversion's FFmpeg, killed when a new conversion replaces it or the stream
+    /// stops.
+    running: Option<Running>,
+}
+
+impl Drop for Converter {
+    fn drop(&mut self) {
+        if let Some(running) = self.running.take() {
+            running.kill();
+        }
+    }
+}
+
+/// A conversion's FFmpeg, shared with its output; gone once the output is dropped.
+type SharedChild = Arc<Mutex<Option<Child>>>;
+
+/// A handle that kills a conversion's FFmpeg, if it still runs.
+struct Running(Weak<Mutex<Option<Child>>>);
+
+impl Running {
+    fn kill(&self) {
+        let Some(child) = self.0.upgrade() else {
+            return;
+        };
+        let child = child.lock().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(mut child) = child
+            && let Err(error) = child.start_kill()
+        {
+            tracing::debug!(%error, "could not stop the previous audio conversion");
+        }
+    }
 }
 
 impl Converter {
@@ -98,7 +132,17 @@ impl Converter {
             _input: input,
             input_url,
             output: None,
+            running: None,
         })
+    }
+
+    /// Makes `output` (run by `running`) the current conversion, stopping the previous one.
+    /// Returns the previous output, to unpublish.
+    fn replace(&mut self, output: StreamId, running: Running) -> Option<StreamId> {
+        if let Some(previous) = self.running.replace(running) {
+            previous.kill();
+        }
+        self.output.replace(output)
     }
 }
 
@@ -184,11 +228,12 @@ async fn convert(
                 "The audio couldn't be converted.",
             )
         })?;
+    let running = started.output.running();
     let published = core.server.publish_live(Arc::new(started.output));
     let previous = core.with_stream(stream_id, |s| {
         s.converter
             .as_mut()
-            .and_then(|c| c.output.replace(published.id))
+            .and_then(|c| c.replace(published.id, running))
     });
     if let Ok(Some(previous)) = previous {
         core.server.unpublish(previous);
@@ -249,24 +294,9 @@ impl Conversion {
         track: Option<String>,
         start: f64,
     ) -> Result<Self, ConversionError> {
-        let mut command = Command::new(ffmpeg);
-        command
-            .args(arguments(input_url, track, start))
-            // FFmpeg's HTTP client follows these; the input is on the loopback interface.
-            .env_remove("http_proxy")
-            .env_remove("HTTP_PROXY")
-            .env_remove("no_proxy")
-            .env_remove("NO_PROXY")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        #[cfg(windows)]
-        {
-            /// No console window for the child process.
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            command.creation_flags(CREATE_NO_WINDOW);
-        }
+        // No proxy (the input is a loopback URL with a token), no stdin, no console window.
+        let mut command = torrentplayer_media::ffmpeg_command(ffmpeg);
+        command.args(arguments(input_url, track, start));
         let mut child = command.spawn().map_err(ConversionError::Spawn)?;
         let log = Arc::new(Log::default());
         if let Some(stderr) = child.stderr.take() {
@@ -285,17 +315,19 @@ impl Conversion {
         let (len, bytes) = init;
         let mime = torrentplayer_media::mse_type(&bytes[..len])
             .ok_or_else(|| ConversionError::Codec(log.tail()))?;
+        let duration = log.duration();
         Ok(Self {
-            output: Output::new(bytes, stdout, child),
+            output: Output::new(bytes, stdout, child, log),
             mime,
-            duration: log.duration(),
+            duration,
         })
     }
 }
 
 /// FFmpeg's arguments: copy the first video stream (not cover art) if there is one, convert one
 /// audio track to stereo AAC, and write fragmented MP4 that keeps the original timestamps, so
-/// the player can place each conversion on the video's timeline.
+/// the player can place each conversion on the video's timeline. Nothing else is written: no
+/// subtitles, attachments, or chapters.
 fn arguments(input_url: &str, track: Option<String>, start: f64) -> Vec<String> {
     let audio = track.unwrap_or_else(|| "0:a:0".to_owned());
     let mut args: Vec<String> = ["-nostdin", "-hide_banner", "-nostats", "-loglevel", "info"]
@@ -311,6 +343,8 @@ fn arguments(input_url: &str, track: Option<String>, start: f64) -> Vec<String> 
             "http,tcp",
             "-format_whitelist",
             "matroska,webm,mov,mp4,m4a,3gp,3g2,mj2",
+            "-rw_timeout",
+            INPUT_TIMEOUT_US,
             "-i",
             input_url,
             // Optional, so audio-only files convert too.
@@ -318,6 +352,10 @@ fn arguments(input_url: &str, track: Option<String>, start: f64) -> Vec<String> 
             "0:V:0?",
             "-map",
             &audio,
+            // FFmpeg copies chapters by default, which the MP4 muxer writes as a text track that
+            // Media Source Extensions can't play.
+            "-map_chapters",
+            "-1",
             "-c:v",
             "copy",
             "-c:a",
@@ -460,15 +498,28 @@ fn redact(line: &str) -> String {
 
 /// A conversion's output: the initialization segment read so far, then the rest of FFmpeg's
 /// output. Owns FFmpeg, which is stopped when the output is dropped: when the stream is
-/// unpublished before being read, or when the player stops reading it.
+/// unpublished before being read, or when the player stops reading it. [`Output::running`]
+/// stops it sooner, while the player still reads it.
 struct Output(Mutex<Option<OutputReader>>);
 
 impl Output {
-    fn new(read: Vec<u8>, stdout: ChildStdout, child: Child) -> Self {
+    fn new(read: Vec<u8>, stdout: ChildStdout, child: Child, log: Arc<Log>) -> Self {
         Self(Mutex::new(Some(OutputReader {
             reader: io::Cursor::new(read).chain(stdout),
-            _child: child,
+            child: Arc::new(Mutex::new(Some(child))),
+            log,
+            ended: false,
         })))
+    }
+
+    /// A handle that kills this conversion's FFmpeg; it does not keep FFmpeg running.
+    fn running(&self) -> Running {
+        let reader = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        Running(
+            reader
+                .as_ref()
+                .map_or_else(Weak::new, |r| Arc::downgrade(&r.child)),
+        )
     }
 }
 
@@ -489,7 +540,10 @@ impl LiveSource for Output {
 
 struct OutputReader {
     reader: tokio::io::Chain<io::Cursor<Vec<u8>>, ChildStdout>,
-    _child: Child,
+    /// FFmpeg, killed when dropped (`kill_on_drop`) unless [`Running::kill`] took it first.
+    child: SharedChild,
+    log: Arc<Log>,
+    ended: bool,
 }
 
 impl AsyncRead for OutputReader {
@@ -498,7 +552,19 @@ impl AsyncRead for OutputReader {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        Pin::new(&mut self.reader).poll_read(cx, buf)
+        let before = buf.filled().len();
+        let poll = Pin::new(&mut self.reader).poll_read(cx, buf);
+        let ended = match &poll {
+            Poll::Ready(Ok(())) => buf.filled().len() == before && buf.remaining() > 0,
+            Poll::Ready(Err(_)) => true,
+            Poll::Pending => false,
+        };
+        if ended && !std::mem::replace(&mut self.ended, true) {
+            // FFmpeg finished, or stopped early (the player then continues from there): its
+            // last words say which.
+            tracing::info!(log = %self.log.tail(), "the audio conversion ended");
+        }
+        poll
     }
 }
 
@@ -591,7 +657,10 @@ mod tests {
         let text = args.join(" ");
         assert!(text.contains("-ss 31.500 -copyts"));
         assert!(text.contains("-protocol_whitelist http,tcp"));
-        assert!(text.contains("-format_whitelist matroska,webm,mov,mp4,m4a,3gp,3g2,mj2 -i http://127.0.0.1:1/s/1?t=secret"));
+        assert!(text.contains(
+            "-format_whitelist matroska,webm,mov,mp4,m4a,3gp,3g2,mj2 -rw_timeout 60000000 \
+             -i http://127.0.0.1:1/s/1?t=secret"
+        ));
         assert!(text.contains("-map 0:V:0? -map 0:i:2"));
         assert!(text.contains("-c:v copy -c:a aac"));
         assert!(text.ends_with("pipe:1"));
@@ -599,6 +668,65 @@ mod tests {
         let from_start = arguments("u", None, 0.0).join(" ");
         assert!(!from_start.contains("-ss"));
         assert!(from_start.contains("-map 0:a:0"));
+    }
+
+    #[test]
+    fn arguments_write_only_the_video_and_one_audio_track() {
+        // Like Sintel: video, AC-3 audio, ten subtitle tracks, and chapters. FFmpeg copied the
+        // chapters as a third (text) track, and the output could not be played.
+        for track in ["0:a:0", "0:a:2", "0:i:3"] {
+            let args = arguments("u", Some(track.to_owned()), 0.0);
+            let maps: Vec<_> = args
+                .windows(2)
+                .filter(|w| w[0] == "-map")
+                .map(|w| w[1].as_str())
+                .collect();
+            assert_eq!(maps, ["0:V:0?", track]);
+            assert!(args.join(" ").contains("-map_chapters -1"));
+        }
+    }
+
+    /// A child that runs for half a minute with its standard output piped, writing little.
+    fn long_running_child() -> (Child, ChildStdout) {
+        let mut command = if cfg!(windows) {
+            let mut command = tokio::process::Command::new("ping");
+            command.args(["-n", "30", "127.0.0.1"]);
+            command
+        } else {
+            let mut command = tokio::process::Command::new("sleep");
+            command.arg("30");
+            command
+        };
+        let mut child = command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let stdout = child.stdout.take().unwrap();
+        (child, stdout)
+    }
+
+    #[tokio::test]
+    async fn a_replaced_conversion_is_killed_while_its_output_is_read() {
+        let (child, stdout) = long_running_child();
+        let output = Output::new(b"init".to_vec(), stdout, child, Arc::new(Log::default()));
+        let running = output.running();
+        // The player is reading it: the stream server holds the reader, not the output.
+        let mut reader = output.take().unwrap();
+        drop(output);
+        running.kill();
+        let mut read = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), reader.read_to_end(&mut read))
+            .await
+            .expect("the output ends once FFmpeg is killed")
+            .unwrap();
+        assert!(read.starts_with(b"init"));
+        // Killing again, or after the output is gone, does nothing.
+        running.kill();
+        drop(reader);
+        running.kill();
     }
 
     #[test]

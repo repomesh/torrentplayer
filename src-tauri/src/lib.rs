@@ -9,7 +9,9 @@
 //! Every IPC command validates its arguments on the Rust side; the frontend is never
 //! trusted. The full IPC contract is documented in `docs/ipc.md`.
 
-#![forbid(unsafe_code)]
+// `deny` rather than `forbid`: `window.rs` makes two WebView2 COM calls that need `unsafe`, each
+// allowed locally with a `// SAFETY:` comment. Nothing else in this crate may use it.
+#![deny(unsafe_code)]
 
 mod audio;
 mod cache;
@@ -119,15 +121,41 @@ pub fn run() -> anyhow::Result<()> {
             // Settings live in the config folder; downloads default to Downloads\TorrentPlayer.
             let folders = Folders::resolve(app)?;
             let earlier_default = folders.local_data.join("downloads");
-            let settings =
-                settings::SettingsState::load(folders.config, folders.downloads.clone(), log);
+            // A settings file an old copy of the app kept open did not move with its folder:
+            // copy it, or hold traffic rather than connect directly with the defaults.
+            let left_behind = migrate::settings_left_behind(&folders.config);
+            let mut settings = settings::SettingsState::load(
+                folders.config.clone(),
+                folders.downloads.clone(),
+                log,
+            );
+            if let Err(error) = left_behind {
+                tracing::warn!(%error, "could not copy the settings from before the rename");
+                settings.hold_unreadable(
+                    "Your settings from before the rename to TorrentPlayer could not be copied \
+                     (is an older copy of the app still running?), so TorrentPlayer is not \
+                     connecting. Close the older app and restart TorrentPlayer, or choose a \
+                     connection in Settings → Network & VPN."
+                        .to_owned(),
+                );
+            }
+            // A download folder chosen inside the app's data folder moved with it in
+            // `Folders::resolve`; follow it, or the engine would recreate the old folder.
+            if let Some(chosen) = settings.current().storage.download_dir
+                && let Some(moved) = migrate::relocated(
+                    std::path::Path::new(&chosen),
+                    &[&folders.config, &folders.data, &folders.local_data],
+                )
+            {
+                settings.move_download_dir(&moved);
+            }
             // Downloads used to default to the app's data folder: move them along, unless the
             // user chose a folder of their own.
             if settings.current().storage.download_dir.is_none()
                 && earlier_default != folders.downloads
                 && earlier_default.is_dir()
             {
-                migrate::migrate(&earlier_default, &folders.downloads);
+                migrate::downloads(&earlier_default, &folders.downloads);
             }
             // Renamed with the app: the default download folder and the engine cache inside it.
             if settings.current().storage.download_dir.is_none() {
@@ -135,7 +163,7 @@ pub fn run() -> anyhow::Result<()> {
                     .downloads
                     .with_file_name(migrate::OLD_DOWNLOADS_NAME);
                 if renamed != folders.downloads && renamed.is_dir() {
-                    migrate::migrate(&renamed, &folders.downloads);
+                    migrate::downloads(&renamed, &folders.downloads);
                 }
             }
             let download_dir = settings
@@ -149,8 +177,10 @@ pub fn run() -> anyhow::Result<()> {
             }
             let library = library::LibraryState::new(folders.data.clone());
             let queue = queue::QueueState::new(folders.data.clone());
-            let saved_queue = queue.load();
-            settings.run_startup_maintenance(&saved_queue);
+            let loaded_queue = queue.load();
+            settings
+                .run_startup_maintenance((!loaded_queue.degraded).then_some(&loaded_queue.queue));
+            let saved_queue = loaded_queue.queue;
             // The network manager starts before anything can connect, and then follows the
             // network settings, so no traffic ever leaves outside the selected mode.
             let network = network::start(&settings.current(), settings.secrets().as_ref())?;
@@ -180,6 +210,7 @@ pub fn run() -> anyhow::Result<()> {
             Ok(())
         })
         .on_page_load(window::on_page_load)
+        .on_window_event(window::on_window_event)
         .invoke_handler(tauri::generate_handler![
             commands::app_info,
             commands::add_torrent_link,
@@ -209,8 +240,10 @@ pub fn run() -> anyhow::Result<()> {
             queue::preload_next,
             queue::queue_readiness,
             downloads::queue_downloads,
+            commands::link_use,
             library::library_items,
             preview::preview_file,
+            preview::stop_preview,
             media::seek_thumbnail,
             media::media_tools,
             media::choose_ffmpeg_dir,
@@ -239,7 +272,7 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The longest TorrentPlayer waits for the engine to stop when it exits.
+/// The longest TorrentPlayer waits for final progress and engine cleanup when it exits.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Stops the stream engine, if it started, so an unplayed preload's cache is deleted now rather
@@ -251,34 +284,51 @@ fn shut_down(app: &tauri::AppHandle) {
     else {
         return;
     };
-    if let Some(library) = app.try_state::<library::LibraryState>() {
-        let progress: Vec<_> = core
-            .streams
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .values()
-            .filter_map(|stream| {
-                stream.progress.position_secs.map(|position| {
-                    (
-                        stream.media.clone(),
-                        position,
-                        stream.progress.duration_secs,
-                        library.revision(),
-                    )
+    let library = app
+        .try_state::<library::LibraryState>()
+        .map(|state| state.inner().clone());
+    // Keep the whole cleanup task off the event-loop thread as well: even an incidental
+    // synchronous operation in engine cleanup must not prevent the exit deadline from firing.
+    let shutdown = tauri::async_runtime::spawn(async move {
+        let progress = async {
+            if let Some(library) = library {
+                let core = std::sync::Arc::clone(&core);
+                let saved = tokio::task::spawn_blocking(move || {
+                    let progress: Vec<_> = core
+                        .streams
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .values()
+                        .filter_map(|stream| {
+                            stream.progress.position_secs.map(|position| {
+                                (
+                                    stream.media.clone(),
+                                    position,
+                                    stream.progress.duration_secs,
+                                    library.revision(),
+                                )
+                            })
+                        })
+                        .collect();
+                    for (media, position, duration, revision) in progress {
+                        library.record_sync(&media, position, duration, revision);
+                    }
                 })
-            })
-            .collect();
-        for (media, position, duration, revision) in progress {
-            library.record_sync(&media, position, duration, revision);
-        }
-    }
-    let stopped = tauri::async_runtime::block_on(async move {
-        tokio::time::timeout(SHUTDOWN_TIMEOUT, core.engine.shutdown()).await
+                .await;
+                if let Err(error) = saved {
+                    tracing::warn!(%error, "playback progress shutdown worker failed");
+                }
+            }
+        };
+        tokio::join!(progress, core.engine.shutdown());
     });
-    if stopped.is_ok() {
-        tracing::info!("stream engine stopped");
-    } else {
-        tracing::warn!("the stream engine did not stop in time; exiting anyway");
+    let stopped = tauri::async_runtime::block_on(async move {
+        tokio::time::timeout(SHUTDOWN_TIMEOUT, shutdown).await
+    });
+    match stopped {
+        Ok(Ok(())) => tracing::info!("stream engine stopped"),
+        Ok(Err(error)) => tracing::warn!(%error, "shutdown cleanup task failed"),
+        Err(_) => tracing::warn!("shutdown cleanup did not stop in time; exiting anyway"),
     }
 }
 

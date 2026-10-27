@@ -103,7 +103,7 @@ pub fn parse_list(text: &str, base: &Path) -> anyhow::Result<Vec<Entry>> {
             Source::Url(value.to_owned())
         } else if lower.contains("://") {
             bail!(
-                "line {}: only https:// links and magnet links are supported",
+                "line {}: only http:// and https:// links and magnet links are supported",
                 i + 1
             );
         } else {

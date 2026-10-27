@@ -7,18 +7,26 @@
    * plain row. Torrents move as a whole: drag the torrent row, or Alt+↑/↓ on it.
    *
    * Keyboard (ARIA treeview): ↑/↓ move, → expands or enters a torrent, ← collapses or goes
-   * up, Enter plays, Space ticks, Delete removes, Alt+↑/↓ moves a torrent.
+   * up, Enter plays, Space ticks, P pauses or resumes, Delete removes, Alt+↑/↓ moves a torrent.
+   * The tree is one Tab stop (roving tabindex); the focused row's or torrent's own buttons
+   * (pause, choose files, all videos, play, remove) follow it in the Tab order, and Escape on one
+   * of them returns to its row.
    *
    * Queued videos download in the background: each row shows its speed, peers, progress, and
-   * time left, and can be paused (a torrent row pauses all of its queued videos).
+   * time left, and can be paused (a torrent row pauses all of its queued videos). Nothing is
+   * paused or removed automatically: a pause stops downloading and uploading until the user
+   * resumes it, and unticking removes the video (with Undo). Only the video playing can hold downloads back ("Waiting for
+   * playback"), which never changes the user's pauses.
    */
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import type { FileSummary } from '../bindings/FileSummary';
   import type { LibraryItem } from '../bindings/LibraryItem';
   import type { ReadinessState } from '../bindings/ReadinessState';
   import { fileName, isPlayable, mediaNoun } from '../files';
   import {
+    barTitle,
     canPause,
+    withPause,
     describeDownload,
     isMoving,
     progressOf,
@@ -28,7 +36,8 @@
   import { formatBytes, formatRate } from '../format';
   import { libraryKey, watchedLabel } from '../library';
   import {
-    currentIndex,
+    nextItem,
+    queueRowLabel,
     groupQueue,
     groupTree,
     type Queue,
@@ -41,6 +50,9 @@
     queue: Queue;
     /** The queue item playing now, if the video playing came from the queue. */
     playingId: string | null;
+    playbackPaused?: boolean;
+    onTogglePlayback?: (() => void) | undefined;
+    onStopPlayback?: (() => void) | undefined;
     /** The torrent and file playing now, by group key and file index. */
     playingFile?: { keys: readonly string[]; index: number } | null;
     /** What the next item's preload is doing (`Ready to play instantly`), if anything. */
@@ -68,22 +80,20 @@
     onLoadFiles?: (key: string) => void;
     /** Background downloads by item id; items not listed are unknown. */
     downloads?: ReadonlyMap<string, ItemDownload>;
-    /** The item downloading clearly fastest, if any (a hint to watch it now). */
-    fastest?: string | null;
     /** Saved watch progress, keyed by torrent info hash and file index. */
     watchProgress?: ReadonlyMap<string, LibraryItem>;
     /** Pauses or resumes background downloading of items. */
     onTogglePause?: ((ids: readonly string[], paused: boolean) => void) | undefined;
-    /**
-     * Skips (unticks) or restores items: skipped items stay listed but are not played next or
-     * downloaded. Without it, unticking removes the item.
-     */
-    onToggleSkip?: ((ids: readonly string[], skipped: boolean) => void) | undefined;
+    /** The limit of downloads at once, when known (for the waiting rows' wording). */
+    maxActive?: number | null;
   }
 
   let {
     queue,
     playingId,
+    playbackPaused = false,
+    onTogglePlayback,
+    onStopPlayback,
     playingFile = null,
     nextStatus = null,
     readiness = new Map(),
@@ -99,11 +109,14 @@
     onChooseFiles,
     onLoadFiles,
     downloads = new Map(),
-    fastest = null,
     watchProgress = new Map(),
     onTogglePause,
-    onToggleSkip,
+    maxActive = null,
   }: Props = $props();
+
+  /** Pause transfers: the pause bars beside an up and down arrow (unlike the video's pause). */
+  const PAUSE_TRANSFERS = 'M6 6v10M10 6v10M17 5v14M14.5 7.5 17 5l2.5 2.5M14.5 16.5 17 19l2.5-2.5';
+  const PLAYING_PAUSE_TITLE = "Playing now: use the player's controls";
 
   type Node =
     | { kind: 'group'; id: string; group: QueueGroup; g: number }
@@ -116,7 +129,7 @@
         parent: string | null;
       };
 
-  const cursor = $derived(currentIndex(queue));
+  const next = $derived(nextItem(queue));
   const groups = $derived(groupQueue(queue));
   let collapsed = $state.raw<readonly string[]>([]);
   let focusId = $state<string | null>(null);
@@ -124,6 +137,18 @@
   let dropIndex = $state<number | null>(null);
   let announcement = $state('');
   let root: HTMLUListElement | undefined = $state();
+
+  // Reveal a newly selected file even if its torrent was collapsed. An explicit collapse
+  // afterwards is respected until the user chooses a different playing item.
+  $effect(() => {
+    const id = playingId;
+    untrack(() => {
+      const group = groups.find((g) => g.items.some((item) => item.id === id));
+      if (group) {
+        collapsed = collapsed.filter((key) => key !== group.key);
+      }
+    });
+  });
 
   function videos(group: QueueGroup): readonly FileSummary[] | null {
     return filesOf?.(group.key) ?? null;
@@ -225,37 +250,19 @@
   }
 
   function rowLabel(group: QueueGroup, row: TreeRow): string | null {
-    const watchedState = savedWatch(row.item);
-    if (isPlaying(group, row)) {
-      return watchedState === null ? 'Playing' : `Playing · ${watchedState}`;
+    if (isPlaying(group, row) && playbackPaused) {
+      return 'Paused';
     }
-    if (isBusy(group.key)) {
-      return 'Loading…';
-    }
-    const item = row.item;
-    if (item === null) {
-      return null;
-    }
-    if (item.skipped) {
-      return 'Skipped';
-    }
-    const index = queue.items.indexOf(item);
-    if (index === cursor + 1) {
-      if (nextStatus !== null) {
-        return watchedState === null
-          ? `Up next · ${nextStatus}`
-          : `Up next · ${watchedState} · ${nextStatus}`;
-      }
-      return watchedState === null
-        ? isReady(item)
-          ? 'Up next · Ready'
-          : 'Up next'
-        : `Up next · ${watchedState}`;
-    }
-    if (item.played) {
-      return 'Played';
-    }
-    return watchedState ?? (isReady(item) ? 'Ready' : null);
+    return queueRowLabel({
+      playing: isPlaying(group, row),
+      busy: isBusy(group.key),
+      item: row.item,
+      // The same item Shift+N plays.
+      next: row.item !== null && row.item.id === next?.id,
+      nextStatus,
+      watched: savedWatch(row.item),
+      ready: row.item !== null && isReady(row.item),
+    });
   }
 
   /** Its torrent's download rate (its items share the torrent), while any of them moves. */
@@ -268,49 +275,59 @@
     return bps > 0 ? `↓ ${formatRate(bps)}` : null;
   }
 
-  /**
-   * An item's download as shown: pausing or resuming shows at once, before the backend's next
-   * report (about a second later).
-   */
-  function withPause(item: QueueItem, d: ItemDownload | undefined): ItemDownload | undefined {
-    // Skipping and including again show at once too.
-    if (d !== undefined && item.skipped && d.state !== 'skipped' && d.state !== 'watching') {
-      return { ...d, state: 'skipped', downloadBps: 0, etaSecs: null };
-    }
-    if (d !== undefined && !item.skipped && d.state === 'skipped') {
-      return { ...d, state: 'queued' };
-    }
-    if (d === undefined || !canPause(d)) {
-      return d;
-    }
-    if (item.paused && d.state !== 'paused') {
-      return { ...d, state: 'paused', downloadBps: 0, etaSecs: null };
-    }
-    if (!item.paused && d.state === 'paused') {
-      return { ...d, state: 'queued' };
-    }
-    return d;
-  }
-
   /** Whether every queued video of a torrent is paused. */
   function groupPaused(group: QueueGroup): boolean {
     return group.items.every((i) => i.paused);
   }
 
-  /** Bulk removal is deliberately different from a row's × and needs confirmation. */
+  /** Removes every queued video of a torrent (the toast offers Undo). */
   function removeWholeGroup(group: QueueGroup): void {
     if (!onRemoveGroup) {
       return;
     }
-    const count = group.items.length;
-    const noun = count === 1 ? 'file' : 'files';
-    if (
-      globalThis.confirm(
-        `Remove all ${String(count)} ${noun} of “${groupName(group)}” from the queue?`,
-      )
-    ) {
-      onRemoveGroup(group.key);
+    onRemoveGroup(group.key);
+    announcement = `${groupName(group)} removed from the queue`;
+  }
+
+  /** An item's download as shown, with its pause applied at once. */
+  function shownDownload(item: QueueItem): ItemDownload | undefined {
+    return withPause(item.paused, downloads.get(item.id));
+  }
+
+  /** Pauses or resumes a queued video, and says so. */
+  function togglePauseItem(item: QueueItem, title: string): void {
+    if (item.id === playingId && onTogglePlayback) {
+      onTogglePlayback();
+      announcement = `${title} ${playbackPaused ? 'resumed' : 'paused'}`;
+      return;
     }
+    if (!onTogglePause) {
+      return;
+    }
+    if (!canPause(shownDownload(item))) {
+      announcement = PLAYING_PAUSE_TITLE;
+      return;
+    }
+    onTogglePause([item.id], !item.paused);
+    announcement = `${title} ${item.paused ? 'resumed' : 'paused'}`;
+  }
+
+  /** Pauses or resumes all of a torrent's queued videos, and says so. */
+  function togglePauseGroup(group: QueueGroup): void {
+    if (!onTogglePause) {
+      return;
+    }
+    const paused = groupPaused(group);
+    onTogglePause(
+      group.items.map((i) => i.id),
+      !paused,
+    );
+    announcement = `${groupName(group)} ${paused ? 'resumed' : 'paused'}`;
+  }
+
+  /** The Tab index of a button inside a tree item: reachable only while the item has focus. */
+  function innerTab(id: string): number {
+    return focusId === id ? 0 : -1;
   }
 
   function rowTitle(row: TreeRow): string {
@@ -337,15 +354,13 @@
       return;
     }
     const { row, group } = node;
-    if (row.item && onToggleSkip) {
-      // Unticking keeps the item, skipped; ticking brings it back.
-      onToggleSkip([row.item.id], !row.item.skipped);
-      announcement = `${rowTitle(row)} ${row.item.skipped ? 'included again' : 'skipped'}`;
-    } else if (row.file) {
-      onToggleFile(group.key, row.file, row.item === null);
-      announcement = `${rowTitle(row)} ${row.item === null ? 'queued' : 'removed from the queue'}`;
-    } else if (row.item) {
+    // Unticking removes the item (with Undo); a torrent's file stays listed, to tick again.
+    if (row.item) {
       onRemove(row.item.id);
+      announcement = `${rowTitle(row)} removed from the queue`;
+    } else if (row.file) {
+      onToggleFile(group.key, row.file, true);
+      announcement = `${rowTitle(row)} queued`;
     }
   }
 
@@ -384,6 +399,18 @@
       event.preventDefault();
       event.stopPropagation();
     };
+    // A button or tick inside the item: Enter and Space activate it, Escape returns to the item.
+    const target = event.target;
+    if (target instanceof HTMLElement && target.getAttribute('role') !== 'treeitem') {
+      if (event.key === 'Escape') {
+        handled();
+        void focusNode(node.id);
+        return;
+      }
+      if (event.key === 'Enter' || event.key === ' ') {
+        return;
+      }
+    }
     if (event.altKey) {
       if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
         handled();
@@ -450,6 +477,17 @@
           onRemove(node.row.item.id);
         }
         break;
+      case 'p':
+      case 'P':
+        if (onTogglePause && !event.shiftKey) {
+          handled();
+          if (node.kind === 'group') {
+            togglePauseGroup(node.group);
+          } else if (node.row.item) {
+            togglePauseItem(node.row.item, rowTitle(node.row));
+          }
+        }
+        break;
       default:
         break;
     }
@@ -504,13 +542,13 @@
 
 {#snippet rowContent(node: Extract<Node, { kind: 'row' }>)}
   {@const row = node.row}
+  {@const active = isPlaying(node.group, row)}
   {@const label = rowLabel(node.group, row)}
   {@const size = rowSize(row)}
-  {@const download = row.item ? withPause(row.item, downloads.get(row.item.id)) : undefined}
-  {@const status = download ? describeDownload(download) : null}
+  {@const download = row.item ? shownDownload(row.item) : undefined}
+  {@const status = download ? describeDownload(download, maxActive) : null}
   {@const progress = download ? progressOf(download) : null}
   {@const tone = download ? toneOf(download) : 'waiting'}
-  {@const skipping = row.item !== null && onToggleSkip !== undefined}
   <span
     class="line"
     class:with-pause={row.item !== null && onTogglePause !== undefined}
@@ -519,23 +557,19 @@
     <input
       type="checkbox"
       class="tick"
-      tabindex="-1"
-      checked={row.item !== null && !row.item.skipped}
+      tabindex={innerTab(node.id)}
+      checked={row.item !== null}
       disabled={row.file === null && row.item === null}
-      aria-label={row.item === null
-        ? `Queue ${rowTitle(row)}`
-        : !skipping
-          ? `Remove ${rowTitle(row)} from the queue`
-          : row.item.skipped
-            ? `Include ${rowTitle(row)} again`
-            : `Skip ${rowTitle(row)}`}
-      title={row.item === null
-        ? 'Add to the queue'
-        : !skipping
-          ? 'In the queue (untick to remove)'
-          : row.item.skipped
-            ? 'Skipped: not played next or downloaded (tick to include it again)'
-            : 'In the queue (untick to skip it; × removes it)'}
+      aria-label={active && row.item !== null
+        ? `Stop and remove ${rowTitle(row)} from the queue`
+        : row.item === null
+          ? `Queue ${rowTitle(row)}`
+          : `Remove ${rowTitle(row)} from the queue`}
+      title={active && row.item !== null
+        ? 'Stop playback and remove from the queue (Undo restores the item)'
+        : row.item === null
+          ? 'Add to the queue'
+          : 'In the queue (untick to remove it; Undo puts it back)'}
       onclick={(event: MouseEvent) => {
         event.stopPropagation();
       }}
@@ -556,90 +590,123 @@
       }}
     >
       <span class="title">
-        {#if label === 'Playing'}<span class="eq" aria-hidden="true">▶</span>{/if}
+        {#if isPlaying(node.group, row)}<span class="eq" aria-hidden="true">▶</span>{/if}
         {rowTitle(row)}
       </span>
       {#if label || size !== null}
         <span class="meta">
-          {#if label}<span class="state">{label}</span>{/if}
+          {#if label}<span
+              class="state"
+              title={label.startsWith('Next') ? 'Shift+N plays the next video' : undefined}
+              >{label}</span
+            >{/if}
           {#if label && size !== null}·{/if}
           {size === null ? '' : formatBytes(size)}
-          {#if row.item !== null && row.item.id === fastest}
-            <span class="fastest" title="Downloading fastest of the queue: it plays smoothest now"
-              >Fastest</span
-            >
-          {/if}
         </span>
       {/if}
       {#if status}
         <span class="status {tone}">{status}</span>
+      {:else if row.item !== null}
+        <!-- Keeps the row's height while the first report is on its way. -->
+        <span class="status" aria-hidden="true">&nbsp;</span>
       {/if}
       {#if download}
         <span
           class="bar {tone}"
-          title={tone === 'playable'
-            ? 'Ready to play'
-            : tone === 'downloading'
-              ? 'Downloading, not ready to play yet'
-              : 'Waiting for peers'}
+          title={barTitle(download, maxActive)}
           role="progressbar"
           aria-label="Downloaded"
           aria-valuemin={0}
           aria-valuemax={100}
           aria-valuenow={Math.floor((progress ?? 0) * 100)}
-          ><span style:width={`${String((progress ?? 0) * 100)}%`}></span></span
+          ><span style:transform={`scaleX(${String(progress ?? 0)})`}></span></span
         >
+      {:else if row.item !== null}
+        <span class="bar placeholder" aria-hidden="true"></span>
       {/if}
     </button>
-    {#if row.item !== null && onTogglePause}
-      {@const item = row.item}
+    {#if active && onTogglePlayback}
       <button
         type="button"
         class="icon pause"
-        tabindex="-1"
-        disabled={!canPause(download)}
-        aria-label={item.paused
-          ? `Resume downloading ${rowTitle(row)}`
-          : `Pause downloading ${rowTitle(row)}`}
-        aria-pressed={item.paused}
-        title={item.paused ? 'Resume downloading' : 'Pause downloading (playing it still works)'}
+        tabindex={innerTab(node.id)}
+        aria-label={`${playbackPaused ? 'Resume' : 'Pause'} playback ${rowTitle(row)}`}
+        title={playbackPaused ? 'Resume playback (P)' : 'Pause playback (P)'}
         onclick={(event: MouseEvent) => {
           event.stopPropagation();
-          onTogglePause([item.id], !item.paused);
-          announcement = `${rowTitle(row)} ${item.paused ? 'resumed' : 'paused'}`;
+          onTogglePlayback();
         }}
       >
-        {#if item.paused}
-          <svg viewBox="0 0 24 24" aria-hidden="true"
-            ><path d="M12 5v10M7.5 10.5 12 15l4.5-4.5M6 19h12" /></svg
-          >
-        {:else}
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.5v11M15 6.5v11" /></svg>
-        {/if}
+        <svg viewBox="0 0 24 24" aria-hidden="true"
+          ><path d={playbackPaused ? 'M8 5.5v13l10-6.5z' : 'M8 5v14M16 5v14'} /></svg
+        >
+      </button>
+    {:else if row.item !== null && onTogglePause}
+      {@const item = row.item}
+      <!-- The only queued video of its torrent pauses the torrent; in a torrent with others
+           queued, the torrent keeps sharing for them. -->
+      {@const what = node.group.items.length === 1 ? 'downloading and uploading' : 'downloading'}
+      <!-- A toggle: one fixed label, its state in aria-pressed. -->
+      <button
+        type="button"
+        class="icon pause"
+        tabindex={innerTab(node.id)}
+        disabled={!canPause(download)}
+        aria-label={`Pause ${what} ${rowTitle(row)}`}
+        aria-pressed={item.paused}
+        title={!canPause(download)
+          ? PLAYING_PAUSE_TITLE
+          : item.paused
+            ? `Paused by you: press to resume ${what} (P)`
+            : `Pause ${what} until you resume; playing it still works (P)`}
+        onclick={(event: MouseEvent) => {
+          event.stopPropagation();
+          togglePauseItem(item, rowTitle(row));
+        }}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d={PAUSE_TRANSFERS} /></svg>
       </button>
     {/if}
-    <button
-      type="button"
-      class="icon play"
-      tabindex="-1"
-      disabled={isBusy(node.group.key)}
-      aria-label={`Play ${rowTitle(row)} now`}
-      title="Play now"
-      onclick={(event: MouseEvent) => {
-        event.stopPropagation();
-        play(node);
-      }}
-    >
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" /></svg>
-    </button>
+    {#if active && onStopPlayback}
+      <button
+        type="button"
+        class="icon stop"
+        tabindex={innerTab(node.id)}
+        aria-label={`Stop playback ${rowTitle(row)}`}
+        title="Stop playback; keep in the queue"
+        onclick={(event: MouseEvent) => {
+          event.stopPropagation();
+          onStopPlayback();
+        }}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6h12v12H6z" /></svg>
+      </button>
+    {:else}
+      <button
+        type="button"
+        class="icon play"
+        tabindex={innerTab(node.id)}
+        disabled={isBusy(node.group.key)}
+        aria-label={`Play ${rowTitle(row)} now`}
+        title="Play now"
+        onclick={(event: MouseEvent) => {
+          event.stopPropagation();
+          play(node);
+        }}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10-6.5z" /></svg>
+      </button>
+    {/if}
     {#if row.item !== null}
       {@const id = row.item.id}
       <button
         type="button"
         class="icon remove"
-        tabindex="-1"
-        aria-label={`Remove ${rowTitle(row)} from the queue`}
-        title="Remove from the queue"
+        tabindex={innerTab(node.id)}
+        aria-label={active
+          ? `Stop and remove ${rowTitle(row)} from the queue`
+          : `Remove ${rowTitle(row)} from the queue`}
+        title={active ? 'Stop playback and remove from the queue' : 'Remove from the queue'}
         onclick={(event: MouseEvent) => {
           event.stopPropagation();
           onRemove(id);
@@ -706,7 +773,7 @@
               <button
                 type="button"
                 class="text"
-                tabindex="-1"
+                tabindex={innerTab(id)}
                 disabled={isBusy(group.key)}
                 title="Show all of its videos"
                 onclick={() => {
@@ -717,7 +784,7 @@
               <button
                 type="button"
                 class="icon"
-                tabindex="-1"
+                tabindex={innerTab(id)}
                 aria-label={`Choose files of ${groupName(group)}`}
                 title="Choose files…"
                 onclick={() => {
@@ -731,38 +798,30 @@
             {/if}
             {#if onTogglePause}
               {@const paused = groupPaused(group)}
+              <!-- A toggle: one fixed label, its state in aria-pressed. -->
               <button
                 type="button"
-                class="icon"
-                tabindex="-1"
-                aria-label={paused
-                  ? `Resume downloading ${groupName(group)}`
-                  : `Pause downloading ${groupName(group)}`}
+                class="icon pause"
+                tabindex={innerTab(id)}
+                aria-label={`Pause downloading and uploading ${groupName(group)}`}
                 aria-pressed={paused}
-                title={paused ? 'Resume downloading its videos' : 'Pause downloading its videos'}
+                title={paused
+                  ? 'Resume background downloading and uploading; current playback continues (P)'
+                  : 'Pause background downloading and uploading; current playback continues (P)'}
                 onclick={() => {
-                  onTogglePause(
-                    group.items.map((i) => i.id),
-                    !paused,
-                  );
+                  togglePauseGroup(group);
                 }}
               >
-                {#if paused}
-                  <svg viewBox="0 0 24 24" aria-hidden="true"
-                    ><path d="M12 5v10M7.5 10.5 12 15l4.5-4.5M6 19h12" /></svg
-                  >
-                {:else}
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.5v11M15 6.5v11" /></svg>
-                {/if}
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d={PAUSE_TRANSFERS} /></svg>
               </button>
             {/if}
             {#if onRemoveGroup}
               <button
                 type="button"
                 class="icon group-remove"
-                tabindex="-1"
-                aria-label={`Remove all files of ${groupName(group)} from the queue`}
-                title={`Remove all ${String(group.items.length)} queued files`}
+                tabindex={innerTab(id)}
+                aria-label={`${group.items.some((item) => item.id === playingId) ? 'Stop playback and remove' : 'Remove'} all queued videos of ${groupName(group)} from the queue`}
+                title={`Remove all ${String(group.items.length)} queued videos${group.items.some((item) => item.id === playingId) ? ' and stop playback' : ''} (Undo puts them back)`}
                 onclick={() => {
                   removeWholeGroup(group);
                 }}
@@ -784,7 +843,6 @@
                   class:playing={isPlaying(group, node.row)}
                   class:unqueued={node.row.item === null}
                   class:played={rowLabel(group, node.row) === 'Played'}
-                  class:skipped={node.row.item?.skipped === true}
                   role="treeitem"
                   aria-selected={focusId === node.id}
                   aria-current={isPlaying(group, node.row) ? 'true' : undefined}
@@ -809,7 +867,6 @@
             class="leaf plain"
             class:playing={isPlaying(group, node.row)}
             class:played={rowLabel(group, node.row) === 'Played'}
-            class:skipped={node.row.item?.skipped === true}
             class:dragging={dragKey === group.key}
             class:drop-before={dragKey !== null && dropIndex === g}
             class:drop-after={dragKey !== null && dropIndex === g + 1 && g === groups.length - 1}
@@ -941,11 +998,6 @@
     grid-template-columns: auto minmax(0, 1fr) auto auto;
   }
 
-  /* Skipped: kept in the list, dimmed. */
-  .leaf.skipped .main {
-    opacity: 0.5;
-  }
-
   .remove:hover:not(:disabled) {
     color: #e8907a;
   }
@@ -981,11 +1033,13 @@
     height: 3px;
   }
 
+  /* Scaled, not sized, and not animated: a width transition lays out and repaints the panel at
+     the display's refresh rate for most of every 1 s update. */
   .bar > span {
     display: block;
     height: 100%;
     background: #6b6b78;
-    transition: width 0.8s linear;
+    transform-origin: left;
   }
 
   .bar.playable {
@@ -1004,17 +1058,13 @@
     background: #e8c56a;
   }
 
-  .fastest {
-    margin-left: 0.3rem;
-    padding: 0 0.3rem;
-    border-radius: 0.6rem;
-    background: rgb(111 191 127 / 18%);
-    color: #9fd3a8;
-    font-size: 0.68rem;
-  }
-
   .pause[aria-pressed='true'] {
     color: var(--accent);
+    background: rgb(242 180 90 / 12%);
+  }
+
+  .bar.placeholder {
+    visibility: hidden;
   }
 
   .tick {

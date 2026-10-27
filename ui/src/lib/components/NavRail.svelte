@@ -72,7 +72,7 @@
     },
     {
       view: 'player',
-      label: 'Playing',
+      label: 'Queue',
       title: playing ? 'Back to the video and its queue' : 'The queue',
       disabled: false,
       icon: 'M4.5 5h15a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-15a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM10 9v6l5-3z',
@@ -130,7 +130,7 @@
           <span class="label">
             {item.label}
             {#if item.view === 'player' && upcoming > 0}
-              <span class="sr-only">, {upcoming} up next</span>
+              <span class="sr-only">, {upcoming} to play in the queue</span>
             {/if}
           </span>
         </button>

@@ -9,6 +9,7 @@ use crate::{
 };
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::{Mutex, PoisonError};
 use tokio::io::AsyncReadExt as _;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio_util::sync::CancellationToken;
@@ -17,6 +18,8 @@ pub(crate) struct SocksUdp {
     socket: UdpSocket,
     closed: CancellationToken,
     monitor: tokio::task::JoinHandle<()>,
+    /// Receives whole envelopes; kept rather than allocated for every datagram.
+    buffer: Mutex<Vec<u8>>,
 }
 
 impl Drop for SocksUdp {
@@ -26,7 +29,11 @@ impl Drop for SocksUdp {
 }
 
 impl SocksUdp {
-    pub(crate) async fn open(cfg: &Socks5Config, mut lease: Lease) -> Result<Self, NetError> {
+    pub(crate) async fn open(
+        cfg: &Socks5Config,
+        mut lease: Lease,
+        loopback_only: bool,
+    ) -> Result<Self, NetError> {
         let mut control = TcpStream::connect((cfg.host.trim(), cfg.port))
             .await
             .map_err(NetError::ProxyUnreachable)?;
@@ -48,20 +55,9 @@ impl SocksUdp {
         if relay.ip().is_unspecified() {
             relay.set_ip(peer.ip());
         }
-        if relay.port() == 0 || relay.ip().is_multicast() {
-            return Err(NetError::Unsupported(
-                "the proxy supplied an invalid UDP relay".into(),
-            ));
-        }
-        let any = SocketAddr::new(
-            if relay.is_ipv4() {
-                Ipv4Addr::UNSPECIFIED.into()
-            } else {
-                Ipv6Addr::UNSPECIFIED.into()
-            },
-            0,
-        );
-        let socket = UdpSocket::bind(any).await?;
+        check_relay(peer.ip(), relay)?;
+        let local = crate::addr::local_ip(relay.is_ipv6(), loopback_only);
+        let socket = UdpSocket::bind(SocketAddr::new(local, 0)).await?;
         socket.connect(relay).await?;
         let closed = CancellationToken::new();
         let stopped = closed.clone();
@@ -78,6 +74,7 @@ impl SocksUdp {
             socket,
             closed,
             monitor,
+            buffer: Mutex::new(vec![0; 65_535]),
         })
     }
 
@@ -97,12 +94,17 @@ impl SocksUdp {
     pub(crate) async fn recv(&self, bytes: &mut [u8]) -> io::Result<(usize, SocketAddr)> {
         // Read a whole UDP envelope: a too-small caller buffer must not turn a truncated
         // envelope into a valid packet. The kernel accepts only the connected relay.
-        let mut packet = vec![0; 65_535];
         loop {
-            let n = tokio::select! {
+            tokio::select! {
                 biased;
                 () = self.closed.cancelled() => return Err(closed()),
-                received = self.socket.recv(&mut packet) => received?,
+                ready = self.socket.readable() => ready?,
+            }
+            let mut packet = self.buffer.lock().unwrap_or_else(PoisonError::into_inner);
+            let n = match self.socket.try_recv(&mut packet) {
+                Ok(n) => n,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) => return Err(error),
             };
             let Some((payload, source)) = decode(&packet[..n]) else {
                 continue;
@@ -114,6 +116,23 @@ impl SocksUdp {
             return Ok((payload.len(), source));
         }
     }
+}
+
+/// Refuses a relay that is not usable, or that a public proxy has no business naming: a relay on
+/// this computer or its network (loopback, private, link-local) would point the datagrams at
+/// local hosts instead of the proxy. A proxy that is itself local may relay locally.
+fn check_relay(proxy: IpAddr, relay: SocketAddr) -> Result<(), NetError> {
+    if relay.port() == 0 || relay.ip().is_multicast() {
+        return Err(NetError::Unsupported(
+            "the proxy supplied an invalid UDP relay".into(),
+        ));
+    }
+    if crate::addr::is_public_ip(proxy) && !crate::addr::is_public_ip(relay.ip()) {
+        return Err(NetError::Unsupported(
+            "the proxy supplied a UDP relay on the local network".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn closed() -> io::Error {
@@ -175,6 +194,7 @@ mod tests {
             socket,
             closed: CancellationToken::new(),
             monitor: tokio::spawn(std::future::pending()),
+            buffer: Mutex::new(vec![0; 65_535]),
         };
         let local = client.local_addr().unwrap();
         let source = "8.8.8.8:53".parse().unwrap();
@@ -235,6 +255,35 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn a_public_proxy_cannot_name_a_local_relay() {
+        let relay = |s: &str| s.parse::<SocketAddr>().unwrap();
+        let public: IpAddr = "93.184.216.34".parse().unwrap();
+        for local in [
+            "127.0.0.1:1080",
+            "192.168.1.1:1080",
+            "10.0.0.1:1080",
+            "169.254.169.254:80",
+            "[::1]:1080",
+            "[fd00::1]:1080",
+            "0.0.0.0:1080",
+        ] {
+            assert!(check_relay(public, relay(local)).is_err(), "{local}");
+        }
+        assert!(check_relay(public, relay("93.184.216.35:40000")).is_ok());
+        // A proxy on this computer or the local network may relay locally, or publicly.
+        for proxy in ["127.0.0.1", "192.168.1.2", "::1"] {
+            let proxy: IpAddr = proxy.parse().unwrap();
+            for ok in ["127.0.0.1:1080", "192.168.1.2:40000", "93.184.216.35:40000"] {
+                assert!(check_relay(proxy, relay(ok)).is_ok(), "{proxy} {ok}");
+            }
+        }
+        // Never a multicast relay or port 0.
+        let loopback: IpAddr = Ipv4Addr::LOCALHOST.into();
+        assert!(check_relay(loopback, relay("224.0.0.1:1080")).is_err());
+        assert!(check_relay(loopback, relay("127.0.0.1:0")).is_err());
+    }
+
     #[test]
     fn envelopes_are_strict_and_preserve_addresses() {
         for addr in ["8.8.8.8:53", "[2001:4860:4860::8888]:53"] {

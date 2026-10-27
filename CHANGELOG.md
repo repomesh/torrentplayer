@@ -7,8 +7,12 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-27
+
 ### Added
 
+- The player has visible Rewind 10 seconds and Forward 10 seconds buttons, also available
+  in fullscreen. They preserve pause state and stay within the media's duration.
 - `cargo bench-suite <list file>` benchmarks your own media files, torrents, and magnet links
   and writes `report.md` and `results.json` (see "Benchmark your own files" in
   `docs/performance.md`). `torrentplayer-bench local --media FILE` (`cargo bench-file`) seeds a
@@ -26,16 +30,148 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `summary` in `results.json`. `torrentplayer-bench render <results.json>` rewrites a saved
   run's report in the current layout.
 
+### Changed
+
+- The queue is now manual. Nothing in it is paused, removed, or reordered for you: playing a
+  video further down no longer marks the videos in between as skipped (also when the app
+  starts). Only merging the same file of one torrent queued twice still happens on its own.
+- Skipping is gone. Unticking a video in the queue removes it, with Undo; a file of a torrent
+  with several videos stays listed, so ticking it adds it again. Pause keeps a video without
+  downloading or uploading it. Queues saved with skipped videos load them as paused.
+- The queue downloads in its own order. The "In order" / "Fastest first" choice, "Play ready
+  videos first" (`playback.optimizeQueue`) with its "Keep each torrent's order" option
+  (`playback.keepCourseOrder`), and the "Fastest" badge are removed; queues and settings saved
+  by older versions load as before and drop these on the next save. Instead, **Sort by…** in
+  the queue's ⋯ menu reorders the queue once, with Undo, by name, recently added, size,
+  progress, download speed, peers, or time left. Each torrent's files stay together, and
+  nothing re-sorts later.
+- When a video ends it is marked played and stays on its end. The "Up next" countdown and the
+  "Play the next item in the queue automatically" setting (`playback.autoplayNext`) are gone;
+  pick the next video yourself, or press Shift+N.
+- Queued torrents keep running and uploading, finished or not, watched or not, until you pause
+  or remove them. They are no longer paused when nothing is left to download, and seeding no
+  longer stops on its own after playback, so the "Keep sharing after watching", "Stop seeding
+  after", and "Stop seeding at ratio" settings (`bandwidth.seedAfterWatching`,
+  `bandwidth.seedRatioTarget`, `bandwidth.seedTimeLimitMinutes`) are removed. Older settings
+  files load as before and drop them on the next save.
+- Pausing a torrent, or the whole queue, stops both downloading and uploading until you resume
+  it; pausing one video of a torrent stops its download, while the torrent keeps sharing for its
+  other queued videos. Pausing now applies to finished videos too, and the VPN note appears the
+  first time a torrent uploads instead of after playback. The only automatic hold is
+  the one that protects the video playing: background downloads that wait for it now say
+  "Waiting for playback", and it never changes your own pauses. A finished video that is
+  sharing reads "Downloaded · seeding".
+- Downloaded data is kept across restarts: torrents in the queue, finished ones included, no longer
+  download everything again each time TorrentPlayer starts. After a normal quit the pieces are
+  available at once and each is checked against the torrent's hashes when first played or shared;
+  after a crash everything is checked in the background first, on at most two threads, the video
+  being played first. Caches from earlier versions can't be reused and start empty once.
+- Faster peer discovery: DHT lookups send each query once instead of twice (a bug in the vendored
+  DHT), and the first lookup no longer stalls on a fresh node. DHT-only torrents found their first
+  peer in about 1 s instead of 2–12 s (up to 40 s).
+- DHT lookups follow what each torrent needs: every 20 s while it downloads with few peers, every
+  5 minutes once it has enough, and none while it is paused or has nothing to download. A lookup
+  that finds nobody is retried within seconds. Idle torrents no longer send about 19 DHT packets a
+  second each.
+- With incoming peers on, TorrentPlayer announces its listening port in the DHT (BEP 5) while it is
+  listening in the current mode, never in SOCKS5 mode; otherwise its DHT queries are marked
+  read-only (BEP 43).
+- A paused torrent no longer announces itself to its trackers; resuming announces it again at once.
+- Lower CPU and disk use: paused and finished torrents re-plan once a second instead of ten times;
+  playback history is saved every 30 s instead of every 5 s (seeks, stopping and quitting still
+  save at once); the DHT node list is saved every 10 minutes and only when it changed; the queue
+  panel no longer animates its progress bars (about 1 % of a core for the UI during downloads
+  instead of about 9 %) and stops checking downloads while the window is minimized; the VPN tunnel,
+  player and status bar wake up less often.
+- On Windows the app uses about 100 MB less memory while its window is minimized: the webview is
+  asked to drop caches it only needs for drawing, and gets its normal memory back when restored.
+- Less memory with many torrents: partly downloaded pieces now share one 256 MiB budget across the
+  whole engine instead of up to 256 MiB per torrent. The video being played keeps a quarter of it to
+  itself, so background torrents cannot crowd out its downloads, and paused or stalled torrents give
+  their share back. Huge torrents also need less memory per peer: a 100,000-piece torrent with 50
+  peers keeps 625 KB of piece maps instead of 5 MB.
+- TorrentPlayer announces its port in the DHT and answers as a read-write DHT node only while
+  peers can reach it, not merely while it listens: while the router confirms a UPnP mapping to a
+  public address, or for 30 minutes after a peer from the internet connected in (which covers a
+  port forwarded by hand or by a VPN provider). Otherwise it is read-only (BEP 43), and it
+  switches back at once when that ends. DHT lookups are unaffected.
+- librqbit (used for magnet metadata, or for every torrent with the librqbit engine) stops its
+  session, with its DHT node, trackers and listener, after a minute with no torrents and nothing
+  to do, and starts a new one when next needed. It used to keep its DHT node running until the app
+  quit after the first magnet link.
+- A SOCKS5 proxy that nothing uses is checked less often: every 10, 20, 40 and then 80 s instead
+  of every 5 s. The first connection through it checks it again at once and restores the 5 s
+  interval, and nothing goes around a proxy that went down meanwhile.
+- The queue says when the kill switch blocks downloads, with a button to Network & VPN settings,
+  instead of "Finding peers…" forever.
+- When a video ends, a card offers Play next (Shift+N) or Replay, also in fullscreen. Nothing plays
+  on its own.
+- Resuming no longer asks: with "Resume where I left off" on, the video continues and a chip offers
+  "Start over".
+- Clearer queue pause: its own icon, "Paused by you", P to pause or resume from the keyboard, and the
+  queue's buttons reachable with Tab. Removing a torrent's videos and "Clear played" offer Undo
+  instead of asking first.
+- Toasts stack, stay while you read them, keep errors until closed, and show in fullscreen.
+- Buffering says how many peers were found and how fast it downloads, and tells you when no one is
+  sharing the file. The player says when it converts audio, and when the conversion failed.
+- Plainer wording: "sharing" instead of "seeding", "blocked" for the kill switch, time left instead
+  of ETA, and "May not play here (format: …)" instead of pointing to a full player that doesn't
+  exist yet. The rail's "Playing" item is now "Queue". Hardware decoding and protocol encryption
+  settings are hidden until a player or engine applies them.
+
 ### Fixed
 
+- Linux: audio and video no longer play silently on systems without GStreamer's plugins ("GStreamer
+  element autoaudiosink not found"). The `.deb` and `.rpm` packages now depend on them (and
+  recommend `gstreamer1.0-libav` for H.264 and AAC), and the AppImage bundles GStreamer.
+- Play in a queue item's "Choose files…" dialog starts the file again; it closed the dialog
+  and played nothing.
+- "Start over" pressed before a video's length is known no longer jumps back to the saved
+  position once it is.
+- Pressing Back (or Esc) twice in Settings while a change is still saving no longer leaves twice.
+- Accessibility: focus returns to the queue's options button after choosing a menu action, the
+  10-second skip buttons keep focus at the start or end of a video, Esc on the end card leaves
+  the player, and screen readers hear a short line for the file preview instead of its full
+  text.
+- The player and the status bar no longer poll the backend every second while the window is
+  minimized (or, for the playback position, while paused), and a slow answer can no longer
+  replace a newer one.
+- Audio conversion retries temporary startup and stream-read failures twice before falling back
+  to silent playback. Seeking again cancels a pending retry. When large videos fill the media
+  buffer after backward seeks, distant future segments are evicted before retrying the append.
+- High-bitrate videos with Dolby or DTS audio, such as 4K WEB-DLs at about 27 Mbit/s, no longer
+  lose their sound after the first seconds or minutes of playback ("The audio could not be
+  converted"). The player buffered a minute of converted video ahead, more than the webview's 150
+  MB media buffer holds at that bitrate, and gave up when an append was refused. It now buffers
+  fewer seconds of high-bitrate video and, when the buffer is full anyway, waits for playback.
+- Playing files always have a visible queue entry. The active row offers Pause/Resume, Stop,
+  and Stop & remove; removing it saves progress and stops playback, and Undo restores the
+  entry without autoplay. File lists also allow queued videos to be removed.
+- Quitting no longer blocks the shutdown deadline while flushing piece caches or playback
+  history on slow storage. Those writes run on blocking workers, and the app waits up to two
+  seconds before exiting; an unfinished cache flush is checked again on the next start.
+- The architecture guide now describes automatic resume with a Start over chip and the Queue
+  navigation label used in 0.3.1.
 - `cargo bench-suite … --download-mibps 0` now runs public entries with no download limit (labelled
   "no cap"); before, 0 fell back to the 10 MiB/s default.
+- `cargo bench-suite … --wireguard`/`--socks5` now downloads the `.torrent` links of public
+  entries through the tunnel or proxy (waiting for it like the runs do) instead of directly,
+  and, in every mode, only from public hosts: a link or redirect to `localhost` or a private,
+  loopback, or link-local address is refused, as in the app.
+- A benchmark run that fails (no such file, a start-up time-out, an engine error) now stops its
+  engine. Before, the engine kept downloading from and uploading to the swarm while later
+  suite entries were measured, skewing their results, and on Windows kept the run's temporary
+  folder from being deleted. The same holds for `torrentplayer-bench limit` runs.
+- The benchmark list's Debian DVD entry is no longer filed under "swarms without web seeds",
+  and the suite's error for an unsupported link scheme now mentions http:// links.
 - A WireGuard tunnel whose server stops answering is no longer shown as Connected. The tunnel
   now counts as connected only while its server completes handshakes and answers traffic within
-  20 seconds (an idle tunnel is probed with a tiny DNS query inside it); otherwise the kill
-  switch pauses traffic with the reason ("the WireGuard server is not answering tunnel traffic"
-  or "has not completed a recent handshake"), and traffic resumes by itself when the server
-  answers again. Benchmarks over WireGuard now report such a tunnel as down.
+  20 seconds; otherwise the kill switch pauses traffic with the reason ("the WireGuard server is
+  not answering tunnel traffic" or "has not completed a recent handshake"), and traffic resumes
+  by itself when the server answers again. An idle or blocked tunnel is probed with one tiny
+  packet inside it (a DNS query, or without a usable DNS server an empty datagram the server
+  does not forward), less often the longer it stays idle; a tunnel left unanswered for 6 minutes
+  is replaced by a new one. Benchmarks over WireGuard now report such a tunnel as down.
 - In the WireGuard and SOCKS5 modes, a magnet link that finds no peers now says what to check in
   that mode (the tunnel's handshake, or the proxy's UDP support) instead of always blaming the
   proxy, and the message for `.torrent` files in these modes no longer has stray spaces.
@@ -43,6 +179,223 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   (about two hours of traffic, sooner when handshakes repeat) every later one was refused as a
   flood and stalled for at least 5 seconds, or failed with a server that ignores WireGuard
   cookies, until the app was restarted.
+- Search result thumbnails no longer delete a folder named `thumbnails` in the download folder.
+  The app kept their temporary downloads there and emptied it when it started fetching them, so
+  a folder of yours with that name lost its contents. Thumbnail downloads now live in the app's
+  own `torrentplayer-swarm/thumbnails` cache folder, and a `thumbnails` folder in the download
+  folder is never touched.
+- A malformed `.torrent` file (from a file, a link, or a search result) no longer crashes the
+  engine that opens it. Files with a piece length of 0 or above 64 MiB, no data, or file
+  lengths too large to add up are now refused as not a valid `.torrent` file, with the reason,
+  before either engine reads them.
+- Switching between Direct and WireGuard or SOCKS5 now stops librqbit's work in progress, such
+  as fetching a magnet link's details from peers, before the new mode takes effect. Before, a
+  fetch already running kept connecting to peers directly after a switch to WireGuard or
+  SOCKS5, outside the tunnel or proxy and the kill switch, for up to two minutes. The torrent
+  being opened fails with a message to try again.
+- In the WireGuard and SOCKS5 modes, tracker host names are no longer looked up outside the
+  tunnel or proxy. With the librqbit engine, and while fetching a magnet link's details, HTTP
+  tracker names were resolved by the system's DNS, even while the kill switch was blocking
+  traffic. TorrentPlayer now contacts those trackers itself, with the names resolved by the
+  tunnel or proxy, and librqbit contacts none, so turning "Send tracker requests through the
+  proxy" off also stops every tracker request of torrents already open.
+- Links to `.torrent` files (pasted, or from search results) can no longer reach your local
+  network. A link, or a redirect it sends the app to, that leads to a private, loopback, or
+  link-local address or to `localhost` (such as your router or a cloud metadata address) is now
+  refused, in every network mode, and a redirect from https to http is no longer followed.
+- Settings that cannot be read no longer switch a VPN or proxy user to a direct connection. When
+  `settings.json` exists but is damaged, unreadable (for example locked by an antivirus or sync
+  client, or too large), or names a connection mode this version does not know, TorrentPlayer now
+  starts with all traffic paused and a notice ("Your network settings could not be read…") until
+  you choose a connection in Settings → Network & VPN or select **Connect directly**. The file
+  is kept as `settings.invalid.json` and is never overwritten while it cannot be backed up. One
+  bad network value (such as an unknown IPv6 policy) now resets only itself, not the connection
+  mode. A first run without a settings file still starts in Direct mode.
+- FFmpeg runs for durations and seek-bar thumbnails no longer follow the `http_proxy` environment
+  variable, which sent the private stream address (with its access token) to that proxy. They
+  now share the hardening of the audio conversion.
+- Search no longer labels Dolby (AC-3, E-AC-3, TrueHD) and DTS releases "no sound in built-in
+  player" or ranks them down when the bundled FFmpeg converts their audio to stereo; they now
+  say "audio: converted to stereo". Builds without FFmpeg keep the warning.
+- The download folder and the FFmpeg folder can now be chosen only with **Choose folder…**; the
+  fields are no longer typed in, and the app refuses a new folder from anywhere else. Network
+  (UNC) and device paths are refused, so checking a folder can no longer make Windows send your
+  sign-in credentials to another computer, and an FFmpeg folder inside the download folder is
+  refused, so TorrentPlayer never runs a program that came from a torrent.
+- The queue no longer holds the same video twice when one entry was queued from a search result
+  (its main video, file not chosen yet) and the other names the file, or when two indexers list
+  the same torrent with and without its hash. Such entries merge as soon as the torrent's files
+  are known, queues saved with duplicates are cleaned up, and the "Queued" mark on search
+  results shows them. Queueing other episodes of a season pack still works. (#55)
+- A download folder chosen inside the app's own data folder from before the rename (for example
+  `%LOCALAPPDATA%\io.torrentstream.desktop\downloads`) is now followed when that folder moves to
+  its new name, instead of the settings still pointing at the old path.
+- Importing a WireGuard configuration is now all or nothing: if its settings cannot be saved, the
+  previous keys are put back instead of new keys being paired with the old configuration, and no
+  other settings change can slip in during the import.
+- Cache clean-up no longer removes the torrent whose video the file explorer is previewing, and
+  closing the explorer now ends its video preview instead of leaving it published.
+- Undoing the removal of a queued video puts that video back in its place instead of restoring
+  the whole queue as it was, which lost anything played, moved, or queued in the meantime.
+- Indexer links from search results no longer open when they point at this computer or a
+  private network through an IPv4-mapped IPv6 address, an IPv6 link-local address
+  (`fe80::/10`), or the shared `100.64.0.0/10` range; they are checked like peer addresses.
+- In the SOCKS5 and WireGuard modes, a search result's "Open the indexer's page" link now says
+  that the page opens in your browser, outside TorrentPlayer's proxy or tunnel.
+- Documentation caught up with 0.3: the comparison page no longer says the engine does not upload
+  or that Dolby and DTS audio is only warned about, and names the LGPL and MPL-2.0 parts that
+  ship with the app; the security policy lists 0.3.x as supported; the streaming page is no
+  longer marked as planned; the build guide says which Ubuntu versions CI and releases use and
+  that libmpv is not needed.
+- In WireGuard mode, opening a connection or UDP socket no longer fails now and then with "not a
+  suitable bind address" when the randomly chosen tunnel port is already in use; the next free port
+  is used.
+- In WireGuard mode, a forged WireGuard cookie reply (which anyone who knows the server's public key
+  and sees the handshake can make) no longer redirects the tunnel's traffic to its sender; the
+  tunnel follows the server only on authenticated handshake and data messages. Handshake initiations
+  are rate-limited before the key agreement, so a flood of them costs little CPU.
+- A WireGuard tunnel keeps sending its keepalives and key renewals while a lot of traffic (or junk)
+  arrives; before, a steady stream of incoming datagrams held them back, which could expire the
+  session and block traffic as "has not completed a recent handshake". Packets waiting inside the
+  tunnel are also capped instead of piling up in memory.
+- In WireGuard mode, connections inside the tunnel now close when the kill switch engages or the
+  mode changes, even while the app still holds them and the server is silent; before, each one kept
+  about 80 KiB and a task until the tunnel closed. Tunnel connections whose peer stops responding
+  are dropped after 2 minutes, and incoming-connection listeners reserve far less memory.
+- A connection to a host name started in Direct mode can no longer go out directly after you switch
+  to a protected mode (or a hold applies) while its name is being resolved; the route is re-checked
+  before each address is dialled.
+- In SOCKS5 mode, one failed proxy check no longer closes every connection: a connected proxy must
+  fail two checks in a row (about a second apart) before the kill switch engages, and failed
+  connections to the proxy trigger an extra check at most once per check interval. Providers with
+  connection caps no longer cause a drop-and-reconnect loop; a proxy that is really down still
+  blocks traffic within seconds.
+- A WireGuard endpoint given as a host name now works when its first address does not: IPv4
+  addresses are tried first, a tunnel that completes no handshake for 15 seconds moves on to the
+  next address, and the name is resolved again whenever the tunnel is restarted (after 6 minutes
+  without a session or an answer), so a server that moved is found again. Before, only the first
+  address was used, and an IPv6 address listed first never connected on an IPv4-only network.
+- WireGuard configurations whose DNS line includes a search domain (for example
+  `DNS = 10.64.0.1, corp.example`) can be imported and connect; the search domain is ignored, and
+  the import says so. The import also says when `ListenPort` is ignored (TorrentPlayer uses a
+  random local port) and when `PersistentKeepalive = off` is (the tunnel keeps a 25-second
+  keepalive).
+- Adding a torrent again while the player was still finishing a request on its previous
+  instance no longer empties the engine's piece cache under that request, which could hand the
+  player zeros or the bytes of other pieces. Reads from the cache also stay inside the piece
+  they ask for.
+- A peer that sends bad data can no longer stall playback in TorrentPlayer's engine. Data a peer
+  was not asked for is dropped, so it cannot spoil pieces other peers are fetching. A piece that
+  fails its hash check is fetched again from one peer, and once it verifies, every peer that had
+  sent different data for it is banned ("smart ban") — and only those: before, a bad peer and an
+  honest one that both sent blocks of failed pieces tied, nobody was banned, and in a thin swarm
+  the pieces could fail again and again.
+- Peers banned for bad data are now refused when they connect to the listening port again, from
+  any port, and are no longer dialed at another port of the same address.
+- Another program on the computer can no longer lock the player out of the loopback stream
+  server by opening connections and sending nothing: connections that have not presented the
+  stream token are kept apart, at most 8 at a time (the oldest is closed for a new one), and are
+  closed after 10 seconds or once refused. A player that stopped reading a response no longer
+  holds its connection forever: after 30 seconds without progress it is closed when another
+  request needs the place. When all 16 places are busy, a request is now answered
+  `503 Service Unavailable` instead of having its connection dropped.
+- A torrent added to TorrentPlayer's engine no longer serves pieces to peers that connect in the
+  moment before the app applies the upload setting: uploading is now off until it is turned on.
+- Settings that an older TorrentStream still running kept open during the update are no longer
+  lost: when they could not be moved to TorrentPlayer's folder, the app started with defaults
+  and connected directly, even for a WireGuard or SOCKS5 user. They are now copied; if even that
+  fails, traffic is held until you close the older app and restart, or choose a connection.
+- An FFmpeg folder inside the download folder, saved by an earlier version, is no longer used:
+  files there can come from torrents. FFmpeg is looked for as if no folder were set.
+- A WireGuard tunnel that slept (a laptop suspended) for more than six minutes now tries a new
+  handshake when the computer wakes up, instead of closing every connection to start over.
+- A peer that failed a piece's hash check and then re-sent it slowly no longer holds up
+  playback: a much faster peer takes over the piece the player is waiting for, and smart ban
+  still names whoever sent bad data.
+- Adding a torrent a third time no longer wipes its piece cache under a stream still reading
+  from the first instance.
+- Data a peer sends after choking us, for blocks we had asked it for, is used instead of
+  discarded as waste.
+- A peer sending data nobody asked for no longer looks faster than it is, so it does not get
+  more requests and the shown download speed is not inflated.
+- Magnet links and torrent files can no longer make TorrentPlayer announce to HTTP trackers on
+  your own network or on `localhost`, directly or through the tunnel or proxy, including through
+  tracker redirects. UDP trackers are not covered yet.
+- Updated `ctutils` (used by the Linux credential store's cryptography) to 0.4.5 for
+  [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385), non-constant-time
+  comparisons.
+- Trackerless magnet links found no peers through the WireGuard tunnel or a SOCKS5 proxy ("input
+  address stream exhausted"): the metadata lookup now gets up to 200 DHT peers instead of 20.
+- Videos with chapters whose Dolby or DTS audio needs converting, such as Sintel, now play with
+  sound. The conversion used to fail at once with "The audio could not be converted".
+- A web seed that answers range requests with an empty `206` response (or one that ends before
+  a whole block) is now backed off like any failing server instead of being asked again at once,
+  in a tight loop.
+- A block from a peer that starts past the end of its piece no longer trips an arithmetic
+  overflow check in debug builds; it is ignored like any other malformed block.
+- Stopping or removing a torrent now ends reads still waiting for its pieces (they fail instead
+  of hanging), and gives the memory of its partial pieces back to the other torrents at once.
+  Before, an open stream request kept the stopped torrent and its share of the piece memory
+  budget alive.
+- Web seeds no longer count towards the thin-swarm limit (four peers), so a slow BitTorrent
+  peer in a small swarm is kept, and retried after it disconnects, even while web seeds are in
+  use.
+- A queue file that could not be read (for example while an antivirus scanner held it) or was
+  damaged no longer loses the queue: it is retried briefly, copied aside to
+  `queue.invalid-<time>.json` without replacing earlier copies, and never overwritten before a
+  copy exists. While the queue loaded with problems, finished downloads are not cleaned up, so
+  the lost queue's downloads are no longer deleted at startup. Queue files from a newer version
+  are copied to `queue.newer-<time>.json` before they are first replaced.
+- Seeking in a video whose audio is converted stops the previous FFmpeg conversion at once,
+  instead of when the player stops reading it, and a conversion whose input stops answering
+  gives up after a minute.
+- When the window's page reloads or recovers from a crash, the videos it was playing stop
+  streaming (their progress is saved), and the explorer preview and best-pick frame are
+  withdrawn, instead of staying open until TorrentPlayer quits.
+- Downloads in the old `Downloads\TorrentStream` cache now move to `Downloads\TorrentPlayer` even
+  when its cache folder already exists. A torrent cached in both stays in the old folder.
+- Importing a WireGuard configuration with a malformed key line, such as `PresharedKey <key>`
+  without the `=`, showed most of the key in the import warnings and silently dropped it. Such
+  key lines are now refused, other unrecognized lines are ignored without being repeated, and no
+  warning or error quotes key material.
+- A direct peer connection still being made when you switch to the WireGuard tunnel or a SOCKS5
+  proxy is now abandoned at once. Before, it could still reach the peer from your own address
+  and was only closed afterwards.
+- A SOCKS5 proxy on the internet can no longer point DHT and UDP tracker traffic at your own
+  computer or local network by naming a local UDP relay; such relays are refused. A proxy that
+  is itself on your computer or network may still use one.
+- Teredo (`2001::/32`), IPv6 benchmarking (`2001:2::/48`), and the new IPv6 documentation range
+  (`3fff::/20`) no longer count as public addresses, so web seeds and peers cannot use them to
+  reach hosts that only public destinations should.
+- The network status now shows DHT and UDP as off once the SOCKS5 proxy refuses a UDP
+  association, instead of always reporting UDP as available.
+- Turning off incoming connections or UPnP, or leaving direct mode, now asks the router to remove
+  TorrentPlayer's UPnP port mapping (for up to two seconds, never delaying quitting) instead of
+  leaving it open until its lease ran out.
+- Clearing a proxy password or WireGuard key now reports an error if a copy filed under the old
+  Lumen name in the system credential store cannot be removed. Before, that copy was silently
+  kept and brought the cleared secret back on the next read.
+- When the system credential store cannot be read (for example, while it is locked), the
+  WireGuard and SOCKS5 modes now block traffic with a message saying so and read it again after a
+  few seconds, then less often. Before, the WireGuard tunnel could start without its preshared
+  key, and a missing private key left the tunnel in an error state that was never retried.
+
+### Known limitations
+
+- On some high-refresh displays (seen at 165 Hz with an NVIDIA GPU), 4K 60 fps video can drop about
+  15 % of frames in the built-in player. Edge and Chrome drop the same on that machine, so it comes
+  from the system web engine; running the display at 120 or 144 Hz may help.
+- Tracker addresses on your own network are refused for HTTP trackers only: UDP trackers at a
+  local address, and librqbit's own tracker requests with the `rqbit` engine in Direct mode,
+  can still reach them.
+- With the `rqbit` engine choice in the WireGuard and SOCKS5 modes, TorrentPlayer announces to a
+  torrent's HTTP trackers for librqbit once, when it opens, and not again (librqbit itself now
+  contacts no trackers in those modes, so their names are never looked up outside the tunnel or
+  proxy). A long session therefore finds no new tracker peers. The automatic engine is not
+  affected: torrentplayer-swarm keeps announcing.
+- The settings file is now version 5 (`network.hold` replaces `network.vpnAdapterModeRemoved`).
+  Going back to 0.3.0 reads it as far as possible and keeps a copy as `settings.newer.json`, but a
+  held connection is not held there: 0.3.0 ignores `network.hold` and connects directly.
 
 ## [0.3.0] - 2026-10-21
 
@@ -375,7 +728,8 @@ The first public preview: stream any torrent, video or audio, and skip to any mo
   never unmuted. It now mutes only when the autoplay policy refuses sound, then shows a "click
   to unmute" button. Interruptions are retried with the sound unchanged.
 
-[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/torrentplayer/torrentplayer/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/torrentplayer/torrentplayer/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/torrentplayer/torrentplayer/releases/tag/v0.1.0

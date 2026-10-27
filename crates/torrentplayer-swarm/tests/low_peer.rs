@@ -313,6 +313,8 @@ enum Server {
     Corrupt,
     /// Answers every request with the whole file (`200`).
     NoRanges,
+    /// Answers every range with a `206` and an empty body.
+    Empty,
 }
 
 /// An HTTP server for `data` at any path, counting requests.
@@ -345,12 +347,16 @@ async fn web_server(data: Arc<Vec<u8>>, behaviour: Server) -> (SocketAddr, Arc<A
                         let (a, b) = v.strip_prefix("bytes=")?.split_once('-')?;
                         Some((a.parse::<usize>().ok()?, b.parse::<usize>().ok()?))
                     });
-                    let response = if let (Some((a, b)), Server::Good | Server::Corrupt) =
-                        (range, behaviour)
+                    let response = if let (
+                        Some((a, b)),
+                        Server::Good | Server::Corrupt | Server::Empty,
+                    ) = (range, behaviour)
                     {
                         let mut body = data[a..=b].to_vec();
-                        if behaviour == Server::Corrupt {
-                            body[0] ^= 0xff;
+                        match behaviour {
+                            Server::Corrupt => body[0] ^= 0xff,
+                            Server::Empty => body.clear(),
+                            Server::Good | Server::NoRanges => {}
                         }
                         let mut r = format!(
                                 "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {a}-{b}/{}\r\nContent-Length: {}\r\n\r\n",
@@ -470,5 +476,29 @@ async fn gives_up_on_a_web_seed_that_ignores_ranges() {
         after,
         "no more requests after giving up"
     );
+    swarm.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backs_off_a_web_seed_that_sends_empty_responses() {
+    let s = seeder(false).await;
+    let (server, hits) = web_server(Arc::new(s.data.clone()), Server::Empty).await;
+    let (swarm, _dir) = swarm(true).await;
+    let url = format!("http://{server}/lecture.mp4");
+    let meta = Metainfo::from_bytes(&with_web_seed(&s.torrent, &url)).unwrap();
+    let torrent = swarm.add(meta, Vec::new()).unwrap();
+    let mut reader = torrent.reader(0).unwrap();
+    let mut buf = [0u8; 1024];
+    let read = tokio::time::timeout(Duration::from_secs(3), reader.read_exact(&mut buf)).await;
+    assert!(read.is_err(), "an empty response holds no data");
+    // A failure pauses the web seed for seconds; asking again at once would be thousands of
+    // requests by now.
+    let requests = hits.load(Ordering::SeqCst);
+    assert!(
+        (1..=5).contains(&requests),
+        "{requests} requests in 3 s: {:?}",
+        torrent.stats()
+    );
+    assert_eq!(torrent.stats().web_seeds, 1, "paused, not given up");
     swarm.shutdown();
 }

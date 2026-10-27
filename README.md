@@ -31,9 +31,9 @@
 </p>
 
 <p align="center">
-  <a href="assets/demo/torrentplayer-demo.mp4"><img src="assets/demo/torrentplayer-demo.gif" alt="Demo: searching for Sintel, pressing Play on the best pick, and clicking around the seek bar; playback starts in half a second and each skip plays again within about a second, while the queue downloads in the background" width="720"></a>
+  <a href="assets/demo/torrentplayer-demo.mp4"><img src="assets/demo/torrentplayer-demo.gif" alt="Demo at normal speed: searching for Sintel, pressing Play on the best pick, and skipping around while the queue downloads in the background" width="720"></a>
   <br>
-  <sub>Search, play, skip. Recorded live in real time; nothing is sped up. <a href="assets/demo/torrentplayer-demo.mp4">Full demo with sound (MP4, 35 s)</a>.<br>
+  <sub>Search, play, skip. GIF shown at normal speed. <a href="assets/demo/torrentplayer-demo.mp4">Original real-time demo with sound (MP4, 35 s)</a>.<br>
   <em>Sintel</em> and <em>Tears of Steel</em> © Blender Foundation, CC BY 3.0.</sub>
 </p>
 
@@ -124,18 +124,24 @@ sources, details, and where other tools are the better fit.
 - **Live status for every item:** download and upload speed, peers, percent downloaded, and
   time left, with a bar
   that is green when it is ready to play, yellow while it downloads, and grey while it
-  waits for peers. A "Fastest" badge points out the video that would play smoothest now.
-- **Gives back to the swarm.** The built-in engine uploads every verified piece it has while a
-  torrent is active. After playback, keep sharing until a ratio or time target is reached, with
-  one upload limit across both engines.
-- **In order or fastest first.** Series, albums, and courses download in sequence, or the fastest
-  torrents go first while each course keeps its lecture order. Pause any video, or a whole
-  torrent, with one click.
+  waits for peers.
+- **Gives back to the swarm.** The built-in engine uploads every verified piece it has. Queued
+  torrents keep sharing, finished or not, until you pause or remove them, with one upload limit
+  across both engines.
+- **In your order.** The queue downloads in the order you set, so series, albums, and courses
+  arrive in sequence; only you reorder it, by dragging or once with **Sort by…** (name, recently
+  added, size, progress, speed, peers, or time left). Pause any video, a whole torrent, or
+  everything with one click: pausing a torrent or everything stops download and upload until you
+  resume; pausing one video of a torrent stops its download.
+- **You stay in charge.** Nothing in the queue is paused, removed, or reordered for you, and the
+  next video plays only when you pick it.
 
 ### A player for video and audio
 
-- A clean, cinematic player with keyboard controls (Space, ←/→ to skip, F for fullscreen, M to
-  mute, C for captions), playback speed, and auto-play of the next item in the queue.
+- A clean, cinematic player with keyboard controls (Space, ←/→ or the on-screen buttons to skip
+  10 seconds, F for fullscreen, M to mute, C for captions, Q for the queue), playback speed, and
+  Shift+N to play the next item in the queue. When a video ends, a card offers Play next or
+  Replay; nothing plays on its own.
 - **Music, podcasts, and audiobooks** (MP3, FLAC, AAC/M4A/M4B, Ogg, Opus, WAV) stream and skip
   just like video, with a "now playing" view; an album starts at its first track and its tracks
   queue in order.
@@ -155,8 +161,8 @@ sources, details, and where other tools are the better fit.
 - **Courses, not file lists.** Lectures are natural-sorted ("Lecture 2" before "Lecture 10"), a
   torrent's videos appear as one course in the queue, and a file explorer previews pictures,
   text, and subtitles inside a torrent before you play anything.
-- **Resume across restarts.** Watch progress is saved locally, shown in the queue and Library,
-  and reopening an unfinished video offers to continue from its last position or start over.
+- **Resume across restarts.** Watch progress is saved locally and shown in the queue and Library.
+  Reopening an unfinished video continues from its last position, with a **Start over** button.
 
 ### Network and privacy controls
 
@@ -173,7 +179,7 @@ sources, details, and where other tools are the better fit.
   upload speed of every torrent, and your public IPv4 and IPv6 addresses as the
   internet sees them, through the current mode (optional; see [Privacy](#privacy)).
 - **Bandwidth limits** for download and upload, applied to the whole app instantly.
-- **Seeding controls** for sharing after playback, ratio and time targets, and a peer cap per
+- **Sharing you control:** pause or remove a torrent to stop sharing it, and a peer cap per
   torrent.
 
 ## Performance
@@ -214,7 +220,7 @@ phone home. Its only network traffic is:
 - **The public-IP check** in the status bar, which asks [icanhazip.com](https://icanhazip.com)
   (`ipv4.` and `ipv6.icanhazip.com`) for the addresses it sees: at start-up, when the connection
   changes, and every 10 minutes. It carries no identifiers and can be turned off in Settings →
-  Network.
+  Network & VPN.
 
 All of it goes through your selected VPN, WireGuard tunnel, or proxy, and nothing is sent while
 the kill switch is engaged. See the [threat model](docs/threat-model.md) and
@@ -223,7 +229,7 @@ the playback library is a user-only local SQLite database and is never sent anyw
 
 ## Get TorrentPlayer
 
-TorrentPlayer is an early preview. The latest version is **0.3.0**; see the
+TorrentPlayer is an early preview. The latest version is **0.3.1**; see the
 [changelog](CHANGELOG.md) for what changed. You can:
 
 - **Download a release** from the [Releases](https://github.com/torrentplayer/torrentplayer/releases)
@@ -259,10 +265,15 @@ You need:
   - Windows: Microsoft C++ Build Tools and WebView2 (preinstalled on Windows 11).
   - macOS: Xcode Command Line Tools.
   - Linux (Debian/Ubuntu):
+
     ```sh
     sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
-      libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+      libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
+      gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
     ```
+
+    The GStreamer plugins are needed at run time: without them audio and video play silently or
+    not at all.
 
 Then:
 
@@ -299,7 +310,7 @@ Working today: the streaming engine (for `.torrent` files and magnet links), pla
 queue with background downloads, the WireGuard and SOCKS5 modes with a kill switch, and
 bandwidth limits. Next:
 
-- [x] Seeding controls: keep sharing after watching, ratio and time targets, peer limits
+- [x] Sharing controls: pause per video, torrent, or queue; peer limits
 - [x] Cache size limit and automatic clean-up of old downloads
 - [x] Resume where you left off
 - [x] Dolby and DTS audio (converted as it plays)
@@ -317,11 +328,11 @@ what you play.
 
 **Why is a video slow to start?** Speed comes from the swarm. A torrent with few seeders or
 peers can only be as fast as they are; the queue shows each video's peers and speed so you can
-pick one that plays smoothly, or switch the queue to "Fastest first".
+pick one that plays smoothly, or move it up in the queue.
 
 **Does TorrentPlayer upload?** Yes. Both torrent engines share verified pieces while a torrent is
-active, under the global upload limit. Settings can keep sharing after playback until either a
-ratio or time target is reached.
+active, under the global upload limit. A queued torrent keeps sharing until you pause or remove
+it in the queue.
 
 **What happens if my VPN drops?** In the WireGuard and SOCKS5 modes, the kill switch stops all
 traffic and closes connections until the tunnel is back; nothing falls back to a direct
@@ -329,7 +340,7 @@ connection. If you use your own VPN app (Direct mode), turn on that app's kill s
 [network modes](docs/network.md).
 
 **Where are videos stored?** In `TorrentPlayer` inside your Downloads folder, unless you choose
-another folder in Settings → Storage, which shows its size and limit and safely clears finished,
+another folder in Settings → Downloads & storage, which shows its size and limit and safely clears finished,
 unqueued downloads (see
 [configuration](docs/configuration.md)).
 

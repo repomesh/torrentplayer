@@ -303,6 +303,7 @@ Used by:
 Used by:
 
 - [librqbit-dht 9.0.1](https://github.com/ikatson/rqbit)
+- [librqbit-tracker-comms 9.0.1](https://github.com/ikatson/rqbit)
 
 ```text
 
@@ -1667,7 +1668,6 @@ Used by:
 - [librqbit-lsd 9.0.1](https://github.com/ikatson/rqbit)
 - [librqbit-peer-protocol 9.0.1](https://github.com/ikatson/rqbit)
 - [librqbit-sha1-wrapper 9.0.1](https://github.com/ikatson/rqbit)
-- [librqbit-tracker-comms 9.0.1](https://github.com/ikatson/rqbit)
 - [librqbit-upnp 9.0.1](https://github.com/ikatson/rqbit)
 - [librqbit-utp 0.7.0](https://github.com/ikatson/librqbit-utp)
 - [librqbit 9.0.1](https://github.com/ikatson/rqbit)
@@ -7526,7 +7526,7 @@ DEALINGS IN THE SOFTWARE.
 
 Used by:
 
-- [ctutils 0.4.3](https://github.com/RustCrypto/utils)
+- [ctutils 0.4.5](https://github.com/RustCrypto/utils)
 
 ```text
 Copyright (c) 2025-2026 The RustCrypto Project Developers
@@ -9377,19 +9377,19 @@ SOFTWARE.
 
 Used by:
 
-- [torrentplayer-bench 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-course 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-library 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-media 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-net 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-player 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-prioritize 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-search 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-settings 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-stream 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-swarm 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-torrent 0.3.0](https://github.com/torrentplayer/torrentplayer)
-- [torrentplayer-app 0.3.0](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-bench 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-course 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-library 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-media 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-net 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-player 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-prioritize 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-search 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-settings 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-stream 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-swarm 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-torrent 0.3.1](https://github.com/torrentplayer/torrentplayer)
+- [torrentplayer-app 0.3.1](https://github.com/torrentplayer/torrentplayer)
 - [async-stream-impl 0.3.6](https://github.com/tokio-rs/async-stream)
 - [async-stream 0.3.6](https://github.com/tokio-rs/async-stream)
 - [block2 0.6.2](https://github.com/madsmtm/objc2)

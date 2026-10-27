@@ -187,6 +187,7 @@ describe('qualityNotes', () => {
     kind: 'video',
     audio: null,
     audioPlays: null,
+    audioConverted: false,
   };
 
   it('shows the label, with warnings first', () => {
@@ -197,9 +198,9 @@ describe('qualityNotes', () => {
     expect(
       qualityNotes({ ...base, resolution: '2160p', suspectSize: true, label: '2160p' }),
     ).toEqual(['Too small for 4K', '2160p']);
-    expect(qualityNotes({ ...base, playable: 'needsFullPlayer', label: '' })).toEqual([
-      'Needs the full player',
-    ]);
+    expect(
+      qualityNotes({ ...base, playable: 'needsFullPlayer', container: 'AVI', label: '' }),
+    ).toEqual(['May not play here (format: AVI)']);
   });
 });
 

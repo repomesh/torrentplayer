@@ -22,7 +22,7 @@
     id="search-emberglow"
     label="Emberglow"
     path="search.sources.emberglow"
-    help="search.emberglow.tech, querying all 33 of its indexers."
+    help="search.emberglow.tech, querying all of its indexers."
   >
     <Toggle
       id="search-emberglow"

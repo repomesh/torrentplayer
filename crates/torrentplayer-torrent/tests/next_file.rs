@@ -120,6 +120,7 @@ async fn course(choice: EngineChoice) -> Course {
         upload_limit_bps: None,
         peer_limit: 40,
         dht_state_dir: None,
+        allow_local_links: false,
     })
     .await
     .unwrap();

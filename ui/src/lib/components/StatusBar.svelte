@@ -1,7 +1,8 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 <script lang="ts">
+  import { formatEta } from '../downloads';
   import { formatPercent, formatRate } from '../format';
-  import { formatEta, type StatusInfo } from '../stats';
+  import type { StatusInfo } from '../stats';
 
   let {
     downloadBps,
@@ -11,15 +12,21 @@
     peersSeen,
     bufferedSecs,
     health,
+    stalled,
     fileDownloaded,
     fileLength,
     etaSecs,
-    engine,
   }: StatusInfo = $props();
 
   const complete = $derived(fileLength > 0 && fileDownloaded >= fileLength);
+  const left = $derived(formatEta(etaSecs));
+  // While stalled the buffer is not enough to play, whatever it holds.
   const ahead = $derived(
-    bufferedSecs === null ? '—' : `${Math.floor(Math.max(0, bufferedSecs)).toString()}s ahead`,
+    stalled
+      ? 'Buffering'
+      : bufferedSecs === null
+        ? '—'
+        : `${Math.floor(Math.max(0, bufferedSecs)).toString()}s ahead`,
   );
 </script>
 
@@ -40,13 +47,9 @@
   </span>
   <span class="sep">·</span>
   <span title="Share of this file downloaded">{formatPercent(fileDownloaded, fileLength)}</span>
-  {#if !complete}
+  {#if !complete && left !== null}
     <span class="sep">·</span>
-    <span title="Time to download the rest of this file">ETA {formatEta(etaSecs)}</span>
-  {/if}
-  {#if engine}
-    <span class="sep">·</span>
-    <span title="Torrent engine">{engine}</span>
+    <span title="Time to download the rest of this file">{left} left</span>
   {/if}
 </div>
 

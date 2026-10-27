@@ -82,7 +82,12 @@ impl SearchState {
                     .map_err(|e| IpcError::internal(&e))?
                     .build()
                     .map_err(|e| IpcError::internal(&e))?;
-                Ok::<_, IpcError>(EmberglowProvider::with_client(base, client))
+                // With the bundled FFmpeg, Dolby and DTS audio is converted, so results with it
+                // play with sound (see `convert`).
+                Ok::<_, IpcError>(
+                    EmberglowProvider::with_client(base, client)
+                        .converts_audio(crate::convert::sidecar().is_some()),
+                )
             })
             .await?;
         let hide_adult = settings.current().search.hide_adult;
@@ -137,6 +142,7 @@ pub(crate) enum ContentKindDto {
 }
 
 /// Quality parsed from a result's title.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export)]
@@ -163,8 +169,11 @@ pub(crate) struct QualityDto {
     pub kind: ContentKindDto,
     /// The audio codec the title names (`AAC`, `Dolby Digital`, `DTS`, …), if any.
     pub audio: Option<String>,
-    /// Whether the built-in player plays that audio; `null` if the title names none.
+    /// Whether the built-in player plays that audio (decoded, or converted with the bundled
+    /// FFmpeg); `null` if the title names none.
     pub audio_plays: Option<bool>,
+    /// Whether it plays only because TorrentPlayer converts it (Dolby or DTS) to stereo AAC.
+    pub audio_converted: bool,
 }
 
 impl From<&Quality> for QualityDto {
@@ -192,9 +201,10 @@ impl From<&Quality> for QualityDto {
                 ContentKind::Unknown => ContentKindDto::Unknown,
             },
             audio: q.audio.map(|a| a.label().to_owned()),
-            audio_plays: q
-                .audio
-                .map(torrentplayer_search::quality::Audio::plays_in_webview),
+            audio_plays: q.audio.map(|_| q.silent_audio().is_none()),
+            // As in the ranking reason: a file that needs the full player plays nothing here.
+            audio_converted: q.playability() != Playability::NeedsFullPlayer
+                && q.converted_audio().is_some(),
         }
     }
 }
@@ -537,6 +547,34 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn dolby_audio_plays_when_the_app_converts_it() {
+        let mut quality = Quality::parse("Film.2024.1080p.WEB-DL.DDP5.1.H.264.mkv", None, None);
+        let dto = QualityDto::from(&quality);
+        assert_eq!(dto.audio.as_deref(), Some("Dolby Digital Plus"));
+        assert_eq!((dto.audio_plays, dto.audio_converted), (Some(false), false));
+        assert_eq!(dto.playable, PlayabilityDto::Unlikely);
+
+        quality.converts_audio = true;
+        let dto = QualityDto::from(&quality);
+        assert_eq!((dto.audio_plays, dto.audio_converted), (Some(true), true));
+        assert_eq!(dto.playable, PlayabilityDto::Likely);
+
+        let aac = QualityDto::from(&Quality {
+            converts_audio: true,
+            ..Quality::parse("Film 2024 AAC mp4", None, None)
+        });
+        assert_eq!((aac.audio_plays, aac.audio_converted), (Some(true), false));
+
+        // A file the built-in player cannot open is not "converted to stereo" either.
+        let avi = QualityDto::from(&Quality {
+            converts_audio: true,
+            ..Quality::parse("Film 2024 DTS avi", None, None)
+        });
+        assert_eq!(avi.playable, PlayabilityDto::NeedsFullPlayer);
+        assert!(!avi.audio_converted);
+    }
+
     /// Progress of a search for "sintel" that has found `titles` (with seeders).
     fn progress(titles: &[(&str, u32)], done: bool) -> SearchProgress {
         let candidates = titles
@@ -549,7 +587,7 @@ mod tests {
                 ..Candidate::default()
             })
             .collect();
-        let mut response = build_response(candidates, Vec::new(), false);
+        let mut response = build_response(candidates, Vec::new(), false, false);
         rank(&mut response.results, "sintel");
         SearchProgress {
             response,

@@ -10,13 +10,13 @@
   import { formatBytes } from '../format';
   import {
     errorMessage,
-    networkStatus,
     openLink,
     torrentDetails,
     type SearchResultDto,
     type TorrentDetailsDto,
   } from '../ipc';
   import {
+    browserNote,
     formatDay,
     formatPieceSize,
     healthLabel,
@@ -27,7 +27,9 @@
     summarizeFiles,
     trackerSummary,
   } from '../details';
+  import { followNetwork } from '../network';
   import { formatPeers, formatPublished } from '../search';
+  import type { NetworkModeKind } from '../bindings/NetworkModeKind';
 
   interface Props {
     result: SearchResultDto;
@@ -40,6 +42,9 @@
   let loading = $state(false);
   let loadError = $state<string | null>(null);
   let udpAllowed = $state<boolean | null>(null);
+  let mode = $state<NetworkModeKind | null>(null);
+  // Indexer pages open in the system browser, which a protected mode does not cover.
+  const linkNote = $derived(browserNote(mode));
   let copied = $state<string | null>(null);
 
   const files = $derived(details ? summarizeFiles(details.files) : null);
@@ -66,11 +71,10 @@
         })
         .catch(() => undefined);
     }
-    networkStatus()
-      .then((s) => {
-        udpAllowed = s.udpAllowed;
-      })
-      .catch(() => undefined);
+    return followNetwork((s) => {
+      udpAllowed = s.udpAllowed;
+      mode = s.mode;
+    });
   });
 
   async function load(): Promise<void> {
@@ -216,6 +220,9 @@
               }
             }}>Open the indexer's page</button
           >
+          {#if linkNote}
+            <span class="note">{linkNote}</span>
+          {/if}
         {/if}
       </dd>
       {#if formatPublished(result.published)}
@@ -299,7 +306,6 @@
   dt {
     overflow-wrap: anywhere;
     color: var(--text-muted);
-    opacity: 0.8;
   }
 
   dd {
@@ -335,6 +341,12 @@
 
   .error {
     color: #e8907a;
+  }
+
+  .note {
+    display: block;
+    color: var(--text-muted);
+    font-size: 0.8rem;
   }
 
   .link {

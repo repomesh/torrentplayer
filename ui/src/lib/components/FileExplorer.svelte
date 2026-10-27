@@ -11,12 +11,13 @@
   import type { FileSummary } from '../bindings/FileSummary';
   import type { TorrentSummary } from '../bindings/TorrentSummary';
   import { defaultSelection, previewHint, splitFiles, type ExplorerTorrent } from '../explorer';
-  import { fileName, folderOf, playableInWebview } from '../files';
+  import { fileName, folderOf, formatOf, mayNotPlay, playableInWebview } from '../files';
   import { formatBytes } from '../format';
   import {
     errorMessage,
     previewFile,
     preloadStatus,
+    stopPreview,
     type FilePreviewDto,
     type PreloadStatusDto,
   } from '../ipc';
@@ -38,6 +39,7 @@
     onSelectTorrent: (entry: ExplorerTorrent) => void;
     onPlay: (file: FileSummary) => void;
     onQueue: (file: FileSummary) => void;
+    onRemove: (file: FileSummary) => void;
     /** Queues every video not queued yet, in lecture order. */
     onQueueAll: (files: FileSummary[]) => void;
   }
@@ -54,6 +56,7 @@
     onSelectTorrent,
     onPlay,
     onQueue,
+    onRemove,
     onQueueAll,
   }: Props = $props();
 
@@ -67,6 +70,31 @@
   let preview = $state.raw<FilePreviewDto | null>(null);
   let previewError = $state<string | null>(null);
   let previewing = $state(false);
+  // What screen readers hear of the preview: a short line, not the text shown (up to 64 KB).
+  const previewStatus = $derived.by(() => {
+    if (selectedFile === null) {
+      return '';
+    }
+    if (
+      preview?.image ||
+      (preview?.text !== undefined && preview.text !== null) ||
+      preview?.video
+    ) {
+      return `Preview of ${fileName(selectedFile.path)}`;
+    }
+    if (previewing && previewHint(selectedFile) !== 'none') {
+      return 'Loading preview…';
+    }
+    return previewError ?? preview?.note ?? 'No preview for this kind of file.';
+  });
+
+  /** A preview video that goes away stops loading, so it does not keep the stream open. */
+  function unloadOnRemove(media: HTMLVideoElement): () => void {
+    return () => {
+      media.removeAttribute('src');
+      media.load();
+    };
+  }
 
   // A torrent shown anew keeps a still-present selection, else picks the file playing or the
   // first video.
@@ -138,6 +166,8 @@
     return () => {
       stopped = true;
       clearTimeout(timer);
+      // The explorer closed: its preview video must not keep its torrent from clean-up.
+      stopPreview().catch(() => undefined);
     };
   });
 
@@ -197,7 +227,7 @@
           >
         {/if}
         {starting === file.index ? 'Starting…' : formatBytes(file.length)}
-        {#if video && !playableInWebview(file.path)}· may need the full player{/if}
+        {#if video && !playableInWebview(file.path)}· {mayNotPlay(formatOf(file.path))}{/if}
       </span>
     </button>
     {#if video}
@@ -217,12 +247,22 @@
           type="button"
           class="small"
           class:queued
-          disabled={queued}
-          aria-label={queued ? `${fileName(file.path)} is queued` : `Queue ${fileName(file.path)}`}
-          title={queued ? 'In the queue' : 'Play after the current video'}
+          aria-label={queued
+            ? `${playingIndex === file.index ? 'Stop and remove' : 'Remove'} ${fileName(file.path)} from the queue`
+            : `Queue ${fileName(file.path)}`}
+          title={queued
+            ? playingIndex === file.index
+              ? 'Stop playback and remove from the queue'
+              : 'Remove from the queue'
+            : 'Add to the queue. It downloads in the background; you choose when to play it.'}
           onclick={() => {
-            onQueue(file);
-          }}>{queued ? 'Queued' : '+ Queue'}</button
+            if (queued) {
+              onRemove(file);
+            } else {
+              onQueue(file);
+            }
+          }}
+          >{queued ? (playingIndex === file.index ? 'Stop & remove' : 'Remove') : '+ Queue'}</button
         >
       </span>
     {/if}
@@ -331,7 +371,8 @@
         </section>
       </div>
 
-      <aside class="preview" aria-label="Preview" aria-live="polite">
+      <aside class="preview" aria-label="Preview">
+        <p class="sr-only" role="status">{previewStatus}</p>
         {#if selectedFile}
           <div class="view">
             {#if preview?.image}
@@ -340,7 +381,13 @@
               <pre>{preview.text}</pre>
               {#if preview.truncated}<p class="note">Showing the first 64 KB.</p>{/if}
             {:else if preview?.video}
-              <video src={preview.video} muted playsinline preload="metadata"></video>
+              <video
+                {@attach unloadOnRemove}
+                src={preview.video}
+                muted
+                playsinline
+                preload="metadata"
+              ></video>
             {:else if previewing && previewHint(selectedFile) !== 'none'}
               <p class="note">Loading preview…</p>
             {:else}

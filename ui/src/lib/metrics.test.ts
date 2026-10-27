@@ -44,6 +44,19 @@ describe('PlaybackTimer', () => {
     expect(timer.frame()).toBeNull();
   });
 
+  it('says while a seek waits for its frame', () => {
+    const timer = new PlaybackTimer(clock().now);
+    timer.play();
+    timer.frame();
+    expect(timer.seekPending).toBe(false);
+    timer.seeking();
+    expect(timer.seekPending).toBe(true);
+    timer.seeked();
+    expect(timer.seekPending).toBe(true);
+    timer.frame();
+    expect(timer.seekPending).toBe(false);
+  });
+
   it('restarts on repeated seeking events (scrubbing)', () => {
     const c = clock();
     const timer = new PlaybackTimer(c.now);

@@ -7,6 +7,14 @@
 > removed by [ADR 0009](0009-remove-vpn-adapter-mode.md). Users of VPN apps, OpenVPN-based ones
 > included, now connect them at the system level and choose Direct, or use this WireGuard mode.
 
+> **Amended in 0.3.1:** librqbit contacts no trackers in protected modes. TorrentPlayer announces
+> to them for it, with host names resolved by the tunnel or proxy (see
+> [Network modes](../network.md)), so tracker names are no longer looked up outside the tunnel.
+> A tunnel also counts as connected only while the server answers traffic within 20 s (idle
+> tunnels are probed inside the tunnel), not merely while its handshake is under 180 s old, and
+> one left unanswered for 6 minutes is replaced (see
+> [WireGuard health](../network.md#wireguard-health)).
+
 ## Context
 
 TorrentPlayer could import WireGuard files but could not connect them. Users also confused local
@@ -19,8 +27,8 @@ Expose separate VPN and WireGuard choices. VPN uses the existing bound-interface
 connections established by provider apps, including OpenVPN. WireGuard runs inside TorrentPlayer,
 using boringtun for the protocol and smoltcp for the TCP/IP stack. Configured DNS queries
 also travel inside the tunnel. Endpoint bootstrap resolution uses the system resolver.
-Librqbit's HTTP tracker client still resolves tracker names locally before using its SOCKS5
-bridge, an existing limitation shared with SOCKS5 mode; search and torrentplayer-swarm use tunneled DNS.
+Search and torrentplayer-swarm use tunneled DNS, and so do tracker announces for librqbit (see
+the 0.3.1 amendment above).
 
 Use a vendored copy of tokio-wireguard 0.1.3 (MIT OR Apache-2.0) to supply Tokio sockets.
 The upstream version lacks preshared keys and handshake reporting. Local changes add both,

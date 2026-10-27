@@ -1,10 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "src-tauri"]
-exclude = ["vendor/librqbit-dht", "vendor/tokio-wireguard"]
+exclude = ["vendor/librqbit-dht", "vendor/librqbit-tracker-comms", "vendor/tokio-wireguard"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT OR Apache-2.0"
@@ -31,6 +31,9 @@ torrentplayer-torrent = { path = "crates/torrentplayer-torrent" }
 # External crates. New dependencies need a justification in the PR that adds them.
 anyhow = "1.0.100"
 base64 = "0.23"
+# Test-only: forges WireGuard cookie replies in torrentplayer-net's tunnel tests. Already built
+# for the vendored tokio-wireguard (same version and features).
+boringtun = { version = "0.7.1", default-features = false }
 bytes = "1.10"
 # Small DNS wire parser; name queries travel inside the WireGuard tunnel.
 dns-parser = "0.8"
@@ -53,8 +56,8 @@ librqbit-core = { version = "9.0.1", default-features = false, features = ["sha1
 # The DHT node librqbit uses (already built for it), for torrentplayer-swarm's own peer discovery.
 librqbit-dht = "9.0.1"
 librqbit-tracker-comms = "9.0.1"
-# UPnP IGD port mapping for incoming peers in direct mode. Already built for librqbit (same
-# version), so it adds no crate to the build.
+# UPnP IGD discovery (SSDP) for incoming peers in direct mode; the port mapping requests are
+# our own (torrentplayer-net incoming.rs). Already built for librqbit (same version).
 librqbit-upnp = "9.0.1"
 proptest = "1.7"
 # The system folder picker for choosing the download folder (Tauri v2 has none built in). GTK3 on
@@ -84,10 +87,15 @@ tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 ts-rs = "12.0"
 url = "2.5"
+# Windows only: lowers the webview's memory target while the window is minimized. Both are
+# already built for Tauri's WebView2 backend (same versions).
+webview2-com = "0.39.1"
+windows-core = "0.62.2"
 zeroize = "1.8"
 
 [workspace.lints.rust]
-# `deny` rather than `forbid` so the FFI crate can opt in locally. Every other crate
+# `deny` rather than `forbid` so the FFI crate and src-tauri (two WebView2 calls in window.rs)
+# can opt in locally. Every other crate
 # additionally declares `#![forbid(unsafe_code)]` at its root.
 unsafe_code = "deny"
 missing_docs = "warn"
@@ -122,3 +130,7 @@ strip = "symbols"
 # librqbit's DHT node, vendored for scoped transports and Windows datagram-error handling (see
 # vendor/librqbit-dht/TORRENTPLAYER.md). Used by librqbit and torrentplayer-swarm alike.
 librqbit-dht = { path = "vendor/librqbit-dht" }
+# librqbit's tracker client, vendored so its UDP socket opens on first use rather than with
+# every session (see vendor/librqbit-tracker-comms/TORRENTPLAYER.md). Used by librqbit and
+# torrentplayer-swarm alike.
+librqbit-tracker-comms = { path = "vendor/librqbit-tracker-comms" }

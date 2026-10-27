@@ -5,8 +5,8 @@
 use std::io;
 use std::net::{Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Context as _, bail};
 use futures_util::future::BoxFuture;
@@ -91,7 +91,53 @@ pub(crate) trait Playhead: Send + Sync {
     fn update(&self, offset: u64);
 }
 
-pub(crate) enum BenchEngine {
+/// A started engine. Stop it with [`BenchEngine::finish`] on every path, failed runs included:
+/// neither engine stops by itself, and a forgotten one keeps downloading from (and uploading
+/// to) its swarm while later runs are measured, and keeps its files open. Dropping an engine
+/// that was not finished (a cancelled run) stops it as far as that can be done without
+/// waiting.
+pub(crate) struct BenchEngine {
+    inner: Inner,
+    /// The download directory, to tell engines apart in [`running`].
+    dir: PathBuf,
+    finished: bool,
+}
+
+/// Download directories of the engines started and not yet stopped, in this process.
+static RUNNING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Whether an engine downloading to `dir` is still running (for tests).
+#[cfg(test)]
+pub(crate) fn running(dir: &Path) -> bool {
+    RUNNING
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|d| d == dir)
+}
+
+/// Download directories of the engines dropped without [`BenchEngine::finish`] (for tests).
+#[cfg(test)]
+static ABANDONED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// Whether the engine downloading to `dir` was dropped without [`BenchEngine::finish`].
+#[cfg(test)]
+pub(crate) fn abandoned(dir: &Path) -> bool {
+    ABANDONED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .any(|d| d == dir)
+}
+
+fn stopped(dir: &Path) {
+    let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(i) = running.iter().position(|d| d == dir) {
+        running.swap_remove(i);
+    }
+}
+
+enum Inner {
     Rqbit {
         engine: Engine,
         id: Option<TorrentId>,
@@ -103,7 +149,7 @@ pub(crate) enum BenchEngine {
     Swarm {
         swarm: Swarm,
         torrent: Option<Torrent>,
-        /// The shared network of a protected mode, as for [`BenchEngine::Rqbit`].
+        /// The shared network of a protected mode, as for [`Inner::Rqbit`].
         protected: Option<Network>,
         /// A direct network manager of this engine's own, whose listener takes incoming peers
         /// ([`BenchConfig::incoming`]); stopped with the engine.
@@ -159,15 +205,15 @@ impl BenchEngine {
         }
         let protected = protected_network(config)?;
         let public_discovery = config.dht || config.trackers;
-        Ok(match kind {
+        let inner = match kind {
             EngineKind::Rqbit => {
-                let mut c = rqbit_config(dir, config, protected.as_ref());
+                let mut c = rqbit_config(dir.clone(), config, protected.as_ref());
                 // librqbit runs its own listener, on every interface as in the app (direct mode
                 // only). It announces no port for a loopback listener.
                 if config.incoming {
                     c.listen_addr = Some((Ipv6Addr::UNSPECIFIED, 0).into());
                 }
-                Self::Rqbit {
+                Inner::Rqbit {
                     engine: Engine::start(c).await?,
                     id: None,
                     protected,
@@ -180,7 +226,7 @@ impl BenchEngine {
                     config,
                     protected.as_ref(),
                 ));
-                let mut c = SwarmConfig::new(dir);
+                let mut c = SwarmConfig::new(dir.clone());
                 c.scheduler = config.scheduler.clone();
                 c.enable_trackers =
                     (config.public_swarm && config.trackers) || config.local_tracker;
@@ -211,6 +257,7 @@ impl BenchEngine {
                     c.network = Some(network.clone());
                 }
                 c.allow_local_web_seeds = config.local_web_seeds;
+                c.allow_local_trackers = config.local_tracker;
                 c.enable_web_seeds = config.web_seeds;
                 c.download_limit_bps = config.download_limit_bps;
                 if let Some(limit) = config.peer_limit {
@@ -219,8 +266,17 @@ impl BenchEngine {
                 if let Some(connecting) = config.max_connecting {
                     c.max_connecting = connecting;
                 }
-                Self::Swarm {
-                    swarm: Swarm::start(c).await?,
+                let swarm = match Swarm::start(c).await {
+                    Ok(swarm) => swarm,
+                    Err(error) => {
+                        if let Some(network) = owned {
+                            network.shutdown();
+                        }
+                        return Err(error.into());
+                    }
+                };
+                Inner::Swarm {
+                    swarm,
                     torrent: None,
                     protected,
                     owned,
@@ -228,6 +284,15 @@ impl BenchEngine {
                     public_discovery,
                 }
             }
+        };
+        RUNNING
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(dir.clone());
+        Ok(Self {
+            inner,
+            dir,
+            finished: false,
         })
     }
 
@@ -239,8 +304,8 @@ impl BenchEngine {
         source: TorrentSource,
         mut peers: Vec<SocketAddr>,
     ) -> anyhow::Result<(String, Vec<BenchFile>)> {
-        match self {
-            Self::Rqbit {
+        match &mut self.inner {
+            Inner::Rqbit {
                 engine,
                 id,
                 protected,
@@ -248,7 +313,10 @@ impl BenchEngine {
             } => {
                 if let (TorrentSource::Magnet(link), Some(network)) = (&source, protected.as_ref())
                 {
-                    peers.extend(protected_magnet_peers(network, link, *public_discovery).await);
+                    // Protected modes run on public swarms only, never with the local tracker.
+                    peers.extend(
+                        protected_magnet_peers(network, link, *public_discovery, false).await,
+                    );
                 }
                 let info = engine.add_with_peers(source, peers).await?;
                 *id = Some(info.id);
@@ -264,7 +332,7 @@ impl BenchEngine {
                     .collect();
                 Ok((info.name, files))
             }
-            Self::Swarm {
+            Inner::Swarm {
                 swarm,
                 torrent,
                 protected,
@@ -277,7 +345,8 @@ impl BenchEngine {
                     TorrentSource::Magnet(link) => {
                         if let Some(network) = protected.as_ref() {
                             peers.extend(
-                                protected_magnet_peers(network, &link, *public_discovery).await,
+                                protected_magnet_peers(network, &link, *public_discovery, false)
+                                    .await,
                             );
                         }
                         let (bytes, seen) =
@@ -308,18 +377,21 @@ impl BenchEngine {
                     .collect();
                 peers.sort_unstable();
                 peers.dedup();
-                *torrent = Some(swarm.add(meta, peers)?);
+                let added = swarm.add(meta, peers)?;
+                // Uploads start off; the app turns them on for playback, so the bench does too.
+                added.set_upload_enabled(true);
+                *torrent = Some(added);
                 Ok((name, files))
             }
         }
     }
 
     pub(crate) fn media(&self, file: &BenchFile) -> anyhow::Result<Arc<dyn MediaSource>> {
-        Ok(match self {
-            Self::Rqbit { engine, id, .. } => {
+        Ok(match &self.inner {
+            Inner::Rqbit { engine, id, .. } => {
                 Arc::new(engine.media_source(added(*id)?, file.index)?)
             }
-            Self::Swarm { torrent, .. } => Arc::new(SwarmMedia {
+            Inner::Swarm { torrent, .. } => Arc::new(SwarmMedia {
                 torrent: torrent.clone().context("no torrent added")?,
                 file: file.index,
                 len: file.len,
@@ -335,8 +407,8 @@ impl BenchEngine {
         config: &BenchConfig,
         byte_rate: u64,
     ) -> anyhow::Result<Box<dyn Playhead>> {
-        match self {
-            Self::Rqbit { engine, id, .. } => {
+        match &self.inner {
+            Inner::Rqbit { engine, id, .. } => {
                 let session = engine
                     .start_playback(added(*id)?, file.index, config.prioritization.clone())
                     .await?;
@@ -346,7 +418,7 @@ impl BenchEngine {
                     duration_secs: config.duration_secs,
                 }))
             }
-            Self::Swarm { torrent, .. } => {
+            Inner::Swarm { torrent, .. } => {
                 let torrent = torrent.clone().context("no torrent added")?;
                 torrent.select_file(file.index)?;
                 let playhead = SwarmPlayhead {
@@ -361,8 +433,8 @@ impl BenchEngine {
     }
 
     pub(crate) fn stats(&self) -> anyhow::Result<BenchStats> {
-        Ok(match self {
-            Self::Rqbit { engine, id, .. } => {
+        Ok(match &self.inner {
+            Inner::Rqbit { engine, id, .. } => {
                 let s = engine.stats(added(*id)?)?;
                 BenchStats {
                     wasted_bytes: None,
@@ -373,7 +445,7 @@ impl BenchEngine {
                     downloaded_bytes: s.progress_bytes,
                 }
             }
-            Self::Swarm { torrent, .. } => {
+            Inner::Swarm { torrent, .. } => {
                 let s = torrent.as_ref().context("no torrent added")?.stats();
                 // Display-only conversions of small counts and rates.
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -392,38 +464,83 @@ impl BenchEngine {
     /// Changes the engine's download limit (bytes per second), as the app does when the
     /// setting changes.
     pub(crate) fn set_download_limit(&self, limit: Option<NonZeroU32>) {
-        match self {
-            Self::Rqbit { engine, .. } => engine.set_rate_limits(limit, None),
-            Self::Swarm { swarm, .. } => swarm.set_download_limit(limit),
+        match &self.inner {
+            Inner::Rqbit { engine, .. } => engine.set_rate_limits(limit, None),
+            Inner::Swarm { swarm, .. } => swarm.set_download_limit(limit),
         }
     }
 
-    /// Removes the torrent and stops the engine.
-    pub(crate) async fn finish(self) -> anyhow::Result<()> {
-        match self {
-            Self::Rqbit { engine, id, .. } => {
-                if let Some(id) = id {
-                    engine.remove(id, true).await?;
-                }
+    /// Removes the torrent and stops the engine. Call it whether or not the run succeeded.
+    pub(crate) async fn finish(mut self) -> anyhow::Result<()> {
+        self.finished = true;
+        stopped(&self.dir);
+        match &mut self.inner {
+            Inner::Rqbit { engine, id, .. } => {
+                let removed = match id.take() {
+                    Some(id) => engine.remove(id, true).await,
+                    None => Ok(()),
+                };
+                // Stopped even if the torrent could not be removed.
                 engine.shutdown().await;
+                removed?;
             }
-            Self::Swarm {
-                swarm,
-                torrent,
-                owned,
-                ..
-            } => {
-                if let Some(t) = torrent {
-                    t.stop();
-                }
-                swarm.shutdown();
-                // The shared network of a protected mode outlives the run.
-                if let Some(network) = owned {
-                    network.shutdown();
-                }
-            }
+            Inner::Swarm { .. } => self.inner.stop_swarm(),
         }
         Ok(())
+    }
+}
+
+impl Inner {
+    /// Stops the swarm engine (it stops without waiting).
+    fn stop_swarm(&mut self) {
+        if let Self::Swarm {
+            swarm,
+            torrent,
+            owned,
+            ..
+        } = self
+        {
+            if let Some(t) = torrent.take() {
+                t.stop();
+            }
+            swarm.shutdown();
+            // The shared network of a protected mode outlives the run.
+            if let Some(network) = owned.take() {
+                network.shutdown();
+            }
+        }
+    }
+}
+
+impl Drop for BenchEngine {
+    /// A run that was cancelled (its future dropped) never reached [`BenchEngine::finish`]:
+    /// stop the engine anyway. librqbit stops asynchronously, so its shutdown is spawned.
+    fn drop(&mut self) {
+        if self.finished {
+            return;
+        }
+        stopped(&self.dir);
+        #[cfg(test)]
+        ABANDONED
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(self.dir.clone());
+        tracing::warn!("an engine was not finished; stopping it");
+        match &mut self.inner {
+            Inner::Rqbit { engine, id, .. } => {
+                let engine = engine.clone();
+                let id = id.take();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        if let Some(id) = id {
+                            let _ = engine.remove(id, true).await;
+                        }
+                        engine.shutdown().await;
+                    });
+                }
+            }
+            Inner::Swarm { .. } => self.inner.stop_swarm(),
+        }
     }
 }
 

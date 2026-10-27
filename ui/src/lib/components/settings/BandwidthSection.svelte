@@ -3,7 +3,6 @@
   import type { Settings } from '../../ipc';
   import Field from './Field.svelte';
   import RateField from './RateField.svelte';
-  import Toggle from './Toggle.svelte';
 
   interface Props {
     settings: Settings;
@@ -17,7 +16,12 @@
 </script>
 
 <section class="card" aria-labelledby="bandwidth-title">
-  <h3 id="bandwidth-title">Bandwidth &amp; seeding</h3>
+  <h3 id="bandwidth-title">Bandwidth &amp; sharing</h3>
+  <p class="intro">
+    Queued torrents keep downloading and sharing, finished or not, until you pause or remove them in
+    the queue. Pausing a torrent, or the whole queue, stops both; pausing one video of a torrent
+    stops its download while the torrent keeps sharing for its other queued videos.
+  </p>
   <RateField
     id="bandwidth-down"
     label="Download limit"
@@ -34,73 +38,6 @@
     error={errors['bandwidth.uploadLimitKib']}
     {update}
   />
-  <Field
-    id="bandwidth-seed"
-    label="Keep sharing after watching"
-    path="bandwidth.seedAfterWatching"
-    help="Seeding gives back to the swarm, so what you watch and listen to stays fast for everyone."
-  >
-    <Toggle
-      id="bandwidth-seed"
-      checked={b.seedAfterWatching}
-      describedby="bandwidth-seed-help"
-      onchange={(v) => {
-        update('bandwidth.seedAfterWatching', v);
-      }}
-    />
-  </Field>
-  <Field
-    id="bandwidth-seed-time"
-    label="Stop seeding after"
-    path="bandwidth.seedTimeLimitMinutes"
-    help="Minutes after watching finishes. 0 has no time limit; the ratio target can still stop it."
-    error={errors['bandwidth.seedTimeLimitMinutes']}
-  >
-    <div class="with-unit">
-      <input
-        id="bandwidth-seed-time"
-        class="number"
-        type="number"
-        min="0"
-        max="525600"
-        step="1"
-        value={b.seedTimeLimitMinutes}
-        disabled={!b.seedAfterWatching}
-        aria-describedby="bandwidth-seed-time-help"
-        aria-invalid={errors['bandwidth.seedTimeLimitMinutes'] !== undefined}
-        oninput={(e: Event) => {
-          update(
-            'bandwidth.seedTimeLimitMinutes',
-            (e.currentTarget as HTMLInputElement).valueAsNumber,
-          );
-        }}
-      />
-      <span>minutes</span>
-    </div>
-  </Field>
-  <Field
-    id="bandwidth-ratio"
-    label="Stop seeding at ratio"
-    path="bandwidth.seedRatioTarget"
-    help="Uploaded ÷ downloaded. 0 keeps seeding while TorrentPlayer runs."
-    error={errors['bandwidth.seedRatioTarget']}
-  >
-    <input
-      id="bandwidth-ratio"
-      class="number"
-      type="number"
-      min="0"
-      max="100"
-      step="0.1"
-      value={b.seedRatioTarget}
-      disabled={!b.seedAfterWatching}
-      aria-describedby="bandwidth-ratio-help"
-      aria-invalid={errors['bandwidth.seedRatioTarget'] !== undefined}
-      oninput={(e: Event) => {
-        update('bandwidth.seedRatioTarget', (e.currentTarget as HTMLInputElement).valueAsNumber);
-      }}
-    />
-  </Field>
   <Field
     id="bandwidth-peers"
     label="Peer limit per torrent"
@@ -148,11 +85,10 @@
 </section>
 
 <style>
-  .with-unit {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
+  .intro {
+    margin: 0 0 0.75rem;
     color: var(--text-muted);
-    font-size: 0.8rem;
+    font-size: 0.85rem;
+    line-height: 1.45;
   }
 </style>

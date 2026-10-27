@@ -10,10 +10,6 @@ export type PlaybackSettings = {
  */
 defaultSpeed: number, 
 /**
- * Play the next lecture when one ends.
- */
-autoplayNext: boolean, 
-/**
  * Resume lectures where they were left off.
  */
 resumePosition: boolean, 
@@ -21,15 +17,6 @@ resumePosition: boolean,
  * Hardware video decoding (used by the libmpv player).
  */
 hardwareDecoding: HardwareDecoding, 
-/**
- * Move queued videos that are ready to play (downloaded, or their start and end are)
- * ahead of those that are not.
- */
-optimizeQueue: boolean, 
-/**
- * When optimizing the queue, keep the order of files within one torrent (lectures).
- */
-keepCourseOrder: boolean, 
 /**
  * Turn on subtitles in the system language when a video has them.
  */

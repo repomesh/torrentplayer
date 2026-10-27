@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 
 mod bencode;
+mod bits;
 mod dht;
 mod dht_transport;
 mod limit;
@@ -27,16 +28,20 @@ mod metainfo;
 mod peer;
 mod pex;
 mod reader;
+mod reload;
 pub mod sched;
 mod store;
 
+pub mod http_tracker;
 mod torrent;
 pub mod udp_tracker;
 mod webseed;
 mod wire;
 
 pub use dht::bootstrap_peers as dht_bootstrap_peers;
-pub use metainfo::{BLOCK_LEN, MAX_WEB_SEEDS, MetaFile, Metainfo, MetainfoError};
+pub use metainfo::{
+    BLOCK_LEN, MAX_PIECE_LEN, MAX_WEB_SEEDS, MetaFile, Metainfo, MetainfoError, check_lengths,
+};
 pub use reader::FileReader;
 pub use sched::SchedulerConfig;
 pub use torrent::{PlaybackEstimate, Swarm, SwarmConfig, SwarmError, SwarmStats, Torrent};

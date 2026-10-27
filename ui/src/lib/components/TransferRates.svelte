@@ -2,34 +2,32 @@
 <script lang="ts">
   /*
    * The app's total download and upload speed, for the status bar: every torrent added up,
-   * as the background downloader measures it each second (`queue_downloads`).
+   * as the background downloader measures it each second (`link_use`).
    */
   import { onMount } from 'svelte';
   import { describeRates, type LinkUse } from '../downloads';
-  import { queueDownloads } from '../ipc';
+  import { linkUse } from '../ipc';
+  import { pollWhileVisible } from '../poll';
 
-  /** How often the totals are read. */
+  /** How often the totals are read while the window is on screen. */
   const REFRESH_MS = 2000;
 
   let link = $state<LinkUse | null>(null);
 
   onMount(() => {
     let stopped = false;
-    const refresh = (): void => {
-      queueDownloads().then(
-        (snapshot) => {
+    const stop = pollWhileVisible(
+      () =>
+        linkUse().then((totals) => {
           if (!stopped) {
-            link = snapshot.link;
+            link = totals;
           }
-        },
-        () => undefined,
-      );
-    };
-    refresh();
-    const timer = setInterval(refresh, REFRESH_MS);
+        }),
+      REFRESH_MS,
+    );
     return () => {
       stopped = true;
-      clearInterval(timer);
+      stop();
     };
   });
 </script>
@@ -52,6 +50,6 @@
   }
 
   .rates.idle {
-    opacity: 0.6;
+    color: var(--text-muted);
   }
 </style>

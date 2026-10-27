@@ -1,10 +1,11 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 <script lang="ts">
-  import { onDestroy, onMount, type Snippet } from 'svelte';
+  import { onDestroy, onMount, tick, type Snippet } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import {
     AudioDecodeWatch,
     audioNotice,
+    conversionNotice,
     hasDecodeCounters,
     silenceThreshold,
     type AudioDecoding,
@@ -45,10 +46,12 @@
   } from '../subtitles';
   import { PlaybackTimer } from '../metrics';
   import { followNetwork, pausedMessage } from '../network';
+  import { pollWhileVisible, reportDue, type ReportedPosition } from '../poll';
   import { SeekGate } from '../seekgate';
   import { thumbnailSource } from '../seekbar';
   import type { SettingsSection } from '../settings';
   import { Ewma, bufferHealth, bufferedSeconds, etaSeconds, type StatusInfo } from '../stats';
+  import { endCard, endCardTakesFocus } from '../upnext';
   import Controls from './Controls.svelte';
   import DebugOverlay from './DebugOverlay.svelte';
   import SettingsPage from './settings/SettingsPage.svelte';
@@ -61,12 +64,16 @@
     autoSeeks?: number[];
     /** Seconds to continue from once the duration is known (returning to the player). */
     startAt?: number;
+    /** `Continuing from 12:34`: shown over the video for a while, with "Start over". */
+    resumeChip?: string | null;
     onBack: () => void;
-    /** The video played to its end (the queue may play the next one). */
+    /** The video played to its end (it stays there; nothing plays next on its own). */
     onEnded?: () => void;
     /** The position changed; `duration` is NaN until known. */
     onTime?: (currentTime: number, duration: number) => void;
-    /** Shown over the video, also in fullscreen (the "Up next" card). */
+    /** Keeps queue playback controls in sync with the media element. */
+    onPauseChange?: (paused: boolean) => void;
+    /** Shown over the video, also in fullscreen. */
     children?: Snippet;
     /**
      * The element to show fullscreen, if not the player itself: one that outlives this
@@ -75,6 +82,10 @@
     fullscreenTarget?: HTMLElement | undefined;
     /** Audio-only media (music, podcasts, audiobooks): shown as "now playing" artwork. */
     audio?: { title: string; album: string | null } | null;
+    /** The queue's next video (what Shift+N plays), for the card shown when this one ends. */
+    nextTitle?: string | null;
+    /** Plays the queue's next video (the end card's "Play next"). */
+    onPlayNext?: () => void;
   }
 
   let {
@@ -82,12 +93,16 @@
     startedAt,
     autoSeeks = [],
     startAt = 0,
+    resumeChip = null,
     onBack,
     onEnded,
     onTime,
+    onPauseChange,
     children,
     audio = null,
     fullscreenTarget,
+    nextTitle = null,
+    onPlayNext,
   }: Props = $props();
   // Whether `startAt` has been applied.
   let resumed = false;
@@ -98,8 +113,15 @@
   const HIDE_AFTER_MS = 2500;
   /** How often the audio decoder counters are sampled. */
   const AUDIO_SAMPLE_MS = 500;
+  /** The "Continuing from…" chip leaves after this long, or at the first play, pause, or seek. */
+  const RESUME_CHIP_MS = 8000;
+  const START_HINT = 'Press Space or the play button to start';
+  /** How long the "Converting…" notice stays once the video plays. */
+  const CONVERSION_NOTICE_MS = 10_000;
   /** A seek hold is released this long after `seeked` even if no frame was seen painted. */
   const SEEK_HOLD_MAX_MS = 1000;
+  /** An unchanged position is reported again after this long (the backend's save interval). */
+  const PROGRESS_REPEAT_MS = 30_000;
 
   let video: HTMLVideoElement | undefined = $state();
   let container: HTMLDivElement | undefined = $state();
@@ -126,6 +148,13 @@
   let muted = $state(false);
   let volume = $state(1);
   let fullscreen = $state(false);
+  // The video played to its end: the end card shows until it plays or seeks again.
+  let ended = $state(false);
+  let chipDismissed = $state(false);
+  let chipTimer: ReturnType<typeof setTimeout> | undefined;
+  const chip = $derived(chipDismissed || ended ? null : resumeChip);
+  let endPrimary: HTMLButtonElement | undefined = $state();
+  const card = $derived(endCard(onPlayNext ? nextTitle : null));
   // Seek-bar pictures of this video (not of audio). The duration is read when one is asked
   // for, so it learning the duration does not forget the pictures.
   const thumbnails = $derived.by(() => {
@@ -149,11 +178,36 @@
   let convertedSrc = $state<string | null>(null);
   let converted: ConvertedPlayback | null = null;
   let converting = $state(false);
-  const audioMessage = $derived(
-    audioDismissed || !firstFrameSeen || converting
-      ? null
-      : audioNotice(audioInfo, audioDecoding, hasCounters),
+  // After a failed conversion, returns to its position once the stream itself has loaded.
+  let restoreAfterConversion: (() => void) | null = null;
+  let conversionFailed = $state(false);
+  // The "Converting…" notice leaves on its own a while after the video starts.
+  let conversionNoticed = $state(false);
+  const conversionMessage = $derived(
+    conversionNotice(
+      converting ? (conversionNoticed ? 'off' : 'converting') : conversionFailed ? 'failed' : 'off',
+      audioInfo,
+    ),
   );
+  const audioMessage = $derived(
+    audioDismissed
+      ? null
+      : (conversionMessage ??
+          (!firstFrameSeen || converting
+            ? null
+            : audioNotice(audioInfo, audioDecoding, hasCounters))),
+  );
+  $effect(() => {
+    if (!converting || !firstFrameSeen) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      conversionNoticed = true;
+    }, CONVERSION_NOTICE_MS);
+    return () => {
+      clearTimeout(timer);
+    };
+  });
 
   // Subtitles: the torrent's files and embedded tracks, files the user loaded, and the one
   // showing (see subtitles.ts). Each is added as a text track the first time it is chosen.
@@ -180,16 +234,6 @@
   let overControls = $state(false);
   let scrubbing = $state(false);
   let menuOpen = $state(false);
-  const controlsVisible = $derived(
-    recentlyActive ||
-      paused ||
-      overControls ||
-      scrubbing ||
-      menuOpen ||
-      subtitleMenuOpen ||
-      !firstFrameSeen ||
-      settingsSection !== null,
-  );
 
   const timer = new PlaybackTimer();
   const gate = new SeekGate();
@@ -208,9 +252,12 @@
   let seekHoldTimer: ReturnType<typeof setTimeout> | undefined;
   let frameHandle: number | null = null;
   let reportTimer: ReturnType<typeof setInterval> | undefined;
-  let statsTimer: ReturnType<typeof setInterval> | undefined;
+  let stopStats: (() => void) | undefined;
+  let lastReport: ReportedPosition | null = null;
   let stopNetwork: (() => void) | undefined;
   let lastPoll = 0;
+  let noPeersSince: number | null = null;
+  let noPeersMs = $state(0);
 
   const bufferedSecs = $derived(
     stats === null
@@ -229,10 +276,10 @@
           peersSeen: stats.peersSeen,
           bufferedSecs,
           health: bufferHealth(bufferedSecs, stalled),
+          stalled,
           fileDownloaded: stats.fileDownloaded,
           fileLength: stats.fileLength,
           etaSecs: etaSeconds(stats.fileLength - stats.fileDownloaded, smoothedDown),
-          engine: stats.engine,
         },
   );
 
@@ -241,20 +288,43 @@
       firstFrameSeen,
       stalled,
       hasData: stats !== null && (stats.fileDownloaded > 0 || stats.bufferedBytes > 0),
-      bufferedSecs,
+      peersSeen: stats?.peersSeen ?? 0,
+      peersLive: stats?.peersLive ?? 0,
+      downloadBps: smoothedDown,
+      noPeersMs,
     }),
   );
   const seeking = $derived(seekHolding && firstFrameSeen);
 
+  const controlsVisible = $derived(
+    recentlyActive ||
+      paused ||
+      overControls ||
+      scrubbing ||
+      menuOpen ||
+      subtitleMenuOpen ||
+      !firstFrameSeen ||
+      settingsSection !== null ||
+      // The status line says why the video waits.
+      stalled ||
+      loading !== null,
+  );
+
   /**
    * The pill over the video: shown only while playback is actually blocked, saying why. When
-   * the kill switch pauses traffic, that is the reason, not "Buffering…".
+   * the kill switch blocks traffic, that is the reason, not "Buffering…".
    */
+  const blocked = $derived(seeking || loading !== null ? pausedMessage(network) : null);
   const status = $derived(
+    playbackError ?? blocked ?? (seeking ? 'Seeking…' : null) ?? loading?.text ?? null,
+  );
+  /** What screen readers hear: the same, without the figures that change every second. */
+  const spokenStatus = $derived(
     playbackError ??
-      (seeking || loading !== null ? pausedMessage(network) : null) ??
+      blocked ??
       (seeking ? 'Seeking…' : null) ??
-      loading,
+      loading?.spoken ??
+      (needsClick ? START_HINT : ''),
   );
 
   function poke(): void {
@@ -266,11 +336,50 @@
   }
 
   function report(): void {
-    if (!video) {
+    // Unloading the video on destroy pauses it and resets the position to 0: not a position.
+    if (!video || destroyed) {
       return;
     }
     const known = Number.isFinite(video.duration) ? video.duration : null;
+    lastReport = { position: video.currentTime, duration: known, at: performance.now() };
     reportPlayback(stream.streamId, video.currentTime, known).catch(() => undefined);
+  }
+
+  /**
+   * The report every second: skipped while the position stands still (paused), apart from one
+   * every `PROGRESS_REPEAT_MS` so the backend still saves it on its schedule. A minimized window
+   * playing keeps reporting, so audio playing in the background is still saved.
+   */
+  function reportProgress(): void {
+    if (
+      video &&
+      reportDue(
+        lastReport,
+        video.currentTime,
+        Number.isFinite(video.duration) ? video.duration : null,
+        performance.now(),
+        PROGRESS_REPEAT_MS,
+      )
+    ) {
+      report();
+    }
+  }
+
+  /** Captures the exact final position before the parent closes this stream. */
+  export function checkpoint(): Promise<void> {
+    if (!video) {
+      return Promise.resolve();
+    }
+    return reportPlayback(
+      stream.streamId,
+      video.currentTime,
+      Number.isFinite(video.duration) ? video.duration : null,
+    );
+  }
+
+  /** The queue and the player use the same pause/resume path, including seek cancellation. */
+  export function togglePlayback(): void {
+    togglePlay();
   }
 
   function frame(): void {
@@ -283,6 +392,7 @@
       firstFrameSeen = true;
       poke();
       scheduleAutoSeeks();
+      chipTimer = setTimeout(dismissChip, RESUME_CHIP_MS);
     }
   }
 
@@ -295,9 +405,19 @@
   }
 
   function onVideoFrame(_now: number, metadata: VideoFrameCallbackMetadata): void {
+    frameHandle = null;
     frame();
     painted(metadata.mediaTime);
-    if (video) {
+    // Frames matter only until the first one, and during a seek (its hold and its timing):
+    // ordinary playback runs without a callback on every frame. `seeking` re-arms it.
+    if (!firstFrameSeen || gate.holding || timer.seekPending) {
+      watchFrames();
+    }
+  }
+
+  /** Calls `onVideoFrame` on the next painted frame, unless already waiting for one. */
+  function watchFrames(): void {
+    if (video && hasFrameCallback && frameHandle === null && !destroyed) {
       frameHandle = video.requestVideoFrameCallback(onVideoFrame);
     }
   }
@@ -373,6 +493,7 @@
     if (!video || converted !== null || destroyed || !ConvertedPlayback.supported()) {
       return;
     }
+    forgetRestore();
     const media = video;
     const start = resumed ? media.currentTime : startAt;
     resumed = true;
@@ -386,6 +507,8 @@
         }
       },
       onError: () => {
+        conversionFailed = true;
+        audioDismissed = false;
         stopConversion();
       },
     });
@@ -408,19 +531,27 @@
     converted = null;
     converting = false;
     convertedSrc = null;
-    media.addEventListener(
-      'loadedmetadata',
-      () => {
-        if (destroyed) {
-          return;
-        }
-        media.currentTime = position;
-        if (resume) {
-          void startPlaying();
-        }
-      },
-      { once: true },
-    );
+    forgetRestore();
+    const restore = (): void => {
+      restoreAfterConversion = null;
+      if (destroyed) {
+        return;
+      }
+      media.currentTime = position;
+      if (resume) {
+        void startPlaying();
+      }
+    };
+    restoreAfterConversion = restore;
+    media.addEventListener('loadedmetadata', restore, { once: true });
+  }
+
+  /** Drops a pending return to the position from before the conversion stopped. */
+  function forgetRestore(): void {
+    if (restoreAfterConversion !== null) {
+      video?.removeEventListener('loadedmetadata', restoreAfterConversion);
+      restoreAfterConversion = null;
+    }
   }
 
   /** Samples the decoder counters until they show audio being decoded. */
@@ -555,6 +686,14 @@
       smoothedUp = upRate.next(next.uploadBps, dt);
       stats = next;
       statsError = null;
+      // How long the video has waited with no peer connected.
+      if ((firstFrameSeen && !stalled) || next.peersLive > 0) {
+        noPeersSince = null;
+        noPeersMs = 0;
+      } else {
+        noPeersSince ??= now;
+        noPeersMs = now - noPeersSince;
+      }
     } catch (reason: unknown) {
       statsError = errorMessage(reason);
     }
@@ -566,16 +705,31 @@
     }
   }
 
+  function dismissChip(): void {
+    chipDismissed = true;
+    clearTimeout(chipTimer);
+  }
+
+  /** The chip's "Start over": back to the beginning. */
+  function startOver(): void {
+    dismissChip();
+    // Before the duration is known, the position to continue from must not be applied later.
+    resumed = true;
+    seekTo(0);
+    poke();
+  }
+
   function seekBy(secs: number): void {
-    if (!video) {
+    dismissChip();
+    if (!video || !Number.isFinite(video.duration) || video.duration <= 0) {
       return;
     }
-    const end = Number.isFinite(video.duration) ? video.duration : Infinity;
-    video.currentTime = Math.min(Math.max(video.currentTime + secs, 0), end);
+    video.currentTime = Math.min(Math.max(video.currentTime + secs, 0), video.duration);
     poke();
   }
 
   function togglePlay(): void {
+    dismissChip();
     if (!video) {
       return;
     }
@@ -681,11 +835,22 @@
   }
 
   function onKey(event: KeyboardEvent): void {
-    // The settings, and dialogs over the player (the queue's "Choose files"), handle their own
-    // keys (Escape closes them).
+    // The settings, dialogs over the player (the queue's "Choose files"), the queue panel, and
+    // form controls (the volume slider) handle their own keys: one key press must not also
+    // pause or seek the video. Escape on the end card still leaves the player.
+    const target = event.target instanceof Element ? event.target : null;
     if (
       settingsSection !== null ||
-      (event.target instanceof Element && event.target.closest('dialog') !== null)
+      target?.closest('dialog, aside, [role="tree"], [role="menu"], input, select, textarea') ||
+      (event.key !== 'Escape' && target?.closest('.end-card'))
+    ) {
+      return;
+    }
+    // Space/Enter activate the focused control itself rather than the global play toggle.
+    if (
+      (event.key === ' ' || event.key === 'Enter') &&
+      event.target instanceof Element &&
+      event.target.closest('button, a') !== null
     ) {
       return;
     }
@@ -762,12 +927,9 @@
     // Already fullscreen when the queue's next video replaces the last one.
     onFullscreenChange();
     timer.play(startedAt);
-    if (video && 'requestVideoFrameCallback' in video) {
-      frameHandle = video.requestVideoFrameCallback(onVideoFrame);
-    }
-    reportTimer = setInterval(report, 1000);
-    statsTimer = setInterval(() => void pollStats(), 1000);
-    void pollStats();
+    watchFrames();
+    reportTimer = setInterval(reportProgress, 1000);
+    stopStats = pollWhileVisible(pollStats, 1000);
     window.addEventListener('keydown', onKey, { capture: true });
     document.addEventListener('fullscreenchange', onFullscreenChange);
     poke();
@@ -801,13 +963,15 @@
     destroyed = true;
     playRequest += 1;
     converted?.destroy();
+    forgetRestore();
     clearInterval(audioTimer);
     stopNetwork?.();
     window.removeEventListener('keydown', onKey, { capture: true });
     document.removeEventListener('fullscreenchange', onFullscreenChange);
     clearInterval(reportTimer);
-    clearInterval(statsTimer);
+    stopStats?.();
     clearTimeout(hideTimer);
+    clearTimeout(chipTimer);
     clearTimeout(seekHoldTimer);
     timeouts.forEach(clearTimeout);
     if (video) {
@@ -856,9 +1020,13 @@
     ondblclick={toggleFullscreen}
     onplay={() => {
       paused = false;
+      onPauseChange?.(false);
+      ended = false;
     }}
     onpause={() => {
       paused = true;
+      onPauseChange?.(true);
+      report();
     }}
     ontimeupdate={() => {
       if (video) {
@@ -880,7 +1048,16 @@
     }}
     onended={() => {
       report();
+      const active = document.activeElement;
+      const takeFocus = endCardTakesFocus(
+        active !== null && container?.contains(active) === true,
+        active !== null && active !== document.body,
+      );
+      ended = true;
       onEnded?.();
+      if (takeFocus) {
+        void tick().then(() => endPrimary?.focus());
+      }
     }}
     onratechange={() => {
       if (video) {
@@ -897,6 +1074,7 @@
       }
     }}
     onseeking={() => {
+      ended = false;
       timer.seeking();
       converted?.seeking();
       if (video) {
@@ -906,6 +1084,7 @@
         }
       }
       seekHolding = gate.holding;
+      watchFrames();
       report();
     }}
     onseeked={() => {
@@ -942,11 +1121,13 @@
     }}
     onerror={() => {
       if (converted !== null) {
+        conversionFailed = true;
+        audioDismissed = false;
         stopConversion();
         return;
       }
       playbackError =
-        'This video could not be played by the built-in player (its format may not be supported yet).';
+        "The built-in player can't play this format. It keeps downloading; once done you can open it in another player such as VLC.";
     }}
   ></video>
 
@@ -955,13 +1136,21 @@
   </div>
 
   {#if status}
-    <div class="pill" aria-live="polite">{status}</div>
+    <div class="pill" aria-hidden="true">{status}</div>
   {:else if needsClick}
-    <div class="pill">Press Space or the play button to start</div>
+    <div class="pill" aria-hidden="true">{START_HINT}</div>
   {/if}
+  <!-- Always rendered, so the first message is announced too. -->
+  <p class="sr-only" role="status">{spokenStatus}</p>
 
-  {#if autoMuted || audioMessage || subtitleLoading || subtitleError}
+  {#if chip || autoMuted || audioMessage || subtitleLoading || subtitleError}
     <div class="notices">
+      {#if chip}
+        <div class="notice chip" role="status">
+          <span>{chip} ·</span>
+          <button type="button" class="start-over" onclick={startOver}>Start over</button>
+        </div>
+      {/if}
       {#if autoMuted}
         <button
           type="button"
@@ -1045,7 +1234,9 @@
     status={statusInfo}
     bind:menuOpen
     onTogglePlay={togglePlay}
+    onSeekBy={seekBy}
     onSeek={(fraction: number) => {
+      dismissChip();
       seekTo(fraction);
     }}
     onRate={(value: number) => {
@@ -1074,6 +1265,41 @@
       subtitleInput?.click();
     }}
   />
+
+  {#if ended}
+    <section class="end-card" aria-labelledby="end-card-heading">
+      <h2 id="end-card-heading">{card.heading}</h2>
+      {#if card.next}<p class="next" title={card.next}>{card.next}</p>{/if}
+      <div class="end-actions">
+        {#if card.primary === 'next' && onPlayNext}
+          <button
+            bind:this={endPrimary}
+            type="button"
+            class="primary"
+            aria-keyshortcuts="Shift+N"
+            onclick={onPlayNext}>Play next <kbd>(Shift+N)</kbd></button
+          >
+          <button
+            type="button"
+            onclick={() => {
+              seekTo(0);
+              void startPlaying();
+            }}>Replay</button
+          >
+        {:else}
+          <button
+            bind:this={endPrimary}
+            type="button"
+            class="primary"
+            onclick={() => {
+              seekTo(0);
+              void startPlaying();
+            }}>Replay</button
+          >
+        {/if}
+      </div>
+    </section>
+  {/if}
 
   {@render children?.()}
 
@@ -1234,6 +1460,16 @@
     cursor: auto;
   }
 
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
   .pill {
     position: absolute;
     left: 50%;
@@ -1248,6 +1484,99 @@
     letter-spacing: 0.03em;
     transform: translate(-50%, -50%);
     pointer-events: none;
+  }
+
+  /* Over a finished video, also in fullscreen. Nothing plays next until the user chooses. */
+  .end-card {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    z-index: 4;
+    display: grid;
+    justify-items: center;
+    gap: 0.5rem;
+    max-width: min(28rem, 85%);
+    padding: 1.1rem 1.4rem;
+    border: 1px solid rgb(255 255 255 / 8%);
+    border-radius: 0.8rem;
+    background: rgb(15 15 20 / 88%);
+    box-shadow: 0 0.75rem 2rem rgb(0 0 0 / 50%);
+    transform: translate(-50%, -50%);
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .end-card {
+      animation: end-card-in 0.2s ease-out;
+    }
+  }
+
+  @keyframes end-card-in {
+    from {
+      opacity: 0;
+    }
+  }
+
+  .end-card h2 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .end-card .next {
+    max-width: 100%;
+    margin: 0;
+    overflow: hidden;
+    color: var(--text-muted);
+    font-size: 0.875rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .end-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 0.5rem;
+    margin-top: 0.35rem;
+  }
+
+  .end-actions button {
+    padding: 0.45rem 0.9rem;
+    border: 1px solid rgb(255 255 255 / 14%);
+    border-radius: 0.5rem;
+    background: rgb(255 255 255 / 4%);
+    color: var(--text);
+    font: inherit;
+    font-size: 0.875rem;
+    cursor: pointer;
+  }
+
+  .end-actions button:hover {
+    background: rgb(255 255 255 / 10%);
+  }
+
+  .end-actions button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .end-actions .primary {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #1a1408;
+    font-weight: 600;
+  }
+
+  .end-actions .primary:hover {
+    background: var(--accent);
+    filter: brightness(1.08);
+  }
+
+  .end-actions kbd {
+    margin-left: 0.3rem;
+    font: inherit;
+    font-size: 0.75rem;
+    font-weight: 500;
   }
 
   /* Below the title, above the video; they stay while the controls fade. */
@@ -1296,6 +1625,27 @@
     padding: 0.55rem 0.5rem 0.55rem 0.9rem;
     border-radius: 0.6rem;
     line-height: 1.4;
+  }
+
+  .chip {
+    align-items: center;
+    padding-right: 0.6rem;
+  }
+
+  .start-over {
+    padding: 0.1rem 0.35rem;
+    border: none;
+    border-radius: 0.3rem;
+    background: none;
+    color: var(--accent);
+    font: inherit;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .start-over:hover,
+  .start-over:focus-visible {
+    background: rgb(255 255 255 / 10%);
   }
 
   .dismiss {

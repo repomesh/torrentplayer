@@ -3,9 +3,10 @@
 /** Helpers for a search result's details view. Everything here is plain text. */
 
 import type { FileSummary } from './bindings/FileSummary';
+import type { NetworkModeKind } from './bindings/NetworkModeKind';
 import type { QualityDto } from './bindings/QualityDto';
 import type { TorrentDetailsDto } from './bindings/TorrentDetailsDto';
-import { fileName, isPlayable, sortFiles } from './files';
+import { fileName, isPlayable, mayNotPlay, sortFiles } from './files';
 
 /** Videos listed before "+N more". */
 export const LISTED_VIDEOS = 10;
@@ -98,23 +99,44 @@ export function playsVerdict(
     case 'unlikely':
       return `Probably does not play in the built-in player${because}: needs a hardware decoder`;
     case 'needsFullPlayer':
-      return `Needs the full player${because}`;
+      return mayNotPlay(what === '' ? null : what);
     default:
       return 'The title does not say whether it plays here';
   }
 }
 
 /** The sound line: `AAC: plays with sound here`, or null when the title names no audio. */
-export function soundVerdict(quality: Pick<QualityDto, 'audio' | 'audioPlays'>): string | null {
+export function soundVerdict(
+  quality: Pick<QualityDto, 'audio' | 'audioPlays' | 'audioConverted'>,
+): string | null {
   if (quality.audio === null) {
     return null;
   }
   if (quality.audioPlays === null) {
     return `${quality.audio}: sound here unknown`;
   }
+  if (quality.audioConverted) {
+    return `${quality.audio}: plays with sound here, converted to stereo`;
+  }
   return quality.audioPlays
     ? `${quality.audio}: plays with sound here`
     : `${quality.audio}: no sound in the built-in player`;
+}
+
+/**
+ * The note beside a link that opens in the system browser, in a mode that protects TorrentPlayer's
+ * own traffic: the browser does not go through that tunnel or proxy. Null in Direct mode (or while
+ * the mode is unknown), where nothing changes.
+ */
+export function browserNote(mode: NetworkModeKind | null): string | null {
+  switch (mode) {
+    case 'wireGuard':
+      return "Opens in your browser, outside TorrentPlayer's WireGuard tunnel.";
+    case 'socks5':
+      return "Opens in your browser, outside TorrentPlayer's SOCKS5 proxy.";
+    default:
+      return null;
+  }
 }
 
 /** The search service's swarm verdict in words, or null if unknown. */

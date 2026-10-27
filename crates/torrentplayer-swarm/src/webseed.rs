@@ -91,8 +91,8 @@ impl FetchError {
     }
 }
 
-/// Whether a web seed URL's host may be contacted: http or https, and a literal address only
-/// if it is public. Names are checked when they are resolved (by the bridge or
+/// Whether a web seed (or HTTP tracker) URL's host may be contacted: http or https, and a
+/// literal address only if it is public. Names are checked when they are resolved (by the bridge or
 /// [`PublicResolver`]); `localhost` names are refused here.
 pub(crate) fn url_allowed(url: &Url) -> bool {
     if !matches!(url.scheme(), "http" | "https") {
@@ -109,8 +109,8 @@ pub(crate) fn url_allowed(url: &Url) -> bool {
     }
 }
 
-/// Resolves names to their public addresses only, for web seeds when no network manager is
-/// configured (with one, its bridge does the same).
+/// Resolves names to their public addresses only, for web seeds and trackers when no network
+/// manager is configured (with one, its bridge does the same).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PublicResolver;
 
@@ -123,7 +123,7 @@ impl reqwest::dns::Resolve for PublicResolver {
                 .filter(|a| torrentplayer_net::is_public_ip(a.ip()))
                 .collect();
             if addrs.is_empty() {
-                return Err("the web seed has no public address".into());
+                return Err("the host has no public address".into());
             }
             Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
         })
@@ -201,6 +201,8 @@ struct Assembler {
     buf: Vec<u8>,
     /// Blocks of this run not yet delivered and still wanted.
     wanted: Arc<Mutex<BTreeSet<u64>>>,
+    /// Blocks handed to the scheduler so far.
+    delivered: usize,
 }
 
 impl Assembler {
@@ -229,6 +231,7 @@ impl Assembler {
                 &self.buf,
             );
             self.buf.clear();
+            self.delivered += 1;
         }
         !self
             .wanted
@@ -504,6 +507,7 @@ impl WebSeed {
                 blocks: run.iter().copied().collect(),
                 buf: Vec::new(),
                 wanted: Arc::clone(&wanted),
+                delivered: 0,
             };
             let job = fetch(
                 Arc::clone(&self.shared),
@@ -672,6 +676,11 @@ async fn fetch_segment(
             .map_err(|e| FetchError::http(&e))?;
         let Some(chunk) = chunk else {
             trace!(received, want, "short web seed response");
+            // Without a single block delivered (an empty `206`, say) it is a failure, so such
+            // a server is backed off instead of asked again at once.
+            if assembler.delivered == 0 {
+                return Err(FetchError::Transient("the response ended early".into()));
+            }
             return Ok(Fetched::Partial);
         };
         // Never more than the range asked for.

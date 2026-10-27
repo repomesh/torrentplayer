@@ -151,9 +151,9 @@ export function isIpcError(value: unknown): value is IpcError {
 /** What to add to network errors so they say what happened and what to do. */
 const ERROR_HINTS: Partial<Record<IpcError['kind'], string>> = {
   'kill-switch':
-    'Nothing was sent. Traffic resumes by itself when the VPN or proxy works again (see Settings → Network).',
+    'Nothing was sent. Traffic resumes by itself when the VPN or proxy works again (see Settings → Network & VPN).',
   'network-unavailable':
-    'Check your internet connection, or the VPN or proxy in Settings → Network.',
+    'Check your internet connection, or the VPN or proxy in Settings → Network & VPN.',
 };
 
 /** A user-facing message for any rejection from an IPC call. */
@@ -206,7 +206,7 @@ export function getSettings(): Promise<SettingsView> {
 
 /** The backend event carrying the new {@link Settings} after every saved change. */
 export const SETTINGS_CHANGED_EVENT = 'settings-changed';
-/** Event (no payload) sent when a torrent starts seeding after its playback ended. */
+/** Event (no payload) sent the first time in a run that a torrent uploads to other peers. */
 export const SEEDING_STARTED_EVENT = 'seeding-started';
 
 /**
@@ -244,11 +244,12 @@ export function clearCache(): Promise<ClearCacheOutcome> {
 }
 
 /**
- * Opens the system folder picker for the download folder. Resolves with the chosen folder, or
- * null if the user cancelled; nothing is saved until it is passed to {@link updateSettings}.
+ * Opens the system folder picker for the download folder and saves the choice. Resolves with the
+ * saved settings, or null if the user cancelled. This is the only way to choose the folder:
+ * {@link updateSettings} refuses a new one.
  */
-export function chooseDownloadDir(): Promise<string | null> {
-  return invoke<string | null>('choose_download_dir');
+export function chooseDownloadDir(): Promise<SettingsView | null> {
+  return invoke<SettingsView | null>('choose_download_dir');
 }
 
 // --- Network ------------------------------------------------------------------------------
@@ -483,6 +484,13 @@ export function queueDownloads(): Promise<DownloadsSnapshot> {
   return invoke<DownloadsSnapshot>('queue_downloads');
 }
 
+import type { LinkUse } from './bindings/LinkUse';
+
+/** Only the connection totals of {@link queueDownloads}, for the status bar. */
+export function linkUse(): Promise<LinkUse> {
+  return invoke<LinkUse>('link_use');
+}
+
 // --- File explorer ------------------------------------------------------------------------
 
 import type { FilePreviewDto } from './bindings/FilePreviewDto';
@@ -497,6 +505,14 @@ export type { FilePreviewDto, PreviewKind };
  */
 export function previewFile(torrentId: number, fileIndex: number): Promise<FilePreviewDto> {
   return invoke<FilePreviewDto>('preview_file', { torrentId, fileIndex });
+}
+
+/**
+ * Ends the file explorer's preview when it closes: stops a preview still loading and withdraws
+ * the preview video's stream, so its torrent's data is no longer kept from cache clean-up.
+ */
+export function stopPreview(): Promise<void> {
+  return invoke<undefined>('stop_preview');
 }
 
 // --- FFmpeg (optional) --------------------------------------------------------------------
@@ -524,7 +540,10 @@ export function mediaTools(): Promise<MediaToolsDto> {
   return invoke<MediaToolsDto>('media_tools');
 }
 
-/** Opens the system folder picker for the FFmpeg folder; null if cancelled. Saves nothing. */
-export function chooseFfmpegDir(): Promise<string | null> {
-  return invoke<string | null>('choose_ffmpeg_dir');
+/**
+ * Opens the system folder picker for the FFmpeg folder and saves the choice. Resolves with the
+ * saved settings, or null if cancelled. This is the only way to choose the folder.
+ */
+export function chooseFfmpegDir(): Promise<SettingsView | null> {
+  return invoke<SettingsView | null>('choose_ffmpeg_dir');
 }

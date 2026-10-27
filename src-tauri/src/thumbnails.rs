@@ -13,7 +13,8 @@
 //!
 //! [`preview_frame`] serves the preloaded best pick's video from the local stream server, so the
 //! webview can show a frame from its start, which is already downloaded, without claiming the
-//! preload.
+//! preload. Like a file explorer preview (see [`crate::preview`]), the webview's read-ahead can
+//! download a little more of the file than the preload did.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -50,6 +51,22 @@ impl ThumbnailState {
     /// Stops the running request, if any.
     pub(crate) fn cancel(&self) {
         self.latest.cancel();
+    }
+
+    /// Stops the running request and withdraws the best pick's frame, for a page that is gone
+    /// (reloaded, or its renderer crashed).
+    pub(crate) fn close_page(&self, server: Option<&torrentplayer_stream::StreamServer>) {
+        self.cancel();
+        let frame = self
+            .frame
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(frame) = frame
+            && let Some(server) = server
+        {
+            server.unpublish(frame);
+        }
     }
 }
 

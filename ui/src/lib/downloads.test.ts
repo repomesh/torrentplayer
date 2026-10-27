@@ -2,15 +2,16 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  barTitle,
   byId,
   canPause,
   describeDownload,
   describeLink,
   describeRates,
-  fastestItem,
   formatEta,
   progressOf,
   toneOf,
+  withPause,
   type ItemDownload,
   type LinkUse,
 } from './downloads';
@@ -29,6 +30,7 @@ function d(over: Partial<ItemDownload> = {}): ItemDownload {
     etaSecs: 240,
     startable: true,
     limited: false,
+    uploading: false,
     waitReason: null,
     error: null,
     ...over,
@@ -63,18 +65,23 @@ describe('download status', () => {
     expect(describeDownload(d({ state: 'watching', limited: true, etaSecs: null }))).toBe(
       '↓ 2.4 MB/s · 14 peers · 37%',
     );
-    expect(describeDownload(d({ state: 'paused' }))).toBe('Paused · 37%');
-    expect(describeDownload(d({ state: 'paused', downloaded: 0 }))).toBe('Paused');
+    expect(describeDownload(d({ state: 'paused' }))).toBe('Paused by you · 37%');
+    expect(describeDownload(d({ state: 'paused', downloaded: 0 }))).toBe('Paused by you');
     expect(describeDownload(d({ state: 'queued', downloaded: 0, waitReason: 'limit' }))).toBe(
-      'Waiting: your limit of downloads at once',
+      'Waiting: your limit of downloads at once (Settings → Bandwidth)',
+    );
+    expect(describeDownload(d({ state: 'queued', downloaded: 0, waitReason: 'limit' }), 3)).toBe(
+      'Waiting: up to 3 queued videos download at once (Settings → Bandwidth)',
     );
     expect(describeDownload(d({ state: 'queued', waitReason: 'playback' }))).toBe(
-      'Paused while the video playing catches up · 37%',
+      'Waiting for playback: the video playing needs the bandwidth · 37%',
     );
     expect(describeDownload(d({ state: 'connecting', peersSeen: 0 }))).toBe('Finding peers… · 37%');
     expect(describeDownload(d({ state: 'complete' }))).toBe('Downloaded');
-    expect(describeDownload(d({ state: 'skipped' }))).toBe('37% downloaded');
-    expect(describeDownload(d({ state: 'skipped', downloaded: 0 }))).toBeNull();
+    // A finished torrent keeps sharing: it reads as sharing, never as paused.
+    expect(describeDownload(d({ state: 'complete', uploading: true }))).toBe(
+      'Downloaded · sharing with others',
+    );
     expect(describeDownload(d({ state: 'failed', error: 'No peers.' }))).toBe(
       'No peers. Trying again soon.',
     );
@@ -105,31 +112,60 @@ describe('download status', () => {
     expect(progressOf(d())).toBeCloseTo(0.37);
     expect(progressOf(d({ length: null }))).toBeNull();
     expect(canPause(undefined)).toBe(true);
-    expect(canPause(d({ state: 'complete' }))).toBe(false);
+    // Pausing stops sharing too, so finished items can be paused.
+    expect(canPause(d({ state: 'complete' }))).toBe(true);
     expect(canPause(d({ state: 'watching' }))).toBe(false);
     expect(canPause(d({ state: 'paused' }))).toBe(true);
   });
 
-  it('points out an item that downloads clearly fastest', () => {
-    const items = [
-      d({ id: 'a', downloadBps: 1_000_000 }),
-      d({ id: 'b', downloadBps: 4_000_000 }),
-      d({ id: 'c', state: 'paused', downloadBps: 9_000_000 }),
-    ];
-    expect(fastestItem(items)).toBe('b');
-    expect(fastestItem([d({ id: 'a' }), d({ id: 'b', downloadBps: 2_500_000 })])).toBeNull();
-    expect(fastestItem([d()])).toBeNull();
+  it('finds items by id', () => {
+    const items = [d({ id: 'a', downloadBps: 1_000_000 }), d({ id: 'b', downloadBps: 4_000_000 })];
     expect(byId({ items, link }).get('b')?.downloadBps).toBe(4_000_000);
+    expect(byId(null).size).toBe(0);
   });
 
   it('summarizes the connection', () => {
-    expect(describeLink(link)).toBe('Connection ≈ 12.0 MB/s · 9.8 MB/s in use · 3 downloading');
+    expect(describeLink(link)).toBe('Speed ≈ 12.0 MB/s · 9.8 MB/s in use · 3 downloading');
     expect(
       describeLink({ ...link, playbackNeedBps: 1_500_000, pressure: 'guarded', active: 1 }),
-    ).toBe('Connection ≈ 12.0 MB/s · 9.8 MB/s in use · 1 downloading · playback first');
+    ).toBe('Speed ≈ 12.0 MB/s · 9.8 MB/s in use · 1 downloading · the video playing comes first');
+    expect(
+      describeLink({ ...link, playbackNeedBps: 1_500_000, pressure: 'starving', active: 1 }),
+    ).toBe(
+      'Speed ≈ 12.0 MB/s · 9.8 MB/s in use · 1 downloading · queue held for the video playing',
+    );
     expect(describeLink({ ...link, maxActive: 4 })).toBe(
-      'Connection ≈ 12.0 MB/s · 9.8 MB/s in use · 3 of max 4 downloading',
+      'Speed ≈ 12.0 MB/s · 9.8 MB/s in use · 3 of max 4 downloading',
     );
     expect(describeLink({ ...link, capacityBps: 0, usedBps: 0, active: 0 })).toBeNull();
+  });
+});
+
+describe('progress bar tooltip', () => {
+  it('says why the bar is where it is', () => {
+    expect(barTitle(d({ state: 'paused' }))).toBe('Paused by you');
+    expect(barTitle(d({ state: 'queued', downloaded: 0, waitReason: 'limit' }), 2)).toBe(
+      'Waiting: up to 2 queued videos download at once (Settings → Bandwidth)',
+    );
+    expect(barTitle(d({ startable: true }))).toBe('Ready to play');
+    expect(barTitle(d({ startable: false }))).toBe('Downloading, not ready to play yet');
+    expect(barTitle(d({ startable: false, state: 'connecting', peersLive: 0 }))).toBe(
+      'Waiting for peers',
+    );
+  });
+});
+
+describe('pausing as shown', () => {
+  it('shows a pause or resume at once, and leaves the video playing alone', () => {
+    expect(withPause(true, d())).toMatchObject({ state: 'paused', downloadBps: 0, uploadBps: 0 });
+    expect(withPause(false, d({ state: 'paused' }))?.state).toBe('queued');
+    expect(withPause(true, d({ state: 'watching' }))?.state).toBe('watching');
+    expect(withPause(true, undefined)).toBeUndefined();
+    const reported = d({ state: 'paused' });
+    expect(withPause(true, reported)).toBe(reported);
+  });
+
+  it('shows no upload on a paused video, even while its torrent shares for others', () => {
+    expect(describeDownload(d({ state: 'paused', uploadBps: 51_000 }))).toBe('Paused by you · 37%');
   });
 });

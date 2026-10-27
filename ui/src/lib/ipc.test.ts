@@ -42,6 +42,8 @@ describe('command wrappers', () => {
     await ipc.stopStream(9);
     await ipc.devAutoplay();
     await ipc.libraryItems();
+    await ipc.previewFile(3, 2);
+    await ipc.stopPreview();
     expect(invoke.mock.calls).toEqual([
       ['add_torrent_link', { link: 'magnet:?xt=urn:btih:abc' }],
       ['start_stream', { torrentId: 3, fileIndex: 7 }],
@@ -55,6 +57,8 @@ describe('command wrappers', () => {
       ['stop_stream', { streamId: 9 }],
       ['dev_autoplay'],
       ['library_items'],
+      ['preview_file', { torrentId: 3, fileIndex: 2 }],
+      ['stop_preview'],
     ]);
   });
 
@@ -92,5 +96,23 @@ describe('errorMessage', () => {
     expect(ipc.errorMessage(new Error('boom'))).toBe('boom');
     expect(ipc.errorMessage('plain')).toBe('plain');
     expect(ipc.errorMessage(42)).toBe('Something went wrong.');
+  });
+});
+
+describe('linkUse', () => {
+  it('reads only the connection totals', async () => {
+    const link = {
+      capacityBps: 0,
+      usedBps: 1024,
+      uploadBps: 0,
+      playbackNeedBps: null,
+      pressure: 'relaxed',
+      maxActive: null,
+      active: 1,
+    };
+    invoke.mockResolvedValue(link);
+
+    await expect(ipc.linkUse()).resolves.toEqual(link);
+    expect(invoke).toHaveBeenCalledWith('link_use');
   });
 });

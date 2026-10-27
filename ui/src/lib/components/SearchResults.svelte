@@ -208,7 +208,7 @@
                     {queued === 'playing'
                       ? 'Playing'
                       : queued === 'upNext'
-                        ? 'Up next'
+                        ? 'Next in queue'
                         : 'In queue'}
                   </span>
                 {/if}
@@ -257,7 +257,7 @@
                   class="secondary"
                   disabled={queued !== null}
                   title={queued === null
-                    ? 'Play it after the current video'
+                    ? 'Add to the queue. It downloads in the background; you choose when to play it.'
                     : 'Already in the queue'}
                   onclick={() => {
                     onQueue(result);
@@ -459,10 +459,9 @@
   }
 
   .reason {
-    color: var(--text);
+    color: var(--text-muted);
     font-size: 0.8125rem;
     overflow-wrap: anywhere;
-    opacity: 0.85;
   }
 
   .preload {
@@ -471,7 +470,7 @@
 
   .ready {
     margin-left: 0.25rem;
-    opacity: 0.8;
+    color: var(--text-muted);
   }
 
   .text {

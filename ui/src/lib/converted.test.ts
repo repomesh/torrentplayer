@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ConvertedPlayback, REACH_SECS, bufferedAhead, endedEarly, planSeek } from './converted';
+import {
+  AHEAD_MAX_SECS,
+  BEHIND_KEEP_SECS,
+  BUFFER_BUDGET_BYTES,
+  ConvertedPlayback,
+  REACH_SECS,
+  bufferLimits,
+  bufferedAhead,
+  endedEarly,
+  planSeek,
+} from './converted';
 
 /** `TimeRanges` from `[start, end]` pairs. */
 function ranges(...pairs: [number, number][]): TimeRanges {
@@ -68,6 +78,36 @@ describe('planSeek', () => {
   });
 });
 
+describe('bufferLimits', () => {
+  it('buffers a minute ahead while the bitrate is unknown or low', () => {
+    expect(bufferLimits(0)).toEqual({
+      aheadMax: AHEAD_MAX_SECS,
+      aheadResume: 40,
+      behindKeep: BEHIND_KEEP_SECS,
+    });
+    // 8 Mbit/s: a minute ahead and half a minute behind fit.
+    expect(bufferLimits(1_000_000).aheadMax).toBe(AHEAD_MAX_SECS);
+  });
+
+  it('keeps high-bitrate video within the budget, below the webview quota', () => {
+    // 4K at 27 Mbit/s: a minute ahead (200 MB) would exceed Chromium's 150 MB per buffer.
+    const bytesPerSec = 3_400_000;
+    const limits = bufferLimits(bytesPerSec);
+    expect(limits.aheadMax).toBeLessThan(AHEAD_MAX_SECS);
+    expect(limits.aheadMax).toBeGreaterThan(15);
+    expect((limits.aheadMax + limits.behindKeep) * bytesPerSec).toBeLessThanOrEqual(
+      BUFFER_BUDGET_BYTES,
+    );
+    expect(limits.aheadResume).toBeLessThan(limits.aheadMax);
+  });
+
+  it('keeps a minimum look-ahead however high the bitrate', () => {
+    const limits = bufferLimits(50_000_000);
+    expect(limits.aheadMax).toBe(10);
+    expect(limits.behindKeep).toBe(4);
+  });
+});
+
 describe('endedEarly', () => {
   it('treats a conversion that reached the end as complete', () => {
     expect(endedEarly(120.04, 120)).toBe(false);
@@ -126,6 +166,7 @@ class TestSource extends EventTarget {
 
 describe('ConvertedPlayback lifecycle', () => {
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
@@ -156,8 +197,195 @@ describe('ConvertedPlayback lifecycle', () => {
         ),
       ),
     );
-    return { playback, convert, onError, source: TestSource.latest };
+    return { playback, convert, onError, video, source: TestSource.latest };
   }
+
+  it('retries a temporary conversion failure and preserves audio', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError } = setup();
+    convert.mockRejectedValueOnce(new Error('FFmpeg did not start writing in time'));
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('bounds retries when conversion keeps failing', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError } = setup();
+    convert.mockRejectedValue(new Error('Conversion failed'));
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledTimes(3);
+    expect(onError).toHaveBeenCalledOnce();
+    playback.destroy();
+  });
+
+  it('cancels a pending retry when destroyed', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError } = setup();
+    convert.mockRejectedValue(new Error('Conversion failed'));
+    const starting = playback.start(0);
+    await vi.advanceTimersByTimeAsync(0);
+    playback.destroy();
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledOnce();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('a newer seek supersedes a pending retry', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError, video, source } = setup();
+    await playback.start(0);
+    source.readyState = 'open';
+    source.duration = 1000;
+    convert.mockRejectedValueOnce(new Error('Conversion failed'));
+    video.currentTime = 100;
+    playback.seeking();
+    await vi.advanceTimersByTimeAsync(0);
+    video.currentTime = 500;
+    source.buffer.buffered = ranges([500, 510]);
+    vi.spyOn(source.buffer, 'appendBuffer').mockImplementationOnce(() => {
+      source.duration = 520;
+      source.buffer.buffered = ranges([500, 520]);
+    });
+    playback.seeking();
+    await vi.runAllTimersAsync();
+    expect(convert).toHaveBeenCalledTimes(3);
+    expect(convert).toHaveBeenNthCalledWith(1, 0);
+    expect(convert).toHaveBeenNthCalledWith(2, 100);
+    expect(convert).toHaveBeenNthCalledWith(3, 510);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('evicts distant future data on quota pressure after a backward seek', async () => {
+    const { playback, onError, source } = setup();
+    source.buffer.buffered = ranges([0, 10], [500, 560]);
+    const remove = vi.spyOn(source.buffer, 'remove');
+    const append = vi.spyOn(source.buffer, 'appendBuffer');
+    append.mockImplementationOnce(() => {
+      throw new DOMException('Buffer full', 'QuotaExceededError');
+    });
+    await playback.start(0);
+    expect(remove).toHaveBeenCalledWith(3, 560);
+    expect(append).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('pauses reading high-bitrate video before the buffer quota', async () => {
+    vi.useFakeTimers();
+    const { playback, onError, source } = setup();
+    // Endless 1 MB chunks of 0.3 s each: 27 Mbit/s, like a 4K WEB-DL.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(
+          new ReadableStream({
+            pull(controller) {
+              controller.enqueue(new Uint8Array(1_000_000));
+            },
+          }),
+        ),
+      ),
+    );
+    let end = 0;
+    source.buffer.buffered = ranges();
+    const append = vi.spyOn(source.buffer, 'appendBuffer').mockImplementation(() => {
+      end += 0.3;
+      source.buffer.buffered = ranges([0, end]);
+    });
+    void playback.start(0);
+    await vi.advanceTimersByTimeAsync(10_000);
+    // The playhead stays at 0: reading stopped well short of a minute (200 MB).
+    expect(end).toBeGreaterThan(15);
+    expect(end).toBeLessThan(35);
+    expect(append.mock.calls.length * 1_000_000).toBeLessThan(BUFFER_BUDGET_BYTES);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('waits for playback when the quota is full of video still to play', async () => {
+    vi.useFakeTimers();
+    const { playback, onError, source, video } = setup();
+    source.buffer.buffered = ranges([0, 45]);
+    video.currentTime = 2;
+    const append = vi.spyOn(source.buffer, 'appendBuffer');
+    const full = (): never => {
+      throw new DOMException('Buffer full', 'QuotaExceededError');
+    };
+    append.mockImplementationOnce(full).mockImplementationOnce(full).mockImplementationOnce(full);
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(append).toHaveBeenCalledTimes(4);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('gives up on a full quota when nothing is left to play or free', async () => {
+    vi.useFakeTimers();
+    const { playback, onError, source, video } = setup();
+    source.buffer.buffered = ranges([0, 45]);
+    video.currentTime = 44.5;
+    vi.spyOn(source.buffer, 'appendBuffer').mockImplementation(() => {
+      throw new DOMException('Buffer full', 'QuotaExceededError');
+    });
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(onError).toHaveBeenCalledOnce();
+    playback.destroy();
+  });
+
+  it('retries a failed converted stream request', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError } = setup();
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('Network error'));
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('retries when the converted response body fails', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError } = setup();
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.error(new Error('Read interrupted'));
+          },
+        }),
+      ),
+    );
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledTimes(2);
+    expect(onError).not.toHaveBeenCalled();
+    playback.destroy();
+  });
+
+  it('bounds retries when FFmpeg repeatedly ends without making progress', async () => {
+    vi.useFakeTimers();
+    const { playback, convert, onError, source } = setup();
+    source.buffer.buffered = ranges();
+    const starting = playback.start(0);
+    await vi.runAllTimersAsync();
+    await starting;
+    expect(convert).toHaveBeenCalledTimes(3);
+    expect(onError).toHaveBeenCalledOnce();
+    playback.destroy();
+  });
 
   it('does not start a backend process if destroyed before sourceopen', async () => {
     const { playback, convert, source } = setup();

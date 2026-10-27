@@ -4,11 +4,15 @@
 //!
 //! About once a second the downloader measures every queued torrent, asks
 //! [`torrentplayer_torrent::bandwidth::Planner`] which items should download and how fast, and carries
-//! that out: every queued item downloads at once (or as many as the user's maximum allows),
-//! files of active items are selected and the others deselected, queued torrents nothing needs
-//! are paused, and while playback needs the bandwidth background torrents get only what it
-//! leaves (librqbit's, which cannot be limited one by one, run unlimited then) and pause while
-//! it is starving. The video being watched is never paused or limited.
+//! that out: every queued item downloads at once (or as many as the user's maximum allows), and
+//! files of active items are selected and the others deselected. Nothing else is automatic: a
+//! queued torrent keeps running and sharing (finished or not, watched or not) until the user
+//! pauses all of its items or removes them from the queue; pausing stops both its download and
+//! its upload. One exception protects playback: while the video being watched needs the
+//! bandwidth, background downloads get only what it leaves (librqbit's, which cannot be limited
+//! one by one, run unlimited then) and pause while it is starving. The UI shows those items as
+//! waiting for playback, and the user's own pauses are never changed. The video being watched
+//! is never paused or limited.
 //!
 //! The UI polls `queue_downloads` for each item's status, and pauses an item by saving the
 //! queue with its `paused` flag (`save_queue` passes every saved queue on here).
@@ -21,23 +25,26 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tokio::sync::Notify;
-use torrentplayer_library::{DownloadOrder, Queue, QueueItem};
+use torrentplayer_library::{Queue, QueueItem};
 use torrentplayer_torrent::bandwidth::{self, Candidate, Foreground, Planner, Pressure};
-use torrentplayer_torrent::{FileReadiness, TorrentId, TorrentSource, TorrentStats};
+use torrentplayer_torrent::{BackendKind, FileReadiness, TorrentId, TorrentSource, TorrentStats};
 use ts_rs::TS;
 
 use crate::core::{AppState, Core};
 use crate::error::IpcError;
 
-/// Sent (without a payload) when a torrent starts seeding after its playback ended, at most once
-/// per playback.
+/// Sent (without a payload) the first time in a run that any torrent uploads to other peers.
+/// Queued torrents share from the start, so this is when the user starts seeding.
 pub(crate) const SEEDING_STARTED: &str = "seeding-started";
 
 /// How often the downloader re-plans.
 const TICK: Duration = Duration::from_secs(1);
+/// The downloader re-applies every torrent's pause and upload switch this often, in case
+/// something else changed them (a stream start resumes its torrent).
+const REAPPLY: Duration = Duration::from_secs(10);
 /// Cache policy checks are deliberately much less frequent than download planning: they walk
 /// the download folder and also run immediately after playback reaches the end.
-const CACHE_CHECK: Duration = Duration::from_secs(60);
+const CACHE_CHECK: Duration = Duration::from_secs(10 * 60);
 /// Give up adding a torrent after this long, and wait this long before trying it again.
 const ADD_TIMEOUT: Duration = Duration::from_secs(60);
 const RETRY_ADD_AFTER: Duration = Duration::from_secs(60);
@@ -46,10 +53,6 @@ const RETRY_ADD_AFTER: Duration = Duration::from_secs(60);
 const MAX_ADDING: usize = 4;
 /// Below this rate an ETA would be meaningless.
 const MIN_ETA_BPS: u64 = 16 * 1024;
-/// Weight of the newest sample in a torrent's measured speed.
-const RATE_WEIGHT: f64 = 0.2;
-/// A torrent's speed counts as measured once it has downloaded this long.
-const MEASURE_AFTER: Duration = Duration::from_secs(8);
 
 /// Managed state shared by the commands and the downloader task.
 #[derive(Clone)]
@@ -101,6 +104,16 @@ impl DownloadsState {
         &self.inner.cache_gate
     }
 
+    /// The connection totals from the latest snapshot, without copying the items.
+    pub(crate) fn link(&self) -> LinkUse {
+        self.inner
+            .snapshot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .link
+            .clone()
+    }
+
     fn publish(&self, snapshot: DownloadsSnapshot) {
         *self
             .inner
@@ -123,10 +136,9 @@ pub(crate) enum ItemState {
     Downloading,
     /// Downloading, but no peer is connected yet.
     Connecting,
-    /// Paused by the user.
+    /// Paused by the user: it does not download, and its torrent does not upload once all of
+    /// the torrent's items are paused.
     Paused,
-    /// Unticked in the queue: kept, but not played next or downloaded.
-    Skipped,
     /// Fully downloaded.
     Complete,
     /// Being watched.
@@ -164,6 +176,8 @@ pub(crate) struct ItemDownload {
     pub startable: bool,
     /// Its download rate is held back for the video being watched.
     pub limited: bool,
+    /// Its torrent shares with other peers now: running, with upload on.
+    pub uploading: bool,
     /// Why a queued item is not downloading now, if it is waiting.
     pub wait_reason: Option<WaitReason>,
     /// Why it failed, if it did.
@@ -176,6 +190,7 @@ pub(crate) struct ItemDownload {
 #[ts(export)]
 pub(crate) enum WaitReason {
     /// The video being watched is short of data; background downloads pause until it recovers.
+    /// The user's own pauses are not changed by this.
     Playback,
     /// The user's maximum of downloads at once is reached.
     Limit,
@@ -285,9 +300,7 @@ fn idle_snapshot(queue: &Queue) -> DownloadsSnapshot {
             .items
             .iter()
             .map(|item| ItemDownload {
-                state: if item.skipped {
-                    ItemState::Skipped
-                } else if item.paused {
+                state: if item.paused {
                     ItemState::Paused
                 } else {
                     ItemState::Queued
@@ -314,6 +327,7 @@ impl ItemDownload {
             eta_secs: None,
             startable: false,
             limited: false,
+            uploading: false,
             wait_reason: None,
             error: None,
         }
@@ -333,6 +347,12 @@ struct Runtime {
     /// Last cache walk and whether finishing playback requested one immediately.
     last_cache_cleanup: Option<Instant>,
     cleanup_requested: bool,
+    /// The files open in streams on the previous tick, by (torrent, file).
+    streamed: HashSet<(TorrentId, usize)>,
+    /// When the cached pause and upload switches were last forgotten (see [`REAPPLY`]).
+    reapplied_at: Option<Instant>,
+    /// [`SEEDING_STARTED`] was sent in this run.
+    upload_announced: bool,
 }
 
 #[derive(Default)]
@@ -340,18 +360,12 @@ struct TorrentRun {
     id: Option<TorrentId>,
     adding: Option<tokio::task::JoinHandle<Result<TorrentId, String>>>,
     failed: Option<(Instant, String)>,
-    /// Measured speed while it downloaded in the background.
-    rate: Option<f64>,
-    downloading_since: Option<Instant>,
-    /// What the downloader last set.
-    paused: bool,
+    /// What the downloader last set; `None` until it is set, so a new run (a torrent queued
+    /// again, or its group renamed when its hash became known) always applies it.
+    paused: Option<bool>,
     limit: Option<u64>,
     /// A playback of this torrent was active on the previous tick.
     was_watching: bool,
-    /// When the most recent playback ended; starts the optional seeding timer.
-    seed_since: Option<Instant>,
-    /// [`SEEDING_STARTED`] was sent since the most recent playback ended.
-    seeding_announced: bool,
     /// The torrentplayer-swarm upload switch last requested.
     upload_enabled: Option<bool>,
 }
@@ -371,26 +385,134 @@ fn group_of(item: &QueueItem) -> String {
     )
 }
 
-/// Whether a torrent may keep uploading after its playback ended. Ratio zero and time zero
-/// independently mean no limit; whichever configured target is reached first stops seeding.
-fn post_playback_seeding(
-    since: Option<Instant>,
-    bandwidth: &torrentplayer_settings::BandwidthSettings,
-    downloaded: u64,
-    uploaded: u64,
-    now: Instant,
-) -> bool {
-    let Some(since) = since.filter(|_| bandwidth.seed_after_watching) else {
-        return false;
-    };
-    let within_time = bandwidth.seed_time_limit_minutes == 0
-        || now.saturating_duration_since(since)
-            < Duration::from_secs(u64::from(bandwidth.seed_time_limit_minutes) * 60);
-    #[allow(clippy::cast_precision_loss)]
-    let below_ratio = bandwidth.seed_ratio_target == 0.0
-        || downloaded == 0
-        || uploaded as f64 / (downloaded as f64) < bandwidth.seed_ratio_target;
-    within_time && below_ratio
+/// The torrent groups (see [`group_of`]) whose queued items the user all paused.
+fn paused_groups(queue: &Queue) -> HashSet<String> {
+    let mut running = HashSet::new();
+    let mut paused = HashSet::new();
+    for item in &queue.items {
+        if item.paused {
+            paused.insert(group_of(item));
+        } else {
+            running.insert(group_of(item));
+        }
+    }
+    paused.retain(|group| !running.contains(group));
+    paused
+}
+
+/// What the downloader asks of one torrent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Control {
+    paused: bool,
+    upload: bool,
+}
+
+/// What a torrent is to the downloader this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// The video being watched is in it.
+    Watched,
+    /// The user's own choice: every queued item of it is paused, or none is queued.
+    Held,
+    /// It has queued items to download in the background.
+    Downloading,
+    /// Nothing to download (finished, or waiting for a download slot): it shares.
+    Sharing,
+}
+
+/// What `id` (in `group`) is this tick: `watched` is the torrent being watched, `queued` the
+/// groups with queued items, `held` the groups whose items the user all paused, and `needed`
+/// whether any of its queued items downloads now.
+fn role_of(
+    id: TorrentId,
+    group: &str,
+    watched: Option<TorrentId>,
+    queued: &HashSet<String>,
+    held: &HashSet<String>,
+    needed: bool,
+) -> Role {
+    if watched == Some(id) {
+        Role::Watched
+    } else if !queued.contains(group) || held.contains(group) {
+        Role::Held
+    } else if needed {
+        Role::Downloading
+    } else {
+        Role::Sharing
+    }
+}
+
+/// Torrents to pause with upload off because nothing queues them any more: runs whose group
+/// left the queue, are not being added, and whose torrent no stream has open and no queued run
+/// still uses (a link item's group becomes its hash once known; Undo queues it again).
+fn released(
+    torrents: &HashMap<String, TorrentRun>,
+    queued: &HashSet<String>,
+    open: &HashSet<TorrentId>,
+) -> Vec<TorrentId> {
+    let in_use: HashSet<TorrentId> = torrents
+        .iter()
+        .filter(|(group, _)| queued.contains(*group))
+        .filter_map(|(_, run)| run.id)
+        .collect();
+    let mut ids: Vec<TorrentId> = torrents
+        .iter()
+        .filter(|(group, run)| !queued.contains(*group) && run.adding.is_none())
+        .filter_map(|(_, run)| run.id)
+        .filter(|id| !open.contains(id) && !in_use.contains(id))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
+/// Files whose stream closed since the last tick and that nothing else wants: no stream has
+/// them open and no queued item downloads them (`selected`). Playback selected them itself, so
+/// the downloader deselects them, or a paused or removed item would keep downloading.
+fn closed_files(
+    before: &HashSet<(TorrentId, usize)>,
+    open: &HashSet<(TorrentId, usize)>,
+    selected: &HashMap<String, (TorrentId, usize)>,
+) -> Vec<(TorrentId, usize)> {
+    let wanted: HashSet<&(TorrentId, usize)> = selected.values().collect();
+    let mut files: Vec<(TorrentId, usize)> = before
+        .difference(open)
+        .filter(|file| !wanted.contains(file))
+        .copied()
+        .collect();
+    files.sort_unstable();
+    files
+}
+
+/// Whether a torrent shares with other peers: torrentplayer-swarm uploads unless its upload
+/// switch is off, even while paused for playback; librqbit (no upload switch) only while it
+/// runs.
+fn shares(backend: BackendKind, paused: bool, upload: bool) -> bool {
+    match backend {
+        BackendKind::Swarm => upload,
+        BackendKind::Rqbit => !paused,
+    }
+}
+
+/// The rules for one torrent. The video being watched always runs and shares. A held torrent
+/// neither downloads nor uploads. Any other torrent runs and shares, finished or not, and pauses
+/// only while playback starves and it still has something to download; that pause leaves its
+/// upload switch alone.
+fn control(role: Role, pause_background: bool) -> Control {
+    match role {
+        Role::Watched | Role::Sharing => Control {
+            paused: false,
+            upload: true,
+        },
+        Role::Held => Control {
+            paused: true,
+            upload: false,
+        },
+        Role::Downloading => Control {
+            paused: pause_background,
+            upload: true,
+        },
+    }
 }
 
 impl Runtime {
@@ -433,7 +555,7 @@ impl Runtime {
         // Torrents of the queue, as far as they are added.
         for item in &queue.items {
             let run = self.torrents.entry(group_of(item)).or_default();
-            if run.id.is_none_or(|id| engine.info(id).is_err()) {
+            if run.id.is_none_or(|id| !engine.contains(id)) {
                 run.id = item
                     .info_hash
                     .as_deref()
@@ -441,27 +563,44 @@ impl Runtime {
             }
         }
         let groups: HashSet<String> = queue.items.iter().map(group_of).collect();
-        let open_torrents: HashSet<TorrentId> = core
+        let open_files: HashSet<(TorrentId, usize)> = core
             .streams
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
-            .map(|stream| stream.torrent)
+            .map(|stream| (stream.torrent, stream.file))
             .collect();
-        let removed: Vec<TorrentId> = self
-            .torrents
-            .iter()
-            .filter(|(group, run)| {
-                !groups.contains(*group)
-                    && run.adding.is_none()
-                    && run.id.is_none_or(|id| !open_torrents.contains(&id))
-            })
-            .filter_map(|(_, run)| run.id)
-            .collect();
-        for id in removed {
+        let open_torrents: HashSet<TorrentId> = open_files.iter().map(|(t, _)| *t).collect();
+        for id in released(&self.torrents, &groups, &open_torrents) {
             let _ = engine.set_upload_enabled(id, false);
             let _ = engine.set_paused(id, true).await;
         }
+
+        // Starting a stream resumes its torrent and selects its file, outside the downloader:
+        // when streams open or close, and every [`REAPPLY`] anyway, the cached switches are
+        // forgotten so this tick applies them again. A closed stream's file is deselected
+        // unless a queued item downloads it.
+        let changed: HashSet<TorrentId> = self
+            .streamed
+            .symmetric_difference(&open_files)
+            .map(|(t, _)| *t)
+            .collect();
+        for (torrent, file) in closed_files(&self.streamed, &open_files, &self.selected) {
+            let _ = engine.stop_downloading_file(torrent, file).await;
+        }
+        let reapply = self
+            .reapplied_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= REAPPLY);
+        if reapply {
+            self.reapplied_at = Some(now);
+        }
+        for run in self.torrents.values_mut() {
+            if reapply || run.id.is_some_and(|id| changed.contains(&id)) {
+                run.paused = None;
+                run.upload_enabled = None;
+            }
+        }
+        self.streamed = open_files;
         self.torrents.retain(|g, run| {
             groups.contains(g)
                 || run.adding.is_some()
@@ -472,14 +611,20 @@ impl Runtime {
         // the meter sees the whole link).
         let mut measured: HashMap<TorrentId, Measured> = HashMap::new();
         for id in engine.torrent_ids() {
-            let Ok(stats) = engine.stats(id).await else {
+            // One read of the pieces present per torrent per tick serves its stats too.
+            let Ok((stats, have)) = engine.stats_and_have(id).await else {
                 continue;
             };
-            let have = engine.have_pieces(id).await.unwrap_or_default();
             measured.insert(id, Measured { stats, have });
         }
         let total_bps: u64 = measured.values().map(|m| m.stats.download_bps).sum();
         let total_upload_bps: u64 = measured.values().map(|m| m.stats.upload_bps).sum();
+        if total_upload_bps > 0 && !self.upload_announced {
+            self.upload_announced = true;
+            if let Err(error) = app.emit(SEEDING_STARTED, ()) {
+                tracing::warn!(%error, "could not send the seeding-started event");
+            }
+        }
 
         // The video being watched (the newest stream). A stream parked at its reported end is
         // no longer foreground; seeking it back makes it foreground again on the next tick.
@@ -561,41 +706,25 @@ impl Runtime {
             .enumerate()
             .filter(|(_, item)| {
                 !item.paused
-                    && !item.skipped
                     && !watching(item)
                     && !readiness
                         .get(item.id.as_str())
                         .is_some_and(FileReadiness::complete)
             })
-            .map(|(position, item)| {
-                let run = self.torrents.get(&group_of(item));
-                Candidate {
-                    id: item.id.clone(),
-                    group: group_of(item),
-                    position,
-                    up_next: position == up_next,
-                    skipped: current.is_some_and(|c| position <= c),
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    rate_bps: run
-                        .filter(|r| {
-                            r.downloading_since
-                                .is_some_and(|t| now.saturating_duration_since(t) >= MEASURE_AFTER)
-                        })
-                        .and_then(|r| r.rate)
-                        .map(|r| r as u64),
-                }
+            .map(|(position, item)| Candidate {
+                id: item.id.clone(),
+                group: group_of(item),
+                position,
+                up_next: position == up_next,
+                behind: current.is_some_and(|c| position <= c),
             })
             .collect();
-        let order = match queue.order {
-            DownloadOrder::InOrder => bandwidth::DownloadOrder::InOrder,
-            DownloadOrder::Fastest => bandwidth::DownloadOrder::Fastest,
-        };
         let max_active = usize::try_from(settings.bandwidth.max_downloads)
             .ok()
             .filter(|n| *n > 0);
         let plan = self
             .planner
-            .plan(now, total_bps, foreground, &candidates, order, max_active);
+            .plan(now, total_bps, foreground, &candidates, max_active);
         let active: HashSet<&str> = plan.active.iter().map(String::as_str).collect();
 
         // Start adding the torrents of active items that are not added yet, a few at a time.
@@ -655,17 +784,24 @@ impl Runtime {
             self.selected.remove(&id);
         }
 
-        // Pause queued torrents nothing needs; limit or pause background ones as planned.
+        // Pause only what the user paused; limit or pause background downloads as planned.
         let watched_torrent = watched.map(|(t, _)| t);
+        let paused_groups = paused_groups(queue);
+        let mut uploading: HashSet<TorrentId> = HashSet::new();
         for (group, run) in &mut self.torrents {
             let Some(id) = run.id else {
                 continue;
             };
-            let Some(m) = measured.get(&id) else {
+            if !measured.contains_key(&id) {
                 continue;
-            };
+            }
             let foreground = watched_torrent == Some(id);
             let needed = wanted.get(&id).copied().unwrap_or(false);
+            let role = role_of(id, group, watched_torrent, &groups, &paused_groups, needed);
+            let Control {
+                paused: pause,
+                upload: upload_enabled,
+            } = control(role, plan.pause_background);
             if foreground {
                 if !run.was_watching
                     && let Ok(info) = engine.info(id)
@@ -673,11 +809,8 @@ impl Runtime {
                     crate::cache::mark_unfinished(&cache_root, &info.info_hash);
                 }
                 run.was_watching = true;
-                run.seed_since = None;
-                run.seeding_announced = false;
             } else if run.was_watching {
                 run.was_watching = false;
-                run.seed_since = Some(now);
                 if let (Ok(info), Ok(backend)) = (engine.info(id), engine.backend(id))
                     && let Err(error) =
                         crate::cache::mark_finished(&cache_root, backend, &info.info_hash)
@@ -686,57 +819,30 @@ impl Runtime {
                 }
                 self.cleanup_requested = true;
             }
-            let seeding = post_playback_seeding(
-                run.seed_since,
-                &settings.bandwidth,
-                m.stats.progress_bytes,
-                m.stats.uploaded_bytes,
-                now,
-            );
-            // Once per playback end: changing the seeding settings later does not resend it.
-            if seeding && !run.seeding_announced {
-                run.seeding_announced = true;
-                if let Err(error) = app.emit(SEEDING_STARTED, ()) {
-                    tracing::warn!(%error, "could not send the seeding-started event");
-                }
-            }
-            let upload_enabled = foreground || needed || seeding;
             if run.upload_enabled != Some(upload_enabled)
                 && engine.set_upload_enabled(id, upload_enabled).is_ok()
             {
                 run.upload_enabled = Some(upload_enabled);
             }
-            let pause = !foreground
-                && if needed {
-                    plan.pause_background
-                } else {
-                    !seeding
-                };
             let limit = if foreground || !needed {
                 None
             } else {
                 plan.limits.get(group).copied()
             };
-            if pause != run.paused && engine.set_paused(id, pause).await.is_ok() {
-                run.paused = pause;
+            if run.paused != Some(pause) && engine.set_paused(id, pause).await.is_ok() {
+                run.paused = Some(pause);
+            }
+            if let (Some(paused), Some(upload), Ok(backend)) =
+                (run.paused, run.upload_enabled, engine.backend(id))
+                && shares(backend, paused, upload)
+            {
+                uploading.insert(id);
             }
             if limit != run.limit {
                 let bps = limit.and_then(|l| NonZeroU32::new(u32::try_from(l).unwrap_or(u32::MAX)));
                 if engine.set_download_limit(id, bps).is_ok() {
                     run.limit = limit;
                 }
-            }
-            // Speed is measured while it downloads in the background.
-            if needed && !pause && !foreground {
-                run.downloading_since.get_or_insert(now);
-                #[allow(clippy::cast_precision_loss)]
-                let sample = m.stats.download_bps as f64;
-                run.rate = Some(
-                    run.rate
-                        .map_or(sample, |r| r * (1.0 - RATE_WEIGHT) + sample * RATE_WEIGHT),
-                );
-            } else {
-                run.downloading_since = None;
             }
         }
 
@@ -752,17 +858,18 @@ impl Runtime {
                 let is_active = active.contains(item.id.as_str());
                 let is_watching = watching(item);
                 let complete = r.is_some_and(FileReadiness::complete);
+                // Other files of the torrent being watched are never held back for it.
+                let background = id.is_some() && id != watched_torrent;
+                // The user's own pause shows before anything the downloader decided.
                 let state = if is_watching {
                     ItemState::Watching
-                } else if complete {
-                    ItemState::Complete
-                } else if item.skipped {
-                    ItemState::Skipped
                 } else if item.paused {
                     ItemState::Paused
+                } else if complete {
+                    ItemState::Complete
                 } else if run.is_some_and(|r| r.id.is_none() && r.failed.is_some()) {
                     ItemState::Failed
-                } else if !is_active || (plan.pause_background && id.is_some()) {
+                } else if !is_active || (plan.pause_background && background) {
                     ItemState::Queued
                 } else if id.is_none() {
                     ItemState::Starting
@@ -795,7 +902,8 @@ impl Runtime {
                     length: r.map(|r| r.len),
                     eta_secs,
                     startable: r.is_some_and(|r| r.startable),
-                    limited: is_active && plan.limits.contains_key(&group_of(item)),
+                    limited: is_active && background && plan.limits.contains_key(&group_of(item)),
+                    uploading: id.is_some_and(|id| uploading.contains(&id)),
                     wait_reason: match state {
                         ItemState::Queued if !is_active => Some(WaitReason::Limit),
                         ItemState::Queued => Some(WaitReason::Playback),
@@ -897,8 +1005,8 @@ mod tests {
             torrent_name: None,
             size_bytes: None,
             paused,
-            skipped: false,
             played: false,
+            added_at: None,
         }
     }
 
@@ -930,63 +1038,134 @@ mod tests {
         let state = DownloadsState::new(Queue::default());
         let queue = Queue {
             items: vec![item("a", None, true)],
-            order: DownloadOrder::Fastest,
-            ..Queue::default()
+            current: Some("a".into()),
         };
         state.set_queue(queue.clone()).await;
         assert_eq!(state.queue(), queue);
     }
 
+    const RUNNING: Control = Control {
+        paused: false,
+        upload: true,
+    };
+
     #[test]
-    fn post_playback_seeding_stops_at_the_first_target() {
-        let since = Instant::now();
-        let now = since + Duration::from_secs(30 * 60);
-        let bandwidth = torrentplayer_settings::BandwidthSettings {
-            seed_ratio_target: 2.0,
-            seed_time_limit_minutes: 60,
-            ..torrentplayer_settings::BandwidthSettings::default()
-        };
-        assert!(post_playback_seeding(
-            Some(since),
-            &bandwidth,
-            1_000,
-            1_999,
-            now
-        ));
-        assert!(!post_playback_seeding(
-            Some(since),
-            &bandwidth,
-            1_000,
-            2_000,
-            now
-        ));
-        assert!(!post_playback_seeding(
-            Some(since),
-            &bandwidth,
-            1_000,
-            0,
-            since + Duration::from_secs(60 * 60)
-        ));
+    fn a_finished_torrent_keeps_running_and_sharing() {
+        // Complete and never watched: nothing to download, not paused by the user. Starving
+        // playback does not pause it either.
+        assert_eq!(control(Role::Sharing, false), RUNNING);
+        assert_eq!(control(Role::Sharing, true), RUNNING);
+        assert_eq!(control(Role::Downloading, false), RUNNING);
     }
 
     #[test]
-    fn post_playback_seeding_can_be_unlimited_or_disabled() {
-        let now = Instant::now();
-        let mut bandwidth = torrentplayer_settings::BandwidthSettings {
-            seed_ratio_target: 0.0,
-            seed_time_limit_minutes: 0,
-            ..torrentplayer_settings::BandwidthSettings::default()
+    fn the_users_pause_stops_download_and_upload() {
+        let held = Control {
+            paused: true,
+            upload: false,
         };
-        assert!(post_playback_seeding(
-            Some(now.checked_sub(Duration::from_secs(1)).unwrap_or(now)),
-            &bandwidth,
-            1,
-            u64::MAX,
-            now
-        ));
-        bandwidth.seed_after_watching = false;
-        assert!(!post_playback_seeding(Some(now), &bandwidth, 1, 0, now));
-        bandwidth.seed_after_watching = true;
-        assert!(!post_playback_seeding(None, &bandwidth, 1, 0, now));
+        assert_eq!(control(Role::Held, false), held);
+        assert_eq!(control(Role::Held, true), held);
+        // Watching it still works; the pause applies again once playback ends.
+        assert_eq!(control(Role::Watched, true), RUNNING);
+    }
+
+    #[test]
+    fn playback_protection_pauses_downloads_but_leaves_upload_alone() {
+        // The downloader only reads the queue (`&Queue`), so the user's flags cannot change.
+        assert_eq!(
+            control(Role::Downloading, true),
+            Control {
+                paused: true,
+                upload: true
+            }
+        );
+    }
+
+    #[test]
+    fn a_torrent_is_held_only_when_all_of_its_items_are_paused() {
+        let queue = Queue {
+            items: vec![
+                item("a1", Some("aaaa"), true),
+                item("a2", Some("aaaa"), true),
+                item("b1", Some("bbbb"), true),
+                item("b2", Some("bbbb"), false),
+                item("c", Some("cccc"), false),
+            ],
+            ..Queue::default()
+        };
+        let held = paused_groups(&queue);
+        assert_eq!(held, HashSet::from(["aaaa".to_owned()]));
+    }
+
+    fn run(id: TorrentId) -> TorrentRun {
+        TorrentRun {
+            id: Some(id),
+            ..TorrentRun::default()
+        }
+    }
+
+    fn set(groups: &[&str]) -> HashSet<String> {
+        groups.iter().map(|g| (*g).to_owned()).collect()
+    }
+
+    #[test]
+    fn roles_follow_the_users_choices() {
+        let queued = set(&["a", "b", "mixed"]);
+        let held = set(&["b"]);
+        let role = |id, group: &str, needed| role_of(id, group, Some(9), &queued, &held, needed);
+        // Removed from the queue, or every item paused: held.
+        assert_eq!(role(1, "gone", false), Role::Held);
+        assert_eq!(role(2, "b", true), Role::Held);
+        // Some items paused, others not: it runs (`paused_groups` leaves the group out).
+        assert_eq!(role(3, "mixed", false), Role::Sharing);
+        assert_eq!(role(4, "a", true), Role::Downloading);
+        assert_eq!(role(5, "a", false), Role::Sharing);
+        // The video being watched wins over everything.
+        assert_eq!(role(9, "b", false), Role::Watched);
+        assert_eq!(role(9, "gone", false), Role::Watched);
+    }
+
+    #[test]
+    fn released_torrents_skip_ones_still_queued_or_streamed() {
+        let mut torrents = HashMap::new();
+        // A link item whose hash became known: the old group's torrent is the new group's.
+        torrents.insert("link:https://example.org/a.torrent".to_owned(), run(1));
+        torrents.insert("aaaa".to_owned(), run(1));
+        torrents.insert("removed".to_owned(), run(2));
+        torrents.insert("streamed".to_owned(), run(3));
+        torrents.insert("unadded".to_owned(), TorrentRun::default());
+        let queued = set(&["aaaa"]);
+        let open = HashSet::from([3]);
+        assert_eq!(released(&torrents, &queued, &open), [2]);
+    }
+
+    #[test]
+    fn a_new_run_applies_its_pause_on_the_first_tick() {
+        // A torrent the removed path paused, queued again: nothing is cached, so the
+        // downloader sends the resume rather than assuming the torrent already runs.
+        let fresh = run(1);
+        assert_eq!(fresh.paused, None);
+        assert_eq!(fresh.upload_enabled, None);
+        assert_ne!(fresh.paused, Some(control(Role::Sharing, false).paused));
+    }
+
+    #[test]
+    fn closed_streams_deselect_files_nothing_else_wants() {
+        let before = HashSet::from([(1, 0), (1, 1), (2, 0)]);
+        let open = HashSet::from([(2, 0)]);
+        let selected = HashMap::from([("item".to_owned(), (1, 1))]);
+        // (1, 1) is still downloaded for a queued item; (2, 0) is still open.
+        assert_eq!(closed_files(&before, &open, &selected), [(1, 0)]);
+    }
+
+    #[test]
+    fn sharing_follows_each_engine() {
+        // torrentplayer-swarm keeps uploading while paused for playback, not when held.
+        assert!(shares(BackendKind::Swarm, true, true));
+        assert!(!shares(BackendKind::Swarm, true, false));
+        // librqbit has no upload switch: it shares while it runs.
+        assert!(shares(BackendKind::Rqbit, false, false));
+        assert!(!shares(BackendKind::Rqbit, true, true));
     }
 }

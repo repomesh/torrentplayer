@@ -3,8 +3,9 @@
   /*
    * Connection mode (direct, SOCKS5, built-in WireGuard), the live connection state from the
    * network layer, the connection check, and WireGuard import. Saving a setting applies it: the
-   * backend follows every change, so there is no Apply button. Settings that used the removed VPN
-   * adapter mode show a notice until it is dismissed (see `src/lib/removedMode.ts`).
+   * backend follows every change, so there is no Apply button. While traffic is held (after an
+   * update from the removed VPN adapter mode, or because the settings could not be read), a
+   * notice shows until it is dismissed (see `src/lib/networkHold.ts`).
    */
   import { onMount } from 'svelte';
   import type { NetworkMode } from '../../bindings/NetworkMode';
@@ -30,9 +31,9 @@
     describeNetwork,
     followNetwork,
   } from '../../network';
-  import { removedModeHolds, showRemovedModeNotice } from '../../removedMode';
+  import { holdApplies, showHoldNotice } from '../../networkHold';
   import { followVpnHint, showVpnHint } from '../../vpnHint';
-  import RemovedModeNotice from '../RemovedModeNotice.svelte';
+  import NetworkHoldNotice from '../NetworkHoldNotice.svelte';
   import VpnHint from '../VpnHint.svelte';
   import Field from './Field.svelte';
   import SecretField from './SecretField.svelte';
@@ -58,7 +59,7 @@
     {
       value: 'socks5',
       label: 'SOCKS5 proxy',
-      help: 'Route traffic through a SOCKS5 proxy (many VPN providers offer one). If it stops answering, traffic pauses.',
+      help: 'Route traffic through a SOCKS5 proxy (many VPN providers offer one). If it stops answering, traffic is blocked.',
     },
     {
       value: 'wireGuard',
@@ -94,7 +95,7 @@
   // Dismissed elsewhere (the status bar) since this page loaded its settings.
   let hintDismissedElsewhere = $state(false);
   let removedDismissedElsewhere = $state(false);
-  const removedNotice = $derived(showRemovedModeNotice(n) && !removedDismissedElsewhere);
+  const removedNotice = $derived(showHoldNotice(n) && !removedDismissedElsewhere);
 
   // WireGuard import: check first (a summary without keys), then save.
   let importText = $state('');
@@ -114,7 +115,7 @@
   onMount(() => {
     const stopHint = followVpnHint((network) => {
       hintDismissedElsewhere = network.vpnHintDismissed;
-      removedDismissedElsewhere = !network.vpnAdapterModeRemoved;
+      removedDismissedElsewhere = network.hold === null;
     });
     const stopNetwork = followNetwork((next) => {
       status = next;
@@ -226,14 +227,15 @@
 </script>
 
 <section class="card" aria-labelledby="network-title">
-  <h3 id="network-title">VPN and network</h3>
+  <h3 id="network-title">Network &amp; VPN</h3>
 
-  {#if removedNotice}
+  {#if removedNotice && n.hold}
     <div class="vpn-hint">
-      <RemovedModeNotice
-        held={removedModeHolds(n)}
+      <NetworkHoldNotice
+        reason={n.hold}
+        held={holdApplies(n)}
         onDismiss={() => {
-          update('network.vpnAdapterModeRemoved', false);
+          update('network.hold', null);
         }}
       />
     </div>
@@ -262,14 +264,14 @@
           {status.trafficAllowed
             ? 'Allowed'
             : status.mode === 'direct'
-              ? 'Paused until the notice above is dismissed'
-              : 'Paused by the kill switch'}{status.trafficAllowed && !status.trackersAllowed
+              ? 'Blocked until the notice above is dismissed'
+              : 'Blocked by the kill switch'}{status.trafficAllowed && !status.trackersAllowed
             ? ' · trackers off'
             : ''}{status.trafficAllowed && !status.udpAllowed
             ? ' · DHT and UDP off in this mode'
             : ''}{status.trafficAllowed && status.udpAllowed && status.mode === 'wireGuard'
             ? ' · DHT and UDP trackers through WireGuard'
-            : status.trafficAllowed && status.mode === 'socks5'
+            : status.trafficAllowed && status.udpAllowed && status.mode === 'socks5'
               ? ' · UDP relay when supported by the proxy'
               : ''}
         </dd>
@@ -390,7 +392,7 @@
       id="network-password"
       label="Password"
       help={storeAvailable
-        ? 'Stored in the system credential store, never in the settings file. With a user name and no password, traffic pauses.'
+        ? 'Stored in the system credential store, never in the settings file. With a user name and no password, traffic is blocked.'
         : 'No system credential store is available, so passwords cannot be saved. On Linux, install and unlock GNOME Keyring or KWallet.'}
     >
       <SecretField
@@ -451,31 +453,13 @@
   <Field
     id="network-kill"
     label="Kill switch"
-    help="Always on in the SOCKS5 and WireGuard modes: if the proxy or tunnel stops working, torrent traffic pauses and searches are refused, never falling back to a direct connection. Traffic resumes by itself. In Direct mode, keep your VPN app's own kill switch on."
+    help="Always on in the SOCKS5 and WireGuard modes: if the proxy or tunnel stops working, torrent traffic is blocked and searches are refused, never falling back to a direct connection. Traffic resumes by itself. In Direct mode, keep your VPN app's own kill switch on."
   >
     <output id="network-kill" class="fixed" aria-describedby="network-kill-help">
       {n.mode === 'direct' ? 'Not needed in Direct mode' : 'Always on'}
     </output>
   </Field>
-  <Field
-    id="network-encryption"
-    label="Protocol encryption"
-    path="network.encryption"
-    help="Encrypts BitTorrent traffic between peers. It hides the protocol, not your IP address. Saved now; neither engine applies it yet."
-  >
-    <select
-      id="network-encryption"
-      value={n.encryption}
-      aria-describedby="network-encryption-help"
-      onchange={(e: Event) => {
-        update('network.encryption', (e.currentTarget as HTMLSelectElement).value);
-      }}
-    >
-      <option value="prefer">Prefer</option>
-      <option value="require">Require</option>
-      <option value="off">Off</option>
-    </select>
-  </Field>
+  <!-- Protocol encryption (network.encryption) is hidden: neither engine applies it yet. -->
   <Field
     id="network-ipv6"
     label="IPv6"
@@ -557,7 +541,7 @@
     id="network-show-ip"
     label="Show public IP in the status bar"
     path="network.showPublicIp"
-    help="Asks icanhazip.com for your public IPv4 and IPv6 addresses, through the current mode, when the connection changes and every 10 minutes. Never while traffic is paused."
+    help="Asks icanhazip.com for your public IPv4 and IPv6 addresses, through the current mode, when the connection changes and every 10 minutes. Never while traffic is blocked."
   >
     <Toggle
       id="network-show-ip"
@@ -598,7 +582,7 @@
     <p class="intro">
       Import a <code>.conf</code> file from your VPN provider. TorrentPlayer connects through its
       own WireGuard tunnel, carrying search, trackers, and peer connections. Your keys stay in the
-      system credential store. Traffic stays paused until the server authenticates. The
+      system credential store. Traffic stays blocked until the server authenticates. The
       configuration must include a <code>DNS</code> server for search and other host names.
     </p>
     {#if wgConfigured}

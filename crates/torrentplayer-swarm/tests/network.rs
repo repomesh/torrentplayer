@@ -127,6 +127,8 @@ fn fast_options() -> NetworkOptions {
         retry_interval: Duration::from_millis(100),
         check_timeout: Duration::from_secs(2),
         connect_timeout: Duration::from_secs(5),
+        // Sockets stay on loopback, where every test server is.
+        loopback_only: true,
         ..NetworkOptions::default()
     }
 }
@@ -151,6 +153,8 @@ async fn swarm(network: &Network, trackers: bool) -> (Swarm, tempfile::TempDir) 
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = SwarmConfig::new(dir.path().to_path_buf());
     cfg.enable_trackers = trackers;
+    // The test trackers are on loopback.
+    cfg.allow_local_trackers = true;
     cfg.network = Some(network.clone());
     (Swarm::start(cfg).await.unwrap(), dir)
 }
@@ -433,5 +437,46 @@ async fn direct_mode_still_uses_udp_trackers() {
         .unwrap();
     assert!(udp_packets_within(&udp, Duration::from_secs(5)).await);
     swarm.shutdown();
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn magnet_trackers_on_the_users_own_network_are_never_contacted() {
+    let (tracker, announces) = http_tracker(Arc::new(Mutex::new(None))).await;
+    let port = tracker.port();
+    let trackers: Vec<url::Url> = [
+        format!("http://127.0.0.1:{port}/announce"),
+        format!("http://localhost:{port}/announce"),
+        format!("http://LocalHost.:{port}/announce"),
+        format!("http://tracker.localhost:{port}/announce"),
+        format!("http://[::ffff:127.0.0.1]:{port}/announce"),
+        format!("http://192.168.1.1:{port}/announce"),
+    ]
+    .iter()
+    .map(|u| url::Url::parse(u).unwrap())
+    .collect();
+    let proxy = TestProxy::start(Some(("torrentplayer-test", "hunter2")))
+        .await
+        .unwrap();
+    let net = Network::start(through(&proxy), fast_options())
+        .await
+        .unwrap();
+    net.settled(Duration::from_secs(5)).await;
+
+    let peers = torrentplayer_swarm::http_tracker::announce_all(
+        &net,
+        &trackers,
+        [1; 20],
+        Duration::from_secs(3),
+        false,
+    )
+    .await;
+    assert!(peers.is_empty());
+    assert_eq!(announces.load(Ordering::SeqCst), 0);
+    let targets: Vec<String> = proxy.connections().into_iter().map(|c| c.target).collect();
+    assert!(
+        !targets.iter().any(|t| t.ends_with(&format!(":{port}"))),
+        "sent through the proxy: {targets:?}"
+    );
     net.shutdown();
 }

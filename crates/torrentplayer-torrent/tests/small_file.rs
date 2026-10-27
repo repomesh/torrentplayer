@@ -103,6 +103,7 @@ async fn reads_a_subtitle_file_through_either_engine() {
             upload_limit_bps: None,
             peer_limit: 40,
             dht_state_dir: None,
+            allow_local_links: false,
         })
         .await
         .unwrap();

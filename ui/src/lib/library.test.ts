@@ -14,6 +14,7 @@ const {
   libraryKey,
   mergeLibrary,
   resumePosition,
+  resumeStart,
   watchedFraction,
   watchedLabel,
 } = await import('./library');
@@ -107,5 +108,46 @@ describe('followLibrary', () => {
     expect(unlisten).toHaveBeenCalled();
     handler?.({ payload: item({ positionSecs: 70 }) });
     expect(seen.at(-1)?.[0]?.positionSecs).toBe(60);
+  });
+
+  it('tries a failed initial read once more', async () => {
+    listen.mockResolvedValue(vi.fn());
+    invoke.mockRejectedValueOnce(new Error('busy')).mockResolvedValueOnce([item()]);
+    const seen: LibraryItem[][] = [];
+    const stop = followLibrary((items) => seen.push(items));
+    await vi.waitFor(() => {
+      expect(seen).toEqual([[item()]]);
+    });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it('starts empty and follows changes when the initial read keeps failing', async () => {
+    let handler: ((event: { payload: LibraryItem }) => void) | undefined;
+    listen.mockImplementation((_name: string, callback: typeof handler) => {
+      handler = callback;
+      return Promise.resolve(vi.fn());
+    });
+    invoke.mockRejectedValue(new Error('gone'));
+    const seen: LibraryItem[][] = [];
+    const stop = followLibrary((items) => seen.push(items));
+    await vi.waitFor(() => {
+      expect(seen).toEqual([[]]);
+    });
+    expect(invoke).toHaveBeenCalledTimes(2);
+    handler?.({ payload: item() });
+    expect(seen.at(-1)).toEqual([item()]);
+    stop();
+  });
+});
+
+describe('resumeStart', () => {
+  it('continues from a saved position without asking, and says so', () => {
+    expect(resumeStart(754)).toEqual({ startAt: 754, chip: 'Continuing from 12:34' });
+  });
+
+  it('starts at the beginning when nothing was saved (or the setting is off)', () => {
+    expect(resumeStart(null)).toEqual({ startAt: 0, chip: null });
+    expect(resumeStart(Number.NaN)).toEqual({ startAt: 0, chip: null });
   });
 });

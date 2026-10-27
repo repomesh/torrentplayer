@@ -46,7 +46,7 @@
   const SECTIONS: { id: SectionId; label: string }[] = [
     { id: 'playback', label: 'Playback' },
     { id: 'storage', label: 'Downloads & storage' },
-    { id: 'bandwidth', label: 'Bandwidth & seeding' },
+    { id: 'bandwidth', label: 'Bandwidth & sharing' },
     { id: 'search', label: 'Search' },
     { id: 'network', label: 'Network & VPN' },
     { id: 'advanced', label: 'Advanced' },
@@ -129,9 +129,20 @@
       .catch(() => undefined);
   }
 
+  // Back (or Escape) waits for the last save; a second press meanwhile must not leave twice.
+  let leaving = $state(false);
+
   async function leave(): Promise<void> {
-    await saver.flush();
-    onBack();
+    if (leaving) {
+      return;
+    }
+    leaving = true;
+    try {
+      await saver.flush();
+      onBack();
+    } finally {
+      leaving = false;
+    }
   }
 
   function select(id: SectionId): void {
@@ -181,7 +192,9 @@
 
 <div class="page">
   <header>
-    <button type="button" class="back" onclick={() => void leave()}>← {backLabel}</button>
+    <button type="button" class="back" disabled={leaving} onclick={() => void leave()}
+      >← {backLabel}</button
+    >
     <h2>Settings</h2>
   </header>
   <div class="layout">
@@ -228,7 +241,7 @@
         {#if active === 'playback'}
           <PlaybackSection settings={local} {errors} {update} />
         {:else if active === 'storage'}
-          <StorageSection settings={local} {view} {errors} {update} />
+          <StorageSection settings={local} {view} {errors} {update} onView={showSaved} />
         {:else if active === 'bandwidth'}
           <BandwidthSection settings={local} {errors} {update} />
         {:else if active === 'search'}
@@ -248,7 +261,7 @@
             }}
           />
         {:else if active === 'advanced'}
-          <AdvancedSection settings={local} {view} {errors} {update} />
+          <AdvancedSection settings={local} {view} {errors} {update} onView={showSaved} />
         {:else}
           <AboutSection />
         {/if}

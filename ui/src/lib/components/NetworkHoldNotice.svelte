@@ -1,18 +1,21 @@
 <!-- SPDX-License-Identifier: MIT OR Apache-2.0 -->
 <script lang="ts">
   /*
-   * The notice about the removed VPN adapter mode (see `src/lib/removedMode.ts`): what changed,
-   * whether traffic is paused, and a button that dismisses it for good. `onOpen`, if given, adds
-   * a button to Settings → Network; `onClose` one that only hides it for now.
+   * The notice shown while traffic is held (see `src/lib/networkHold.ts`): why, whether traffic
+   * is blocked, and a button that dismisses it for good. `onOpen`, if given, adds a button to
+   * Settings → Network & VPN; `onClose` one that only hides it for now.
    */
-  import { REMOVED_MODE_HELD, REMOVED_MODE_NOTICE } from '../removedMode';
+  import type { NetworkHold } from '../bindings/NetworkHold';
+  import { holdNotice } from '../networkHold';
 
   interface Props {
+    /** Why traffic is held. */
+    reason: NetworkHold;
     /** Whether traffic is held until the notice is dismissed (Direct mode). */
     held: boolean;
     /** Dismisses the notice for good. */
     onDismiss: () => void;
-    /** Opens Settings → Network. */
+    /** Opens Settings → Network & VPN. */
     onOpen?: (() => void) | undefined;
     /** Hides the notice until it is shown again. */
     onClose?: () => void;
@@ -20,13 +23,15 @@
     error?: string | null;
   }
 
-  let { held, onDismiss, onOpen, onClose, error = null }: Props = $props();
+  let { reason, held, onDismiss, onOpen, onClose, error = null }: Props = $props();
+
+  const notice = $derived(holdNotice(reason, held));
 </script>
 
 <div class="notice" role="alert">
-  <p>{REMOVED_MODE_NOTICE}</p>
-  {#if held}
-    <p class="held">{REMOVED_MODE_HELD}</p>
+  <p>{notice.text}</p>
+  {#if notice.held}
+    <p class="held">{notice.held}</p>
   {/if}
   <div class="actions">
     <button type="button" class="primary" onclick={onDismiss}>

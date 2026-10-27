@@ -49,6 +49,11 @@ tracing-subscriber.workspace = true
 ts-rs.workspace = true
 url.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+# Lowers WebView2's memory target while the window is minimized (see `window.rs`).
+webview2-com.workspace = true
+windows-core.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }

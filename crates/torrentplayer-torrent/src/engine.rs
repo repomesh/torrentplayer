@@ -7,10 +7,12 @@ use std::collections::HashSet;
 use std::io;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::time::{Duration, Instant};
 
+use futures_util::FutureExt as _;
 use futures_util::future::BoxFuture;
 use librqbit::api::{Api, TorrentIdOrHash};
 use librqbit::dht::DhtPersistenceConfig;
@@ -19,6 +21,8 @@ use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, ConnectionOptions, DhtSessionConfig,
     ListenerOptions, ManagedTorrent, Session, SessionOptions, TorrentStatsState,
 };
+use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use torrentplayer_net::{ModeKind, Network};
 use torrentplayer_prioritize::{FileSpan, PieceGeometry};
 use torrentplayer_stream::{MediaReader, MediaSource};
@@ -26,7 +30,9 @@ use tracing::{debug, info, warn};
 
 use crate::media::{FileKind, mime_type};
 use crate::paths::{UnsafePath, validate_components};
-use crate::source::{SourceError, TorrentSource, fetch_torrent_file, http_client_builder};
+use crate::source::{
+    PublicResolver, SourceError, TorrentSource, fetch_torrent_file, http_client_builder,
+};
 
 /// Identifies a torrent within an [`Engine`].
 pub type TorrentId = usize;
@@ -77,6 +83,9 @@ pub struct EngineConfig {
     /// discovery, and no UDP trackers, and reaches peers and trackers only through the network's
     /// loopback bridge. `None` connects directly.
     pub network: Option<Network>,
+    /// Download `.torrent` links (and follow their redirects) to the local network too. Off by
+    /// default: links come from untrusted sites. For tests with a local server.
+    pub allow_local_links: bool,
 }
 
 impl EngineConfig {
@@ -98,6 +107,7 @@ impl EngineConfig {
             download_limit_bps: None,
             upload_limit_bps: None,
             network: None,
+            allow_local_links: false,
         }
     }
 }
@@ -115,25 +125,28 @@ pub struct Resolved {
 const PROTECTED_TORRENT_FILE: &str = "While a VPN or proxy mode is on, .torrent files open in \
      TorrentPlayer's engine only. Set the torrent engine to Automatic.";
 
+/// Why an operation ended early: its session was stopped, usually for a network mode change.
+const SESSION_STOPPED: &str = "The network settings changed while this torrent was opening. \
+     Try again.";
+
 /// Why a magnet link cannot be resolved in a protected mode: no peers were found through the
-/// DHT and UDP trackers of the mode, and the link lists no HTTP tracker. The hint names what
-/// usually causes it in each mode.
+/// DHT and trackers of the mode (see `protected_magnet_peers`). The hint names what usually
+/// causes it in each mode.
 fn no_magnet_peers(mode: ModeKind) -> &'static str {
     match mode {
         ModeKind::WireGuard => {
-            "No peers were found for this magnet link through the WireGuard tunnel, and it lists \
-             no HTTP tracker. Check that the tunnel is connected (its server completed a recent \
-             handshake); the DHT and UDP trackers run inside it. Or try a .torrent file or a \
-             link with an HTTP tracker."
+            "No peers were found for this magnet link through the WireGuard tunnel. Check that \
+             the tunnel is connected (its server completed a recent handshake); the DHT and \
+             trackers run inside it. Or try a .torrent file."
         }
         ModeKind::Socks5 => {
-            "No peers were found for this magnet link through the SOCKS5 proxy, and it lists no \
-             HTTP tracker. The proxy may not support UDP (UDP ASSOCIATE), which the DHT and UDP \
-             trackers need; try a .torrent file or a link with an HTTP tracker."
+            "No peers were found for this magnet link through the SOCKS5 proxy. The proxy may \
+             not support UDP (UDP ASSOCIATE), which the DHT and UDP trackers need; try a \
+             .torrent file or a link with an HTTP tracker."
         }
         ModeKind::Direct => {
-            "No peers or HTTP trackers were found for this magnet link; try a .torrent file or a \
-             link with an HTTP tracker."
+            "No peers were found for this magnet link; try a .torrent file or a link with an \
+             HTTP tracker."
         }
     }
 }
@@ -176,15 +189,20 @@ fn engine_err(e: impl std::fmt::Display) -> EngineError {
     EngineError::Engine(format!("{e:#}"))
 }
 
-/// The client for downloading `.torrent` files, routed through `network` if given.
+/// The client for downloading `.torrent` files: routed through `network` if given, and to public
+/// hosts only unless `allow_local` (see `crate::source::http_client_builder`).
 pub(crate) fn http_for(
     user_agent: &str,
     network: Option<&Network>,
+    allow_local: bool,
 ) -> Result<reqwest::Client, EngineError> {
-    let mut builder = http_client_builder(user_agent);
-    if let Some(network) = network {
-        builder = network.configure_http(builder).map_err(engine_err)?;
-    }
+    let builder = http_client_builder(user_agent, allow_local);
+    let builder = match (network, allow_local) {
+        (Some(network), false) => network.configure_http_public(builder).map_err(engine_err)?,
+        (Some(network), true) => network.configure_http(builder).map_err(engine_err)?,
+        (None, false) => builder.dns_resolver(PublicResolver),
+        (None, true) => builder,
+    };
     builder.build().map_err(engine_err)
 }
 
@@ -273,6 +291,48 @@ struct Inner {
     config: EngineConfig,
     /// Whether the session was started for a protected network mode.
     protected: bool,
+    /// Cancelled by [`Engine::shutdown`]: librqbit operations in flight end at once.
+    /// librqbit's own `Session::stop` does not end them, as they run in the caller's task (a
+    /// magnet link's metadata fetch connects to peers for up to `metadata_timeout`).
+    stopping: CancellationToken,
+    /// Held shared by every librqbit operation, and exclusively by [`Engine::shutdown`], which
+    /// so waits until the operations in flight have ended.
+    operations: RwLock<()>,
+    /// When a caller last let go of the engine or ended a librqbit operation, or the session
+    /// started (see [`Engine::idle_for`]).
+    last_used: Mutex<Instant>,
+}
+
+/// A reference to an [`Engine`] that does not count as using it (see [`Engine::idle_for`]).
+pub(crate) struct WeakEngine(Weak<Inner>);
+
+impl WeakEngine {
+    /// Whether `engine` is the engine this refers to.
+    pub(crate) fn is(&self, engine: &Engine) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Arc::as_ptr(&engine.inner))
+    }
+}
+
+/// Marks the end of an operation (see [`Engine::idle_for`]), however it ends.
+struct Used<'a>(&'a Mutex<Instant>);
+
+impl Drop for Used<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Instant::now();
+    }
+}
+
+impl Drop for Engine {
+    /// A caller let go of the engine: it counts as idle only from now (see
+    /// `Engine::idle_for`). Callers get it from `StreamEngine::rqbit` and may use it without
+    /// a librqbit operation, or hold it a while before one.
+    fn drop(&mut self) {
+        *self
+            .inner
+            .last_used
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Instant::now();
+    }
 }
 
 impl std::fmt::Debug for Engine {
@@ -309,7 +369,11 @@ impl Engine {
             }
             Err(error) => return Err(error),
         };
-        let http = http_for(&config.client_name, config.network.as_ref())?;
+        let http = http_for(
+            &config.client_name,
+            config.network.as_ref(),
+            config.allow_local_links,
+        )?;
         info!(protected, "torrent engine started");
         Ok(Self {
             inner: Arc::new(Inner {
@@ -318,8 +382,30 @@ impl Engine {
                 http,
                 config,
                 protected,
+                stopping: CancellationToken::new(),
+                operations: RwLock::new(()),
+                last_used: Mutex::new(Instant::now()),
             }),
         })
+    }
+
+    /// Runs a librqbit operation, unless the session is stopping. One in flight when
+    /// [`Engine::shutdown`] starts is dropped at once, closing its connections, and the session
+    /// stops only after that. Operations must not nest: shutdown waits between them.
+    async fn operation<T>(
+        &self,
+        op: impl Future<Output = Result<T, EngineError>>,
+    ) -> Result<T, EngineError> {
+        let _running = self.inner.operations.read().await;
+        let _used = Used(&self.inner.last_used);
+        if self.inner.stopping.is_cancelled() {
+            return Err(EngineError::Unsupported(SESSION_STOPPED));
+        }
+        tokio::select! {
+            biased;
+            () = self.inner.stopping.cancelled() => Err(EngineError::Unsupported(SESSION_STOPPED)),
+            result = op => result,
+        }
     }
 
     /// A librqbit session for `config`. With `persist_dht`, the DHT's routing tables and port
@@ -343,7 +429,8 @@ impl Engine {
                 persistence,
                 ..DhtSessionConfig::default()
             }),
-            disable_trackers: !config.enable_trackers,
+            // A protected session never contacts trackers itself (see `session_magnet`).
+            disable_trackers: !config.enable_trackers || protected,
             disable_local_service_discovery: !config.enable_local_discovery || protected,
             listen: config
                 .listen_addr
@@ -377,6 +464,40 @@ impl Engine {
             .map_err(engine_err)
     }
 
+    /// How long the session has been idle: it has no torrents, and nothing but this handle
+    /// holds it (no operation in flight, no stream open, no caller about to start one), for
+    /// this long since a caller last let go of it or its last operation ended. `None` while it
+    /// is in use.
+    pub(crate) fn idle_for(&self) -> Option<Duration> {
+        if Arc::strong_count(&self.inner) > 1 || self.has_torrents() {
+            return None;
+        }
+        Some(
+            self.inner
+                .last_used
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .elapsed(),
+        )
+    }
+
+    fn has_torrents(&self) -> bool {
+        self.inner
+            .session
+            .with_torrents(|torrents| torrents.next().is_some())
+    }
+
+    /// A reference that does not keep the engine in use.
+    pub(crate) fn downgrade(&self) -> WeakEngine {
+        WeakEngine(Arc::downgrade(&self.inner))
+    }
+
+    /// Whether [`Engine::shutdown`] has started.
+    #[cfg(test)]
+    pub(crate) fn is_stopping(&self) -> bool {
+        self.inner.stopping.is_cancelled()
+    }
+
     /// Whether the session was started for a protected network mode. Its DHT, listening
     /// socket, and proxy are fixed at start, so a session for the other kind of mode must be
     /// replaced (see `StreamEngine::apply_network`).
@@ -385,9 +506,9 @@ impl Engine {
         self.inner.protected
     }
 
-    /// What librqbit is given for `source`. In a protected session, magnet links lose their UDP
-    /// trackers (and every tracker if trackers are off), and `.torrent` files are refused:
-    /// their tracker lists cannot be filtered, and librqbit would contact UDP trackers directly.
+    /// What librqbit is given for `source`. In a protected session, magnet links lose every
+    /// tracker (see `Engine::session_magnet`), and `.torrent` files are refused: their tracker
+    /// lists cannot be filtered, and librqbit would contact their trackers itself.
     async fn session_source(
         &self,
         source: TorrentSource,
@@ -398,10 +519,11 @@ impl Engine {
                 Ok(AddTorrent::from_url(self.session_magnet(link, has_peers)?))
             }
             _ if self.inner.protected => Err(EngineError::Unsupported(PROTECTED_TORRENT_FILE)),
-            TorrentSource::Url(url) => Ok(AddTorrent::from_bytes(
-                fetch_torrent_file(&self.inner.http, &url).await?,
-            )),
-            TorrentSource::File(bytes) => Ok(AddTorrent::from_bytes(bytes)),
+            TorrentSource::Url(url) => Ok(AddTorrent::from_bytes(checked_torrent(
+                fetch_torrent_file(&self.inner.http, &url, self.inner.config.allow_local_links)
+                    .await?,
+            )?)),
+            TorrentSource::File(bytes) => Ok(AddTorrent::from_bytes(checked_torrent(bytes)?)),
         }
     }
 
@@ -412,22 +534,23 @@ impl Engine {
         if !self.inner.protected {
             return Ok(link);
         }
-        let trackers_allowed = network.policy().trackers_allowed;
-        let mut url = url::Url::parse(&link).map_err(|_| SourceError::Invalid)?;
-        let pairs: Vec<(String, String)> = url
-            .query_pairs()
-            .filter(|(key, value)| {
-                key != "tr"
-                    || (trackers_allowed
-                        && (value.starts_with("http://") || value.starts_with("https://")))
-            })
-            .map(|(k, v)| (k.into_owned(), v.into_owned()))
-            .collect();
-        if !has_peers && !pairs.iter().any(|(key, _)| key == "tr") {
+        // No trackers at all: librqbit reaches HTTP trackers through a `socks5://` proxy URL
+        // (its peer connector accepts no other), so its HTTP client would resolve their host
+        // names with the system resolver, outside the tunnel or proxy and the kill switch, and
+        // it would keep announcing whatever the tracker setting later says. The caller
+        // announces to them through the network instead and passes the peers they name (see
+        // `protected_magnet_peers`).
+        if !has_peers {
             return Err(EngineError::Unsupported(no_magnet_peers(
                 network.status().mode,
             )));
         }
+        let mut url = url::Url::parse(&link).map_err(|_| SourceError::Invalid)?;
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "tr")
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
         url.query_pairs_mut().clear().extend_pairs(pairs);
         Ok(url.into())
     }
@@ -473,23 +596,19 @@ impl Engine {
         source: TorrentSource,
         peers: Vec<SocketAddr>,
     ) -> Result<TorrentInfo, EngineError> {
+        self.operation(self.add_now(source, peers)).await
+    }
+
+    async fn add_now(
+        &self,
+        source: TorrentSource,
+        peers: Vec<SocketAddr>,
+    ) -> Result<TorrentInfo, EngineError> {
         let session = &self.inner.session;
         let first = self.session_source(source, !peers.is_empty()).await?;
 
         // Step 1: fetch and inspect the metadata without creating any files.
-        let list_only = AddTorrentOptions {
-            list_only: true,
-            initial_peers: Some(peers.clone()),
-            ..AddTorrentOptions::default()
-        };
-        let listed = tokio::time::timeout(
-            self.inner.config.metadata_timeout,
-            session.add_torrent(first, Some(list_only)),
-        )
-        .await
-        .map_err(|_| EngineError::MetadataTimeout)?
-        .map_err(engine_err)?;
-        let listed = match listed {
+        let listed = match self.list_only(first, peers.clone()).await? {
             AddTorrentResponse::ListOnly(listed) => listed,
             AddTorrentResponse::AlreadyManaged(id, _) | AddTorrentResponse::Added(id, _) => {
                 return self.info(id);
@@ -537,27 +656,56 @@ impl Engine {
         source: TorrentSource,
         peers: Vec<SocketAddr>,
     ) -> Result<Option<Resolved>, EngineError> {
-        let first = self.session_source(source, !peers.is_empty()).await?;
+        // A protected session was given the magnet link without its trackers; the torrent
+        // still lists them for the engine it is handed to, which contacts them safely.
+        let trackers = match &source {
+            TorrentSource::Magnet(link) if self.inner.protected => magnet_trackers(link),
+            _ => Vec::new(),
+        };
+        self.operation(async {
+            let first = self.session_source(source, !peers.is_empty()).await?;
+            let AddTorrentResponse::ListOnly(listed) = self.list_only(first, peers).await? else {
+                return Ok(None);
+            };
+            validate_metadata(&listed.info)?;
+            let torrent_bytes = if trackers.is_empty() {
+                listed.torrent_bytes
+            } else {
+                with_trackers(&listed.torrent_bytes, &trackers)?
+            };
+            Ok(Some(Resolved {
+                torrent_bytes,
+                seen_peers: listed.seen_peers,
+            }))
+        })
+        .await
+    }
+
+    /// Fetches a torrent's metadata (from peers, for a magnet link) without adding it.
+    async fn list_only(
+        &self,
+        source: AddTorrent<'static>,
+        peers: Vec<SocketAddr>,
+    ) -> Result<AddTorrentResponse, EngineError> {
         let list_only = AddTorrentOptions {
             list_only: true,
             initial_peers: Some(peers),
             ..AddTorrentOptions::default()
         };
-        let listed = tokio::time::timeout(
-            self.inner.config.metadata_timeout,
-            self.inner.session.add_torrent(first, Some(list_only)),
-        )
-        .await
-        .map_err(|_| EngineError::MetadataTimeout)?
-        .map_err(engine_err)?;
-        let AddTorrentResponse::ListOnly(listed) = listed else {
-            return Ok(None);
-        };
-        validate_metadata(&listed.info)?;
-        Ok(Some(Resolved {
-            torrent_bytes: listed.torrent_bytes,
-            seen_peers: listed.seen_peers,
-        }))
+        // `.torrent` files are checked before they get here (`session_source`), but metadata
+        // from peers is not: librqbit's checks panic on some invalid lengths.
+        let fetch = AssertUnwindSafe(self.inner.session.add_torrent(source, Some(list_only)))
+            .catch_unwind();
+        let listed = tokio::time::timeout(self.inner.config.metadata_timeout, fetch)
+            .await
+            .map_err(|_| EngineError::MetadataTimeout)?
+            .map_err(|_| EngineError::InvalidTorrent("the torrent's lengths are invalid".into()))?
+            .map_err(engine_err)?;
+        if let AddTorrentResponse::ListOnly(listed) = &listed {
+            torrentplayer_swarm::check_lengths(&listed.torrent_bytes)
+                .map_err(|e| EngineError::InvalidTorrent(e.to_string()))?;
+        }
+        Ok(listed)
     }
 
     fn handle(&self, id: TorrentId) -> Result<Arc<ManagedTorrent>, EngineError> {
@@ -645,24 +793,27 @@ impl Engine {
     ///
     /// Returns an error if the torrent or file is unknown or librqbit fails.
     pub async fn select_file(&self, id: TorrentId, file: usize) -> Result<(), EngineError> {
-        let handle = self.handle(id)?;
-        if !self.info(id)?.files.iter().any(|f| f.index == file) {
-            return Err(EngineError::UnknownFile);
-        }
-        handle.wait_until_initialized().await.map_err(engine_err)?;
-        let mut selected: HashSet<usize> = handle
-            .only_files()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        if selected.insert(file) {
-            self.inner
-                .session
-                .update_only_files(&handle, &selected)
-                .await
-                .map_err(engine_err)?;
-        }
-        Ok(())
+        self.operation(async {
+            let handle = self.handle(id)?;
+            if !self.info(id)?.files.iter().any(|f| f.index == file) {
+                return Err(EngineError::UnknownFile);
+            }
+            handle.wait_until_initialized().await.map_err(engine_err)?;
+            let mut selected: HashSet<usize> = handle
+                .only_files()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            if selected.insert(file) {
+                self.inner
+                    .session
+                    .update_only_files(&handle, &selected)
+                    .await
+                    .map_err(engine_err)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Removes a file from the set being downloaded. Others are left alone; what is downloaded
@@ -672,21 +823,24 @@ impl Engine {
     ///
     /// Returns an error if the torrent is unknown or librqbit fails.
     pub async fn deselect_file(&self, id: TorrentId, file: usize) -> Result<(), EngineError> {
-        let handle = self.handle(id)?;
-        handle.wait_until_initialized().await.map_err(engine_err)?;
-        let mut selected: HashSet<usize> = handle
-            .only_files()
-            .unwrap_or_default()
-            .into_iter()
-            .collect();
-        if selected.remove(&file) {
-            self.inner
-                .session
-                .update_only_files(&handle, &selected)
-                .await
-                .map_err(engine_err)?;
-        }
-        Ok(())
+        self.operation(async {
+            let handle = self.handle(id)?;
+            handle.wait_until_initialized().await.map_err(engine_err)?;
+            let mut selected: HashSet<usize> = handle
+                .only_files()
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            if selected.remove(&file) {
+                self.inner
+                    .session
+                    .update_only_files(&handle, &selected)
+                    .await
+                    .map_err(engine_err)?;
+            }
+            Ok(())
+        })
+        .await
     }
 
     /// Changes the session's rate limits (bytes per second; `None` removes one), shared by
@@ -702,16 +856,19 @@ impl Engine {
     ///
     /// Returns an error if the torrent is unknown or librqbit fails.
     pub async fn set_paused(&self, id: TorrentId, paused: bool) -> Result<(), EngineError> {
-        let handle = self.handle(id)?;
-        if handle.is_paused() == paused {
-            return Ok(());
-        }
-        if paused {
-            self.inner.session.pause(&handle).await
-        } else {
-            self.inner.session.unpause(&handle).await
-        }
-        .map_err(engine_err)
+        self.operation(async {
+            let handle = self.handle(id)?;
+            if handle.is_paused() == paused {
+                return Ok(());
+            }
+            if paused {
+                self.inner.session.pause(&handle).await
+            } else {
+                self.inner.session.unpause(&handle).await
+            }
+            .map_err(engine_err)
+        })
+        .await
     }
 
     /// Opens a seekable stream over one file. While open, the engine prioritizes the pieces
@@ -727,7 +884,8 @@ impl Engine {
     ) -> Result<impl MediaReader + use<>, EngineError> {
         // librqbit's `FileStream` is not nameable outside the crate, hence `impl Trait`.
         let handle = self.handle(id)?;
-        handle.stream(file).await.map_err(engine_err)
+        self.operation(async { handle.stream(file).await.map_err(engine_err) })
+            .await
     }
 
     /// Which pieces of a torrent are downloaded and verified, indexed by piece.
@@ -784,16 +942,29 @@ impl Engine {
     ///
     /// Returns an error if the torrent is unknown or librqbit fails.
     pub async fn remove(&self, id: TorrentId, delete_files: bool) -> Result<(), EngineError> {
-        self.inner
-            .session
-            .delete(TorrentIdOrHash::Id(id), delete_files)
-            .await
-            .map_err(engine_err)
+        self.operation(async {
+            self.inner
+                .session
+                .delete(TorrentIdOrHash::Id(id), delete_files)
+                .await
+                .map_err(engine_err)
+        })
+        .await
     }
 
-    /// Stops every torrent and closes connections.
+    /// Stops every torrent and closes connections. Operations in flight (such as fetching a
+    /// magnet link's metadata from peers) end first, with an error; this returns once they
+    /// have, so no connection of theirs outlives it. Later operations fail at once.
     pub async fn shutdown(&self) {
-        self.inner.session.stop().await;
+        self.inner.stopping.cancel();
+        let _stopped = self.inner.operations.write().await;
+        if self.has_torrents() {
+            self.inner.session.stop().await;
+        } else {
+            // `Session::stop` pauses every torrent, then waits a second for their tasks; with
+            // none, cancelling the session (its listener, DHT, and trackers) is all it does.
+            self.inner.session.cancellation_token().cancel();
+        }
     }
 
     /// A [`MediaSource`] that serves one file of a torrent over the stream server.
@@ -816,6 +987,48 @@ impl Engine {
             content_type: mime_type(&entry.path),
         })
     }
+}
+
+/// The `http`, `https`, and `udp` trackers (`tr`) of a magnet link, without duplicates.
+fn magnet_trackers(link: &str) -> Vec<url::Url> {
+    let Ok(url) = url::Url::parse(link) else {
+        return Vec::new();
+    };
+    let mut trackers: Vec<url::Url> = Vec::new();
+    for (_, value) in url.query_pairs().filter(|(key, _)| key == "tr") {
+        if let Ok(tracker) = url::Url::parse(&value)
+            && matches!(tracker.scheme(), "http" | "https" | "udp")
+            && !trackers.contains(&tracker)
+        {
+            trackers.push(tracker);
+        }
+    }
+    trackers
+}
+
+/// `torrent` (a `.torrent` file) with `trackers` as its tracker list instead of its own. The
+/// info dictionary, and so the info hash, is kept byte for byte.
+fn with_trackers(torrent: &[u8], trackers: &[url::Url]) -> Result<bytes::Bytes, EngineError> {
+    let parsed = librqbit::torrent_from_bytes(torrent)
+        .map_err(|e| EngineError::InvalidTorrent(format!("{e:#}")))?;
+    let mut out = b"d13:announce-listl".to_vec();
+    for tracker in trackers {
+        // One tier per tracker, all tried, as for a magnet link's.
+        let tracker = tracker.as_str();
+        out.extend_from_slice(format!("l{}:{tracker}e", tracker.len()).as_bytes());
+    }
+    out.extend_from_slice(b"e4:info");
+    out.extend_from_slice(parsed.info.raw_bytes.as_ref());
+    out.push(b'e');
+    Ok(out.into())
+}
+
+/// A `.torrent` file whose lengths librqbit can be given (see
+/// [`torrentplayer_swarm::check_lengths`]): its own checks panic on some invalid ones.
+fn checked_torrent(bytes: bytes::Bytes) -> Result<bytes::Bytes, EngineError> {
+    torrentplayer_swarm::check_lengths(&bytes)
+        .map_err(|e| EngineError::InvalidTorrent(e.to_string()))?;
+    Ok(bytes)
 }
 
 /// Refuses torrents whose names or file paths could escape the download directory.
@@ -884,5 +1097,31 @@ mod tests {
         assert!(socks5.contains("UDP ASSOCIATE"));
         assert!(!socks5.contains("WireGuard"));
         assert!(!PROTECTED_TORRENT_FILE.contains("  "), "no stray spaces");
+    }
+
+    #[test]
+    fn handed_over_metadata_lists_the_magnet_links_trackers() {
+        let link = "magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c\
+                    &tr=http%3A%2F%2Ftracker.example%2Fannounce&tr=udp%3A%2F%2Fu.example%3A1337\
+                    &tr=wss%3A%2F%2Fw.example&tr=http%3A%2F%2Ftracker.example%2Fannounce";
+        let trackers = magnet_trackers(link);
+        let names: Vec<&str> = trackers.iter().map(url::Url::as_str).collect();
+        assert_eq!(
+            names,
+            ["http://tracker.example/announce", "udp://u.example:1337"]
+        );
+
+        let mut torrent =
+            b"d8:announce14:http://old/ann4:infod6:lengthi4e4:name5:a.mp412:piece lengthi16384e\
+              6:pieces20:"
+                .to_vec();
+        torrent.extend_from_slice(&[7u8; 20]);
+        torrent.extend_from_slice(b"ee");
+        let before = torrentplayer_swarm::Metainfo::from_bytes(&torrent).unwrap();
+        let after =
+            torrentplayer_swarm::Metainfo::from_bytes(&with_trackers(&torrent, &trackers).unwrap())
+                .unwrap();
+        assert_eq!(after.info_hash, before.info_hash);
+        assert_eq!(after.trackers, trackers);
     }
 }

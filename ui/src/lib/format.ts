@@ -41,21 +41,58 @@ export function formatMillis(ms: number | null | undefined): string {
   return ms >= 10_000 ? `${(ms / 1000).toFixed(1)} s` : `${Math.round(ms).toString()} ms`;
 }
 
-/** The status line shown while waiting for video. */
+/** A playback position as a clock: `4:05`, `1:02:09`. */
+export function formatClock(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const rest = (total % 60).toString().padStart(2, '0');
+  return hours > 0
+    ? `${String(hours)}:${minutes.toString().padStart(2, '0')}:${rest}`
+    : `${String(minutes)}:${rest}`;
+}
+
+/** Waiting this long with no peer connected means nobody is sharing the file now. */
+export const NO_SHARERS_MS = 30_000;
+
+export const NO_SHARERS =
+  'No one is sharing this file right now. Try another result, or keep waiting.';
+
+/**
+ * The pill shown while waiting for video: what the screen shows (`text`, with live figures)
+ * and what a screen reader announces (`spoken`, which changes only with the state).
+ */
 export function loadingMessage(state: {
   firstFrameSeen: boolean;
   stalled: boolean;
   hasData: boolean;
-  bufferedSecs: number | null;
-}): string | null {
+  peersSeen: number;
+  peersLive: number;
+  downloadBps: number;
+  /** How long it has waited with no peer connected. */
+  noPeersMs: number;
+}): { text: string; spoken: string } | null {
+  if (state.firstFrameSeen && !state.stalled) {
+    return null;
+  }
+  if (state.peersLive === 0 && state.noPeersMs >= NO_SHARERS_MS) {
+    return { text: NO_SHARERS, spoken: NO_SHARERS };
+  }
   if (!state.firstFrameSeen && !state.hasData) {
-    return 'Finding peers…';
+    return {
+      text:
+        state.peersSeen > 0
+          ? `Finding peers… (${state.peersSeen.toString()} found)`
+          : 'Finding peers…',
+      spoken: 'Finding peers…',
+    };
   }
-  if (!state.firstFrameSeen || state.stalled) {
-    const secs = state.bufferedSecs;
-    return secs !== null && Number.isFinite(secs) && secs >= 1
-      ? `Buffering… ${Math.floor(secs).toString()}s ahead`
-      : 'Buffering…';
+  if (state.peersLive === 0) {
+    return { text: 'Buffering…', spoken: 'Buffering…' };
   }
-  return null;
+  const peers = `${state.peersLive.toString()} ${state.peersLive === 1 ? 'peer' : 'peers'}`;
+  return {
+    text: `Buffering · ↓ ${formatRate(state.downloadBps)} from ${peers}`,
+    spoken: 'Buffering…',
+  };
 }

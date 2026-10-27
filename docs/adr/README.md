@@ -20,8 +20,8 @@ that changes gets a new ADR that supersedes the old one.
 | [0003](0003-frontend-framework.md)                 | Frontend framework                             | Accepted                                      |
 | [0004](0004-ipc-type-generation.md)                | Generating IPC types with ts-rs                | Accepted                                      |
 | [0005](0005-prioritization-with-anchor-streams.md) | Prioritization on librqbit with anchor streams | Accepted for librqbit                         |
-| [0006](0006-streaming-engine.md)                   | A streaming-first BitTorrent engine            | Proposed (M1 built)                           |
-| [0007](0007-dolby-and-dts-audio.md)                | Dolby and DTS audio in the built-in player     | Proposed                                      |
+| [0006](0006-streaming-engine.md)                   | A streaming-first BitTorrent engine            | Proposed (default engine since 0.2.0)         |
+| [0007](0007-dolby-and-dts-audio.md)                | Dolby and DTS audio in the built-in player     | Accepted (fallback shipped)                   |
 | [0008](0008-application-wireguard-tunnel.md)       | Application-local WireGuard tunnel             | Proposed (implemented; amended by 0009)       |
 | [0009](0009-remove-vpn-adapter-mode.md)            | Remove the VPN adapter mode                    | Proposed (implemented)                        |
 

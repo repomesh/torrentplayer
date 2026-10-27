@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
+import type { QueueItem } from './bindings/QueueItem';
 import {
-  AUTOPLAY_COUNTDOWN_SECS,
-  Countdown,
   PRELOAD_NEXT_LEAD_SECS,
+  endCard,
+  endCardTakesFocus,
+  preloadTarget,
   shouldPreloadNext,
 } from './upnext';
 
@@ -33,40 +35,41 @@ describe('shouldPreloadNext', () => {
   });
 });
 
-describe('Countdown', () => {
-  afterEach(() => {
-    vi.useRealTimers();
+describe('preloadTarget', () => {
+  const item = (id: string, paused = false): QueueItem => ({
+    id,
+    source: `https://example.org/${id}.torrent`,
+    infoHash: null,
+    fileIndex: null,
+    title: id,
+    torrentName: null,
+    sizeBytes: null,
+    paused,
+    played: false,
   });
 
-  it('ticks down once a second and then fires', () => {
-    vi.useFakeTimers();
-    const ticks: number[] = [];
-    const done = vi.fn();
-    const countdown = new Countdown((s) => ticks.push(s), done);
-    countdown.start(3);
-    expect(countdown.running).toBe(true);
-    vi.advanceTimersByTime(2000);
-    expect(ticks).toEqual([3, 2, 1]);
-    expect(done).not.toHaveBeenCalled();
-    vi.advanceTimersByTime(1000);
-    expect(done).toHaveBeenCalledOnce();
-    expect(countdown.running).toBe(false);
-    expect(countdown.secondsLeft).toBe(0);
+  it('preloads the next item, but not one the user paused', () => {
+    const queue = { items: [item('a'), item('b'), item('c')], current: 'a' };
+    expect(preloadTarget(queue)?.id).toBe('b');
+    const paused = { ...queue, items: [item('a'), item('b', true), item('c')] };
+    expect(preloadTarget(paused)).toBeNull();
+    expect(preloadTarget({ ...queue, current: 'c' })).toBeNull();
+  });
+});
+
+describe('endCard', () => {
+  it('offers the next video when there is one, else a replay', () => {
+    expect(endCard('Lecture 3')).toEqual({
+      heading: 'Finished',
+      next: 'Next: Lecture 3',
+      primary: 'next',
+    });
+    expect(endCard(null)).toEqual({ heading: 'Finished', next: null, primary: 'replay' });
   });
 
-  it('can be cancelled or restarted', () => {
-    vi.useFakeTimers();
-    const done = vi.fn();
-    const countdown = new Countdown(() => undefined, done);
-    countdown.start();
-    expect(countdown.secondsLeft).toBe(AUTOPLAY_COUNTDOWN_SECS);
-    vi.advanceTimersByTime(2000);
-    countdown.cancel();
-    vi.advanceTimersByTime(10_000);
-    expect(done).not.toHaveBeenCalled();
-    countdown.start(2);
-    countdown.start(2);
-    vi.advanceTimersByTime(2000);
-    expect(done).toHaveBeenCalledOnce();
+  it('takes focus only from the player', () => {
+    expect(endCardTakesFocus(true, true)).toBe(true);
+    expect(endCardTakesFocus(false, false)).toBe(true);
+    expect(endCardTakesFocus(false, true)).toBe(false);
   });
 });

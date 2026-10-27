@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 /// Current schema version. Bump it and add a step to [`crate::migrate`] when the shape changes.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// Slowest and fastest playback speeds.
 pub const SPEED_RANGE: (f64, f64) = (0.5, 3.0);
@@ -21,10 +21,6 @@ pub const MAX_RATE_KIB: u32 = 1024 * 1024;
 pub const PEER_LIMIT_RANGE: (u32, u32) = (5, 500);
 /// Most queued videos downloading at once that can be chosen; 0 means no limit.
 pub const MAX_DOWNLOADS: u32 = 100;
-/// Seed ratio target; 0 means "keep seeding while TorrentPlayer runs".
-pub const SEED_RATIO_RANGE: (f64, f64) = (0.0, 100.0);
-/// Time to keep seeding after playback, in minutes; 0 means no limit, otherwise up to one year.
-pub const SEED_TIME_RANGE_MINUTES: (u32, u32) = (0, 525_600);
 /// Cache size limit in GB.
 pub const CACHE_LIMIT_RANGE_GB: (u32, u32) = (1, 100_000);
 /// Automatic clean-up age in days.
@@ -83,17 +79,10 @@ impl Default for Settings {
 pub struct PlaybackSettings {
     /// Speed new lectures start at (0.5–3).
     pub default_speed: f64,
-    /// Play the next lecture when one ends.
-    pub autoplay_next: bool,
     /// Resume lectures where they were left off.
     pub resume_position: bool,
     /// Hardware video decoding (used by the libmpv player).
     pub hardware_decoding: HardwareDecoding,
-    /// Move queued videos that are ready to play (downloaded, or their start and end are)
-    /// ahead of those that are not.
-    pub optimize_queue: bool,
-    /// When optimizing the queue, keep the order of files within one torrent (lectures).
-    pub keep_course_order: bool,
     /// Turn on subtitles in the system language when a video has them.
     pub subtitles_by_default: bool,
     /// Show a frame above the seek bar where the pointer is, for parts already downloaded.
@@ -105,11 +94,8 @@ impl Default for PlaybackSettings {
     fn default() -> Self {
         Self {
             default_speed: 1.0,
-            autoplay_next: true,
             resume_position: true,
             hardware_decoding: HardwareDecoding::Auto,
-            optimize_queue: false,
-            keep_course_order: true,
             subtitles_by_default: false,
             seek_thumbnails: true,
         }
@@ -141,7 +127,7 @@ pub struct StorageSettings {
     pub cleanup_after_days: Option<u32>,
 }
 
-/// Bandwidth limits and seeding behavior.
+/// Bandwidth limits and background downloads.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase", default)]
 #[ts(export)]
@@ -150,12 +136,6 @@ pub struct BandwidthSettings {
     pub download_limit_kib: u32,
     /// Upload limit in KiB/s; 0 means unlimited.
     pub upload_limit_kib: u32,
-    /// Keep seeding lectures after watching them.
-    pub seed_after_watching: bool,
-    /// Stop seeding a torrent at this upload/download ratio; 0 keeps seeding while TorrentPlayer runs.
-    pub seed_ratio_target: f64,
-    /// Stop seeding this many minutes after watching; 0 has no time limit.
-    pub seed_time_limit_minutes: u32,
     /// Maximum connected peers per torrent.
     pub peer_limit: u32,
     /// Most queued videos downloading in the background at once; 0 means no limit.
@@ -167,9 +147,6 @@ impl Default for BandwidthSettings {
         Self {
             download_limit_kib: 0,
             upload_limit_kib: 0,
-            seed_after_watching: true,
-            seed_ratio_target: 2.0,
-            seed_time_limit_minutes: 0,
             peer_limit: 40,
             max_downloads: 0,
         }
@@ -255,10 +232,24 @@ pub struct NetworkSettings {
     /// The user dismissed the note that recommends a VPN in Direct mode (shown in Settings →
     /// Network, the status bar, and when seeding starts).
     pub vpn_hint_dismissed: bool,
+    /// Why traffic is held, if it is: set when loading could not keep the connection the user
+    /// chose (see [`NetworkHold`]). While this is set and the mode is Direct, TorrentPlayer holds
+    /// all traffic and shows a notice; confirming the notice clears it.
+    pub hold: Option<NetworkHold>,
+}
+
+/// Why traffic is held until the user confirms the connection mode (`network.hold`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export)]
+pub enum NetworkHold {
     /// The settings used the VPN adapter mode, which was removed in 0.3.0, and were moved to
-    /// Direct (see [`crate::migrate`]). While this is set and the mode is Direct, TorrentPlayer
-    /// holds all traffic and shows a notice; dismissing the notice clears it.
-    pub vpn_adapter_mode_removed: bool,
+    /// Direct (see [`crate::migrate`]).
+    VpnAdapterModeRemoved,
+    /// `settings.json` existed but could not be read, or its connection mode (or the whole
+    /// network section) was invalid, so the mode the user chose is unknown. See
+    /// [`crate::SettingsStore::load`].
+    SettingsUnreadable,
 }
 
 impl Default for NetworkSettings {
@@ -272,7 +263,7 @@ impl Default for NetworkSettings {
             show_public_ip: true,
             incoming_peers: IncomingPeersSettings::default(),
             vpn_hint_dismissed: false,
-            vpn_adapter_mode_removed: false,
+            hold: None,
         }
     }
 }
@@ -537,14 +528,6 @@ impl Settings {
                     self.bandwidth.upload_limit_kib = 0;
                     true
                 }
-                "bandwidth.seedRatioTarget" => {
-                    self.bandwidth.seed_ratio_target = defaults.bandwidth.seed_ratio_target;
-                    true
-                }
-                "bandwidth.seedTimeLimitMinutes" => {
-                    self.bandwidth.seed_time_limit_minutes = 0;
-                    true
-                }
                 "bandwidth.peerLimit" => {
                     self.bandwidth.peer_limit = defaults.bandwidth.peer_limit;
                     true
@@ -682,20 +665,6 @@ impl BandwidthSettings {
                 errors.push(FieldError::new(field, "The largest limit is 1 GiB/s."));
             }
         }
-        if !in_range(self.seed_ratio_target, SEED_RATIO_RANGE) {
-            errors.push(FieldError::new(
-                "bandwidth.seedRatioTarget",
-                "Choose a ratio between 0 and 100 (0 keeps seeding).",
-            ));
-        }
-        if !(SEED_TIME_RANGE_MINUTES.0..=SEED_TIME_RANGE_MINUTES.1)
-            .contains(&self.seed_time_limit_minutes)
-        {
-            errors.push(FieldError::new(
-                "bandwidth.seedTimeLimitMinutes",
-                "Choose up to 525600 minutes (one year), or 0 for no time limit.",
-            ));
-        }
         if !(PEER_LIMIT_RANGE.0..=PEER_LIMIT_RANGE.1).contains(&self.peer_limit) {
             errors.push(FieldError::new(
                 "bandwidth.peerLimit",
@@ -796,13 +765,21 @@ fn check_download_dir(dir: &str) -> Result<(), String> {
     check_folder(dir)
 }
 
-// Checks a user-chosen folder: a full, plain path below a drive or file system root.
+// Checks a user-chosen folder: a full, plain path below a drive or file system root, on this
+// computer. Network (UNC) and device paths are refused on every platform: merely checking such
+// a folder makes Windows connect to the host and offer the user's NTLM credentials, and a
+// program found there (FFmpeg) would run from another machine.
 fn check_folder(dir: &str) -> Result<(), String> {
     if dir.is_empty() || dir.len() > MAX_TEXT || dir.chars().any(char::is_control) {
         return Err("Enter a folder path.".to_owned());
     }
-    if dir.starts_with(r"\\?\") || dir.starts_with(r"\\.\") {
+    if dir.starts_with(r"\\?\") || dir.starts_with(r"\\.\") || dir.starts_with("//./") {
         return Err("Device paths are not supported; choose a normal folder.".to_owned());
+    }
+    if is_network_path(dir) {
+        return Err(
+            "Network folders are not supported; choose a folder on this computer.".to_owned(),
+        );
     }
     let path = Path::new(dir);
     if !path.is_absolute() {
@@ -817,6 +794,14 @@ fn check_folder(dir: &str) -> Result<(), String> {
             Component::ParentDir | Component::CurDir => {
                 return Err("The path cannot contain \".\" or \"..\".".to_owned());
             }
+            // Only a drive letter: UNC and verbatim prefixes are refused above, this catches
+            // any other form.
+            Component::Prefix(prefix) if !matches!(prefix.kind(), std::path::Prefix::Disk(_)) => {
+                return Err(
+                    "Network folders are not supported; choose a folder on this computer."
+                        .to_owned(),
+                );
+            }
             Component::RootDir | Component::Prefix(_) => {}
         }
     }
@@ -826,21 +811,34 @@ fn check_folder(dir: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `path` names a folder on another computer or a device: a UNC path (`\\host\share`,
+/// `//host/share`, `\\?\UNC\…`) in either slash style.
+#[must_use]
+pub fn is_network_path(path: &str) -> bool {
+    let mut chars = path.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('\\' | '/'), Some('\\' | '/'))
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn queue_settings_default_for_older_files() {
-        // A playback section saved before the queue options existed.
-        let old: PlaybackSettings =
-            serde_json::from_str(r#"{"defaultSpeed": 1.5, "autoplayNext": false}"#).unwrap();
-        assert!(!old.optimize_queue, "off unless chosen");
-        assert!(old.keep_course_order);
+    fn removed_queue_settings_are_ignored() {
+        // A playback section with the queue settings removed in 0.3.1.
+        let old: PlaybackSettings = serde_json::from_str(
+            r#"{"defaultSpeed": 1.5, "autoplayNext": false, "optimizeQueue": true,
+                "keepCourseOrder": false}"#,
+        )
+        .unwrap();
         assert!((old.default_speed - 1.5).abs() < f64::EPSILON);
-        let json = serde_json::to_value(PlaybackSettings::default()).unwrap();
-        assert_eq!(json["optimizeQueue"], false);
-        assert_eq!(json["keepCourseOrder"], true);
+        let json = serde_json::to_value(&old).unwrap();
+        for removed in ["autoplayNext", "optimizeQueue", "keepCourseOrder"] {
+            assert!(json.get(removed).is_none(), "{removed}");
+        }
     }
 
     #[test]
@@ -898,8 +896,6 @@ mod tests {
         let mut s = Settings::default();
         s.playback.default_speed = 9.0;
         s.bandwidth.peer_limit = 1;
-        s.bandwidth.seed_ratio_target = f64::NAN;
-        s.bandwidth.seed_time_limit_minutes = 525_601;
         s.search.results_per_search = 5;
         s.network.socks5.port = 0;
         let fields: Vec<String> = s
@@ -912,8 +908,6 @@ mod tests {
             fields,
             [
                 "playback.defaultSpeed",
-                "bandwidth.seedRatioTarget",
-                "bandwidth.seedTimeLimitMinutes",
                 "bandwidth.peerLimit",
                 "search.resultsPerSearch",
                 "network.socks5.port"
@@ -954,6 +948,43 @@ mod tests {
         assert!(check_download_dir(parent).is_err());
         assert!(check_download_dir(r"\\.\PhysicalDrive0").is_err());
         assert!(check_download_dir("").is_err());
+    }
+
+    #[test]
+    fn network_and_device_folders_are_refused() {
+        for bad in [
+            r"\\attacker\share",
+            r"\\attacker\share\ffmpeg",
+            "//attacker/share/ffmpeg",
+            r"\/attacker\share",
+            r"\\?\UNC\attacker\share\ffmpeg",
+            r"\\?\C:\ffmpeg",
+            r"\\.\C:\ffmpeg",
+        ] {
+            assert!(is_network_path(bad), "{bad}");
+            assert!(check_folder(bad).is_err(), "{bad}");
+            let mut s = Settings::default();
+            s.advanced.ffmpeg_dir = Some(bad.into());
+            s.storage.download_dir = Some(bad.into());
+            let fields: Vec<_> = s
+                .validate()
+                .unwrap_err()
+                .into_iter()
+                .map(|e| e.field)
+                .collect();
+            assert_eq!(
+                fields,
+                ["storage.downloadDir", "advanced.ffmpegDir"],
+                "{bad}"
+            );
+            // A file from disk with such a path loads with the setting reset.
+            s.sanitize();
+            assert_eq!(
+                (s.storage.download_dir, s.advanced.ffmpeg_dir),
+                (None, None)
+            );
+        }
+        assert!(!is_network_path(r"C:\ffmpeg") && !is_network_path("/opt/ffmpeg"));
     }
 
     #[test]
@@ -1051,7 +1082,6 @@ mod tests {
         let json = serde_json::to_value(Settings::default()).unwrap();
         assert_eq!(json["network"]["mode"], "direct");
         assert_eq!(json["bandwidth"]["peerLimit"], 40);
-        assert_eq!(json["bandwidth"]["seedTimeLimitMinutes"], 0);
         assert_eq!(json["bandwidth"]["maxDownloads"], 0, "no limit by default");
         assert_eq!(json["advanced"]["logLevel"], "info");
         assert_eq!(

@@ -136,11 +136,17 @@ pub(crate) fn plan(
     mode: CleanupMode,
     now: SystemTime,
 ) -> Plan {
-    let usage = measure(root);
     let protected: HashSet<String> = protected
         .iter()
         .map(|hash| hash.to_ascii_lowercase())
         .collect();
+    // One walk measures the whole cache (as `measure` does, with one budget) and each
+    // candidate download (with a budget of its own).
+    let mut usage = Usage {
+        complete: true,
+        ..Usage::default()
+    };
+    let mut budget = MAX_WALK_ENTRIES;
     let mut by_hash: HashMap<String, (u64, Option<u64>)> = HashMap::new();
     for name in CACHE_DIRS {
         let Some(cache_root) = safe_cache_root(root, name) else {
@@ -150,19 +156,38 @@ pub(crate) fn plan(
             continue;
         };
         for entry in entries.flatten() {
-            let Some(hash) = entry.file_name().to_str().map(str::to_ascii_lowercase) else {
+            let kind = entry.file_type().ok();
+            tally(
+                &mut usage,
+                &mut budget,
+                kind.and_then(|kind| file_len(&entry, kind)),
+            );
+            if !kind.is_some_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let hash = entry
+                .file_name()
+                .to_str()
+                .map(str::to_ascii_lowercase)
+                .filter(|hash| valid_hash(hash) && !protected.contains(hash));
+            let path = entry.path();
+            let mut bytes = 0_u64;
+            let mut own_budget = if hash.is_some() { MAX_WALK_ENTRIES } else { 0 };
+            if usage.complete || own_budget > 0 {
+                walk(&path, |file| {
+                    tally(&mut usage, &mut budget, file);
+                    if own_budget > 0 {
+                        own_budget -= 1;
+                        bytes = bytes.saturating_add(file.unwrap_or(0));
+                    }
+                    usage.complete || own_budget > 0
+                });
+            }
+            let Some(hash) = hash else {
                 continue;
             };
-            if !valid_hash(&hash) || protected.contains(&hash) {
-                continue;
-            }
-            let path = entry.path();
-            if !fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_dir()) {
-                continue;
-            }
-            let entry_usage = measure_entry(&path);
             let candidate = by_hash.entry(hash).or_default();
-            candidate.0 = candidate.0.saturating_add(entry_usage.bytes);
+            candidate.0 = candidate.0.saturating_add(bytes);
             if let Some(finished_at) = finished_timestamp(&path) {
                 candidate.1 = Some(candidate.1.unwrap_or(0).max(finished_at));
             }
@@ -263,39 +288,53 @@ fn epoch_seconds(time: SystemTime) -> u64 {
         .as_secs()
 }
 
-fn measure_entry(path: &Path) -> Usage {
-    let mut budget = MAX_WALK_ENTRIES;
-    let mut usage = Usage {
-        complete: true,
-        ..Usage::default()
-    };
-    measure_tree(path, &mut budget, &mut usage);
-    usage
+fn measure_tree(path: &Path, budget: &mut usize, usage: &mut Usage) {
+    if !fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_dir()) {
+        return;
+    }
+    walk(path, |file| tally(usage, budget, file));
 }
 
-fn measure_tree(path: &Path, budget: &mut usize, usage: &mut Usage) {
-    let mut stack = vec![path.to_path_buf()];
+/// Counts one walked entry (`file` is a regular file's size) against `budget`, and marks
+/// `usage` incomplete once the budget runs out. Returns whether `usage` is still complete.
+fn tally(usage: &mut Usage, budget: &mut usize, file: Option<u64>) -> bool {
+    if !usage.complete {
+        return false;
+    }
+    if *budget == 0 {
+        usage.complete = false;
+        return false;
+    }
+    *budget -= 1;
+    if let Some(len) = file {
+        usage.bytes = usage.bytes.saturating_add(len);
+        usage.files = usage.files.saturating_add(1);
+    }
+    true
+}
+
+/// The size of a regular file, from its directory entry (no symbolic link is followed).
+fn file_len(entry: &fs::DirEntry, kind: fs::FileType) -> Option<u64> {
+    kind.is_file()
+        .then(|| entry.metadata().ok().map(|meta| meta.len()))
+        .flatten()
+}
+
+/// Visits every entry below the directory `dir` without following symbolic links, passing a
+/// regular file's size or `None` for anything else, until `visit` returns `false`.
+fn walk(dir: &Path, mut visit: impl FnMut(Option<u64>) -> bool) {
+    let mut stack = vec![dir.to_path_buf()];
     while let Some(dir) = stack.pop() {
-        if !fs::symlink_metadata(&dir).is_ok_and(|meta| meta.file_type().is_dir()) {
-            continue;
-        }
         let Ok(entries) = fs::read_dir(dir) else {
             continue;
         };
         for entry in entries.flatten() {
-            if *budget == 0 {
-                usage.complete = false;
+            let kind = entry.file_type().ok();
+            if !visit(kind.and_then(|kind| file_len(&entry, kind))) {
                 return;
             }
-            *budget -= 1;
-            let Ok(meta) = fs::symlink_metadata(entry.path()) else {
-                continue;
-            };
-            if meta.file_type().is_dir() {
+            if kind.is_some_and(|kind| kind.is_dir()) {
                 stack.push(entry.path());
-            } else if meta.file_type().is_file() {
-                usage.bytes = usage.bytes.saturating_add(meta.len());
-                usage.files = usage.files.saturating_add(1);
             }
         }
     }
@@ -450,8 +489,8 @@ mod tests {
             torrent_name: None,
             size_bytes: None,
             paused: false,
-            skipped: false,
             played: false,
+            added_at: None,
         };
         let queue = Queue {
             items: vec![
@@ -477,6 +516,24 @@ mod tests {
     }
 
     #[test]
+    fn the_thumbnail_engines_folder_is_measured_but_never_a_candidate() {
+        let root = tempfile::tempdir().unwrap();
+        // The thumbnail engine keeps `<hash>` caches in `torrentplayer-swarm/thumbnails`.
+        let thumbnails = root.path().join("torrentplayer-swarm/thumbnails");
+        entry(&thumbnails, ".", OLD, 10, 1);
+        let plan = plan(
+            root.path(),
+            &HashSet::new(),
+            CleanupMode::AllFinished,
+            UNIX_EPOCH,
+        );
+        assert!(plan.candidates.is_empty());
+        assert_eq!(plan.usage.bytes, 11);
+        remove(root.path(), OLD).unwrap();
+        assert!(thumbnails.join(OLD).exists());
+    }
+
+    #[test]
     fn removal_is_limited_to_valid_hash_directories() {
         let root = tempfile::tempdir().unwrap();
         entry(root.path(), "torrentplayer-swarm", OLD, 10, 1);
@@ -486,6 +543,30 @@ mod tests {
         assert!(!root.path().join("torrentplayer-swarm").join(OLD).exists());
         assert!(root.path().join("mine/keep").exists());
         assert!(remove(root.path(), "../mine").is_err());
+    }
+
+    #[test]
+    fn a_plan_measures_the_same_as_measure_in_one_walk() {
+        let root = tempfile::tempdir().unwrap();
+        entry(root.path(), "torrentplayer-swarm", OLD, 100, 10);
+        entry(root.path(), "librqbit", NEW, 50, 20);
+        let nested = root.path().join("librqbit").join(OLD).join("a").join("b");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("data"), [0_u8; 7]).unwrap();
+        fs::write(root.path().join("librqbit").join("loose"), [0_u8; 3]).unwrap();
+        let protected = HashSet::from([NEW.to_owned()]);
+        let plan = plan(
+            root.path(),
+            &protected,
+            CleanupMode::AllFinished,
+            UNIX_EPOCH,
+        );
+        assert_eq!(plan.usage, measure(root.path()));
+        assert!(plan.usage.complete);
+        assert_eq!(plan.usage.files, 6);
+        // OLD in both engines: one marker ("10") and 107 bytes of data.
+        assert_eq!(plan.candidates.len(), 1);
+        assert_eq!(plan.candidates[0].bytes, 100 + 7 + 2);
     }
 
     #[cfg(unix)]

@@ -3,6 +3,13 @@
 - **Status:** Accepted; the fallback shipped first (see [Implementation](#implementation))
 - **Date:** 2026-10-18, implemented 2026-10-20
 
+> **Update (2026-10-26, 0.3.1):** the fixed 60 s ahead / 30 s behind buffer described under
+> [Implementation](#implementation) overflowed the webview's media buffer at high bitrates. The
+> player now keeps what it buffers within 96 MiB, sized by the measured bitrate (10–60 s ahead,
+> 4–30 s behind), waits for playback when an append is refused, evicts distant segments after
+> backward seeks, and retries a failed start or read twice (`ui/src/lib/converted.ts`). FFmpeg
+> also runs with `-protocol_whitelist http,tcp` and a `-format_whitelist` of media containers.
+
 ## Context
 
 The built-in player is the webview's `<video>` element (WebView2, Chromium). It decodes AAC,
@@ -131,13 +138,14 @@ and makes these videos play now. libmpv stays the plan for Phase 2.
   it (local ones, by default) keep the notice.
 - **Codecs:** all four (AC-3, E-AC-3, `TrueHD`, DTS) are enabled; the maintainers accepted the
   patent question above on 2026-10-20. Audio is mixed down to stereo AAC at 192 kb/s.
-- **Command:** `-ss <pos> -copyts -i <url> -map 0:V:0? -map <track> -c:v copy -c:a aac -ac 2
--avoid_negative_ts make_non_negative -f mp4 -movflags
+- **Command:** `-ss <pos> -copyts -i <url> -map 0:V:0? -map <track> -map_chapters -1 -c:v copy
+-c:a aac -ac 2 -avoid_negative_ts make_non_negative -f mp4 -movflags
 frag_keyframe+empty_moov+default_base_moof+frag_discont -frag_duration 1000000 pipe:1`.
   `-copyts` and `frag_discont` keep the original timestamps, so each conversion lands at its
   place on the video's timeline in Media Source Extensions, with no offsets in the frontend. The
   track is FFmpeg's `0:i:<track_ID>` in MP4 and `0:a:<n>` in Matroska, where `<n>` counts
-  disabled tracks as FFmpeg does.
+  disabled tracks as FFmpeg does. `-map_chapters -1` keeps chapters out: the MP4 muxer would
+  write them as a text track, and a track other than video and AAC fails the conversion.
 - **Input:** FFmpeg reads from a loopback stream server of its own that serves only this file,
   with its own token, so the URL on its command line grants nothing else. Proxy variables are
   removed from its environment.

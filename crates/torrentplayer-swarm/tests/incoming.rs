@@ -71,13 +71,15 @@ fn fast_options() -> NetworkOptions {
         retry_interval: Duration::from_millis(100),
         check_timeout: Duration::from_secs(2),
         connect_timeout: Duration::from_secs(5),
+        // Sockets stay on loopback, where every test server is.
+        loopback_only: true,
         ..NetworkOptions::default()
     }
 }
 
 /// A port nothing listens on right now.
 fn free_port() -> u16 {
-    let probe = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     probe.local_addr().unwrap().port()
 }
 
@@ -93,6 +95,8 @@ async fn swarm(network: &Network, peer_limit: usize) -> (Swarm, tempfile::TempDi
     let dir = tempfile::tempdir().unwrap();
     let mut cfg = SwarmConfig::new(dir.path().to_path_buf());
     cfg.enable_trackers = true;
+    // The test tracker is on loopback.
+    cfg.allow_local_trackers = true;
     cfg.network = Some(network.clone());
     cfg.accept_incoming = true;
     cfg.peer_limit = peer_limit;
@@ -184,6 +188,109 @@ async fn seed(mut stream: TcpStream, data: Arc<Vec<u8>>) {
     }
 }
 
+/// Plays a seeder like [`seed`] that lacks the `held` pieces until `reveal` fires, then
+/// announces them (`have`) and serves them too.
+async fn seed_holding_back(
+    stream: TcpStream,
+    data: Arc<Vec<u8>>,
+    held: Vec<u32>,
+    reveal: tokio::sync::oneshot::Receiver<()>,
+) {
+    let pieces = LEN.div_ceil(PIECE as usize);
+    let mut bits = vec![0u8; pieces.div_ceil(8)];
+    for piece in (0..pieces).filter(|p| !held.contains(&u32::try_from(*p).unwrap())) {
+        bits[piece / 8] |= 0x80 >> (piece % 8);
+    }
+    let (mut reader, writer) = stream.into_split();
+    let writer = Arc::new(tokio::sync::Mutex::new(writer));
+    let mut hello = frame(5, &bits);
+    hello.extend(frame(1, &[]));
+    if writer.lock().await.write_all(&hello).await.is_err() {
+        return;
+    }
+    let announce = Arc::clone(&writer);
+    tokio::spawn(async move {
+        if reveal.await.is_ok() {
+            let haves: Vec<u8> = held
+                .iter()
+                .flat_map(|piece| frame(4, &piece.to_be_bytes()))
+                .collect();
+            let _ = announce.lock().await.write_all(&haves).await;
+        }
+    });
+    loop {
+        let mut len = [0u8; 4];
+        if reader.read_exact(&mut len).await.is_err() {
+            return;
+        }
+        let len = u32::from_be_bytes(len) as usize;
+        if len == 0 {
+            continue;
+        }
+        let mut body = vec![0u8; len];
+        if reader.read_exact(&mut body).await.is_err() {
+            return;
+        }
+        if body[0] == 6 {
+            let field = |at: usize| u32::from_be_bytes(body[at..at + 4].try_into().unwrap());
+            let (piece, begin, length) = (field(1), field(5), field(9));
+            let start = piece as usize * PIECE as usize + begin as usize;
+            let mut payload = body[1..9].to_vec();
+            payload.extend_from_slice(&data[start..start + length as usize]);
+            if writer
+                .lock()
+                .await
+                .write_all(&frame(7, &payload))
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+fn frame(id: u8, payload: &[u8]) -> Vec<u8> {
+    let len = u32::try_from(payload.len() + 1).unwrap();
+    [&len.to_be_bytes()[..], &[id], payload].concat()
+}
+
+/// Plays a malicious peer that claims every piece and answers every request with garbage. It
+/// also sends a garbage block of every piece unasked. Returns once TorrentPlayer closes the
+/// connection.
+async fn attack(mut stream: TcpStream) {
+    let pieces = LEN.div_ceil(PIECE as usize);
+    let mut hello = frame(5, &vec![0xFF; pieces.div_ceil(8)]);
+    hello.extend(frame(1, &[]));
+    for piece in 0..u32::try_from(pieces).unwrap() {
+        let mut payload = piece.to_be_bytes().to_vec();
+        payload.extend_from_slice(&0u32.to_be_bytes());
+        payload.extend(std::iter::repeat_n(0xEE, 16 * 1024));
+        hello.extend(frame(7, &payload));
+    }
+    if stream.write_all(&hello).await.is_err() {
+        return;
+    }
+    loop {
+        let mut len = [0u8; 4];
+        if stream.read_exact(&mut len).await.is_err() {
+            return;
+        }
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        if stream.read_exact(&mut body).await.is_err() {
+            return;
+        }
+        if body.first() == Some(&6) {
+            let length = u32::from_be_bytes(body[9..13].try_into().unwrap()) as usize;
+            let mut payload = body[1..9].to_vec();
+            payload.extend(std::iter::repeat_n(0xEE, length));
+            if stream.write_all(&frame(7, &payload)).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
 async fn read_all(torrent: &Torrent) -> Vec<u8> {
     let mut reader = torrent.reader(0).unwrap();
     let mut all = Vec::with_capacity(LEN);
@@ -196,6 +303,11 @@ async fn read_all(torrent: &Torrent) -> Vec<u8> {
 
 /// An HTTP tracker that records announce request lines and hands out no peers.
 async fn http_tracker() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
+    http_tracker_every(60).await
+}
+
+/// [`http_tracker`], asking for an announce every `interval` seconds.
+async fn http_tracker_every(interval: u32) -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -218,13 +330,13 @@ async fn http_tracker() -> (SocketAddr, Arc<Mutex<Vec<String>>>) {
                     .unwrap_or_default()
                     .to_owned();
                 seen.lock().unwrap().push(line);
-                let body = b"d8:intervali60e5:peers0:e";
+                let body = format!("d8:intervali{interval}e5:peers0:e").into_bytes();
                 let head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
                 let _ = stream.write_all(head.as_bytes()).await;
-                let _ = stream.write_all(body).await;
+                let _ = stream.write_all(&body).await;
             });
         }
     });
@@ -281,6 +393,62 @@ async fn a_seeder_that_connects_to_us_is_served_and_the_port_is_announced() {
     swarm.shutdown();
     net.shutdown();
     let _ = seeder.await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_peer_sending_bad_data_is_banned_and_refused_when_it_comes_back() {
+    let (bytes, data, _seed_dir) = torrent(Vec::new()).await;
+    let meta = Metainfo::from_bytes(&bytes).unwrap();
+    let info_hash = meta.info_hash;
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    let port = free_port();
+    net.set_incoming(incoming(port));
+    let (swarm, _dir) = swarm(&net, 40).await;
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    let torrent = swarm.add(meta, Vec::new()).unwrap();
+
+    // A thin swarm: one honest seeder and one attacker, both connected before playback. The
+    // seeder lacks the first pieces at first, so the attacker alone is asked for them: with
+    // both holding every piece, the seeder (as fast as the attacker on loopback) could deliver
+    // the whole file before any of the attacker's data was used, and nothing would show it.
+    let (honest, _) = connect_as_peer(port, info_hash).await.unwrap();
+    let (reveal, revealed) = tokio::sync::oneshot::channel();
+    let honest = tokio::spawn(seed_holding_back(
+        honest,
+        Arc::new(data.clone()),
+        vec![0, 1, 2],
+        revealed,
+    ));
+    let (attacker, _) = connect_as_peer(port, info_hash).await.unwrap();
+    let attacker = tokio::spawn(attack(attacker));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while torrent.stats().peers_live < 2 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("both peers are live");
+
+    // Its pieces fail their check; it alone sent them, so it is banned on the second.
+    let reading = torrent.clone();
+    let all = tokio::spawn(async move { read_all(&reading).await });
+    tokio::time::timeout(Duration::from_secs(10), attacker)
+        .await
+        .expect("the attacker is disconnected")
+        .unwrap();
+    // The pieces it spoiled are fetched again from the seeder, so playback gets every byte.
+    reveal.send(()).unwrap();
+    let all = all.await.unwrap();
+    assert!(all == data, "downloaded bytes differ from the seeded file");
+    assert_eq!(torrent.stats().peers_live, 1, "the honest seeder stays");
+    // Coming back from another port does not help.
+    assert!(connect_as_peer(port, info_hash).await.is_none());
+
+    swarm.shutdown();
+    net.shutdown();
+    let _ = honest.await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -385,6 +553,84 @@ async fn protected_modes_that_cannot_listen_safely_open_no_port() {
     net.apply(NetworkConfig::default()).unwrap();
     wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
     assert!(connect_as_peer(port, meta.info_hash).await.is_some());
+    swarm.shutdown();
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn trackers_on_the_users_own_network_are_contacted_only_when_allowed() {
+    let (tracker, announces) = http_tracker().await;
+    let port = tracker.port();
+    let (bytes, _data, _seed_dir) = torrent(vec![
+        format!("http://127.0.0.1:{port}/announce"),
+        format!("http://localhost:{port}/announce"),
+    ])
+    .await;
+    for allow in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = SwarmConfig::new(dir.path().to_path_buf());
+        cfg.enable_trackers = true;
+        cfg.allow_local_trackers = allow;
+        let swarm = Swarm::start(cfg).await.unwrap();
+        let _torrent = swarm.add(Metainfo::from_bytes(&bytes).unwrap(), Vec::new());
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let seen = announces.lock().unwrap().len();
+        // The control: allowed, the same tracker is announced to.
+        assert_eq!(
+            seen > 0,
+            allow,
+            "{seen} announces with allow_local_trackers {allow}"
+        );
+        swarm.shutdown();
+    }
+}
+
+/// Waits until the tracker has seen `at_least` announces.
+async fn wait_for_announces(announces: &Mutex<Vec<String>>, at_least: usize, what: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while announces.lock().unwrap().len() < at_least {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out: {what}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_paused_torrent_stops_announcing_and_announces_again_on_resume() {
+    let (tracker, announces) = http_tracker_every(1).await;
+    let (bytes, _data, _seed_dir) = torrent(vec![format!(
+        "http://127.0.0.1:{}/announce",
+        tracker.port()
+    )])
+    .await;
+    let meta = Metainfo::from_bytes(&bytes).unwrap();
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    let (swarm, _dir) = swarm(&net, 40).await;
+    let torrent = swarm.add(meta, Vec::new()).unwrap();
+
+    // Running, it announces again at the tracker's interval (a second here).
+    wait_for_announces(&announces, 2, "announced twice").await;
+
+    torrent.set_paused(true);
+    // A request already sent may still land.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let paused_at = announces.lock().unwrap().len();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert_eq!(
+        announces.lock().unwrap().len(),
+        paused_at,
+        "no announce while paused"
+    );
+
+    // Resuming announces at once, as a new start.
+    torrent.set_paused(false);
+    wait_for_announces(&announces, paused_at + 1, "announced after resuming").await;
+    let first = announces.lock().unwrap()[paused_at].clone();
+    assert!(first.contains("event=started"), "{first}");
+
     swarm.shutdown();
     net.shutdown();
 }

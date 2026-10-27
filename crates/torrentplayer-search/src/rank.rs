@@ -24,8 +24,8 @@
 //! | Resolution | 2160p 28 (20 with under 10 seeders: too few sources for 4K bitrates), 1080p 26, 720p 16, SD 6, unknown 12 |
 //! | Source | Blu-ray 6, WEB-DL 6, WEB rip 4, HDTV 2, DVD 1, unknown 0, CAM/telesync/screener −60 |
 //! | HDR | +2 |
-//! | Built-in player | plays (MP4/WebM) +10, likely (MKV, web codec) +3, unknown 0, HEVC outside MP4 or Dolby/DTS audio −3, needs the full player (AVI, TS, Xvid) −10 |
-//! | Audio named | AAC, Opus, MP3, FLAC +2; only Dolby (DD, DD+, `TrueHD`, Atmos) or DTS −10: the built-in player plays the picture without sound |
+//! | Built-in player | plays (MP4/WebM) +10, likely (MKV, web codec) +3, unknown 0, HEVC outside MP4 or Dolby/DTS audio the app cannot convert −3, may not play here (AVI, TS, Xvid) −10 |
+//! | Audio named | AAC, Opus, MP3, FLAC +2; only Dolby (DD, DD+, `TrueHD`, Atmos) or DTS: 0 when the app converts it to stereo (it has the bundled FFmpeg, see [`Quality::converts_audio`]), otherwise −10 (the built-in player plays the picture without sound) |
 //! | Fake 4K | −20, and the 4K claim earns no resolution points (see [`MIN_UHD_BYTES`]) |
 //! | Not a video | −25 (audio, books, software) |
 //!
@@ -37,7 +37,7 @@
 
 use std::cmp::Reverse;
 
-use crate::quality::{ContentKind, Playability, Quality, Resolution, Source};
+use crate::quality::{Codec, Container, ContentKind, Playability, Quality, Resolution, Source};
 use crate::results::SearchResult;
 
 /// Watch score in points (see the module documentation).
@@ -89,6 +89,7 @@ pub fn watch_score(seeders: Option<u32>, peers: Option<u32>, quality: &Quality) 
     };
     score += match quality.audio {
         Some(audio) if audio.plays_in_webview() => 2.0,
+        Some(_) if quality.converts_audio => 0.0,
         Some(_) => -10.0,
         None => 0.0,
     };
@@ -117,15 +118,30 @@ pub fn reason(seeders: Option<u32>, quality: &Quality) -> String {
         Some(1) => "1 seeder".into(),
         Some(n) => format!("{n} seeders"),
     });
-    match (quality.playability(), quality.silent_audio()) {
-        (Playability::NeedsFullPlayer, _) => parts.push("needs the full player".into()),
+    let playability = quality.playability();
+    match (playability, quality.silent_audio()) {
+        (Playability::NeedsFullPlayer, _) => {
+            let format = quality
+                .container
+                .map(Container::label)
+                .or_else(|| quality.codec.map(Codec::label));
+            parts.push(format.map_or_else(
+                || "may not play here".into(),
+                |f| format!("may not play here (format: {f})"),
+            ));
+        }
         (_, Some(audio)) => parts.push(format!(
             "{} audio: no sound in built-in player",
             audio.label()
         )),
         (Playability::Plays, None) => parts.push("plays in built-in player".into()),
-        (Playability::Unlikely, None) => parts.push("may need the full player".into()),
+        (Playability::Unlikely, None) => parts.push("may not play here".into()),
         (Playability::Likely | Playability::Unknown, None) => {}
+    }
+    if playability != Playability::NeedsFullPlayer
+        && let Some(audio) = quality.converted_audio()
+    {
+        parts.push(format!("{} audio: converted to stereo", audio.label()));
     }
     if quality.suspect_size {
         parts.push("too small to be real 4K".into());
@@ -243,7 +259,7 @@ mod tests {
     }
 
     fn ranked(candidates: Vec<Candidate>, query: &str) -> Vec<SearchResult> {
-        let mut r = build_response(candidates, Vec::new(), false).results;
+        let mut r = build_response(candidates, Vec::new(), false, false).results;
         rank(&mut r, query);
         r
     }
@@ -415,6 +431,61 @@ mod tests {
     }
 
     #[test]
+    fn converted_dolby_and_dts_audio_is_neither_warned_about_nor_ranked_down() {
+        let candidates = vec![
+            candidate(
+                1,
+                "Film.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-GRP",
+                Some(150),
+                4 * GIB,
+            ),
+            candidate(
+                2,
+                "Film.2024.1080p.WEB-DL.AAC2.0.H.264-GRP",
+                Some(50),
+                3 * GIB,
+            ),
+        ];
+        let mut r = build_response(candidates, Vec::new(), false, true).results;
+        rank(&mut r, "film");
+        assert_eq!(
+            r[0].title, "Film.2024.1080p.WEB-DL.DDP5.1.Atmos.H.264-GRP",
+            "more seeders win once the audio plays"
+        );
+        assert!(r[0].best_pick);
+        assert_eq!(
+            r[0].reason,
+            "1080p WEB-DL · 150 seeders · Dolby Digital Plus audio: converted to stereo"
+        );
+        assert!(!r.iter().any(|r| r.reason.contains("no sound")));
+
+        let converted = |title: &str| Quality {
+            converts_audio: true,
+            ..Quality::parse(title, None, None)
+        };
+        let dts = converted("Film 2024 1080p BluRay DTS-HD x264 mkv");
+        let plain = converted("Film 2024 1080p BluRay x264 mkv");
+        let score = |q: &Quality| watch_score(Some(40), Some(50), q);
+        assert!(
+            (score(&plain) - score(&dts)).abs() < f64::EPSILON,
+            "no penalty"
+        );
+        assert_eq!(
+            reason(Some(40), &dts),
+            "1080p BluRay · 40 seeders · DTS audio: converted to stereo"
+        );
+        assert_eq!(
+            reason(Some(40), &converted("Film 2024 1080p TrueHD mp4")),
+            "1080p · 40 seeders · plays in built-in player · Dolby TrueHD audio: converted to stereo"
+        );
+        assert_eq!(
+            reason(Some(40), &converted("Film 2024 DTS avi")),
+            "40 seeders · may not play here (format: AVI/TS)",
+            "a file the built-in player cannot open is not converted"
+        );
+    }
+
+    #[test]
     fn playable_containers_get_a_bonus() {
         let mp4 = Quality::parse("Lecture 1 720p.mp4", None, None);
         let mkv = Quality::parse("Lecture 1 720p.mkv", None, None);
@@ -427,7 +498,7 @@ mod tests {
         );
         assert_eq!(
             reason(Some(1), &avi),
-            "720p · 1 seeder · needs the full player"
+            "720p · 1 seeder · may not play here (format: AVI/TS)"
         );
         assert_eq!(reason(None, &Quality::default()), "seeders unknown");
     }
@@ -501,6 +572,7 @@ mod tests {
                 candidate(2, "Course 1080p mp4", Some(9), GIB),
             ],
             Vec::new(),
+            false,
             false,
         )
         .results;

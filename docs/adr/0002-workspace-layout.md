@@ -3,6 +3,13 @@
 - **Status:** Accepted
 - **Date:** 2026-10-17
 
+> **Update (2026-10-26, 0.3.1):** the workspace has since gained `torrentplayer-swarm`,
+> `torrentplayer-search`, `torrentplayer-settings`, and `torrentplayer-bench`;
+> `torrentplayer-player` and `torrentplayer-course` are still placeholders the app does not use.
+> `torrentplayer-app` declares `#![deny(unsafe_code)]` rather than `forbid`, with one documented
+> exception in `src-tauri/src/window.rs` (WebView2's memory target, two COM calls with
+> `// SAFETY:` comments); see [Architecture](../architecture.md#crates).
+
 ## Context
 
 TorrentPlayer has several subsystems with very different needs: pure logic that should be exhaustively

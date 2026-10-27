@@ -29,7 +29,7 @@ Follow [Building from source](../README.md#building-from-source) and
 # Rust
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo test --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo deny check
 
@@ -40,6 +40,9 @@ npm run lint
 npm run check
 npm test
 ```
+
+[docs/building.md](../docs/building.md#running-the-ci-checks-locally) lists the remaining CI
+checks (vendored crates, IPC bindings, third-party notices, minimum Rust version, workflow lint).
 
 ## Pull request checklist
 
@@ -96,10 +99,14 @@ The rules are enforced by tooling, so in most cases you only need to run the for
   denied outside tests. Return typed errors (`thiserror`) from library crates and use `anyhow`
   only in the app shell.
 - **No `println!`.** Use `tracing` with structured fields. Never log secrets.
-- **No `unsafe`** except in `torrentplayer-player`, which wraps libmpv. There, every `unsafe` block needs a
-  `// SAFETY:` comment, and adding new unsafe code needs maintainer sign-off.
+- **No `unsafe`** except in `torrentplayer-player`, which wraps libmpv, and the WebView2 memory
+  call in `src-tauri/src/window.rs` (Windows). There, every `unsafe` block needs a `// SAFETY:`
+  comment, and adding new unsafe code needs maintainer sign-off.
 - Async code uses Tokio. Do not block async threads (use `spawn_blocking`), do not hold locks
   across `.await`, and use bounded channels.
+- Tests open sockets on loopback only (`127.0.0.1`, `::1`), never on every interface (`0.0.0.0`,
+  `[::]`): Windows asks whether to let each newly built test binary through the firewall. Start
+  test networks with `NetworkOptions::loopback_only` set.
 - Keep pure logic (sorting, parsing, prioritization) in crates without Tauri or FFI
   dependencies so it is easy to test.
 

@@ -4,6 +4,16 @@
   benchmarks justify switching)
 - **Date:** 2026-10-17
 
+> **Update (2026-10-26, 0.3.1):** torrentplayer-swarm has been the automatic engine for every
+> source since 0.2.0; librqbit is an explicit choice (`advanced.engine = "rqbit"`) and fetches
+> magnet metadata for torrentplayer-swarm, which does not implement BEP 9 itself. Since built:
+> web seeds (BEP 19), DHT (through the vendored `librqbit-dht`, read-only per BEP 43 unless the
+> listening port is reachable), peer exchange, uploading (off for each torrent until the app
+> turns it on), incoming peers, rate limits, `torrentplayer-net` socket hooks, smart ban, a
+> persistent piece cache, and one 256 MiB partial-piece budget shared by all torrents. Not
+> built: protocol encryption and uTP. See [Streaming](../streaming.md) and
+> [Network](../network.md).
+
 ## Context
 
 Phase 1 wrapped librqbit 9. Measured on public swarms, start-up and seek latency missed the
@@ -59,6 +69,15 @@ measured at about 0.9 s for a 6 GB offset on this project's development machine 
 Appending is always sequential, needs no sparse-file APIs (which would require `unsafe` Win32
 calls), and makes the cache-size limit and cleanup straightforward. Exporting complete files to
 the normal layout can be added later.
+
+Since 0.3.1 the index is also appended to disk (`pieces.idx`: a header with the format version and
+the info hash, then one checksummed record per stored piece), so the cache survives restarts.
+Pieces are not flushed as they are stored. After a crash every piece found through the index is
+checked against the torrent's SHA-1 again before use, which also covers torn records and data
+lost in the crash. A clean quit flushes both files and appends a marker with the cache file's
+length and modification time; while it holds, the next session counts the pieces as stored at
+once and checks each one when it is first read, before any byte of it is used (see
+[Streaming](../streaming.md#downloaded-once)).
 
 ## Milestones
 

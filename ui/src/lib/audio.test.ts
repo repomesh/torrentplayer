@@ -6,6 +6,7 @@ import {
   CONFIRM_AFTER_SECS,
   SILENT_AFTER_SECS,
   audioNotice,
+  conversionNotice,
   hasDecodeCounters,
   silenceThreshold,
   type AudioTrackDto,
@@ -149,5 +150,20 @@ describe('audioNotice', () => {
       "No sound is being decoded. This video's audio is MPEG Layer II, which the built-in player may not support.",
     );
     expect(silenceThreshold(null)).toBe(SILENT_AFTER_SECS);
+  });
+});
+
+describe('conversionNotice', () => {
+  it('names the codec while converting, and says when it failed', () => {
+    expect(conversionNotice('converting', probed(ac3))).toBe(
+      'Converting Dolby Digital (AC-3) audio so it can play here. Seeking may take a moment longer.',
+    );
+    expect(conversionNotice('converting', unknown)).toBe(
+      'Converting audio so it can play here. Seeking may take a moment longer.',
+    );
+    expect(conversionNotice('failed', probed(ac3))).toBe(
+      'The audio could not be converted, so this video plays without sound.',
+    );
+    expect(conversionNotice('off', probed(ac3))).toBeNull();
   });
 });

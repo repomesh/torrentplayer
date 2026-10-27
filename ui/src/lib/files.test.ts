@@ -5,8 +5,10 @@ import type { FileSummary } from './bindings/FileSummary';
 import {
   fileName,
   folderOf,
+  formatOf,
   isPlayable,
   isTorrentFile,
+  mayNotPlay,
   mediaNoun,
   playableInWebview,
   playTarget,
@@ -61,13 +63,21 @@ describe('torrent files', () => {
 });
 
 describe('playableInWebview', () => {
-  it('accepts web formats and flags ones that need the full player', () => {
+  it('accepts web formats and flags ones the built-in player cannot open', () => {
     for (const ok of ['a.mp4', 'b/C.M4V', 'c.webm', 'd.mkv', 'e.mov']) {
       expect(playableInWebview(ok)).toBe(true);
     }
     for (const no of ['lec05.ogv', 'a.AVI', 'b.wmv', 'c.flv', 'd.ts', 'e.mpg']) {
       expect(playableInWebview(no)).toBe(false);
     }
+  });
+
+  it('names the format in the warning', () => {
+    expect(formatOf('Course/lec05.avi')).toBe('AVI');
+    expect(formatOf('README')).toBeNull();
+    expect(formatOf('.hidden')).toBeNull();
+    expect(mayNotPlay('AVI')).toBe('May not play here (format: AVI)');
+    expect(mayNotPlay(null)).toBe('May not play here');
   });
 });
 

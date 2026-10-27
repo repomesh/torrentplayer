@@ -45,6 +45,10 @@ const MAX_EVENTS: usize = 100;
 const STATUS_EVENTS: usize = 50;
 /// Largest response accepted from the connection-check service.
 const MAX_IP_RESPONSE: usize = 1024;
+/// How many times the gap between checks of a connected proxy doubles while nothing uses it:
+/// up to 16 times [`NetworkOptions::health_interval`] (80 s by default, as for an idle
+/// WireGuard tunnel's probes).
+const IDLE_CHECK_DOUBLINGS: u32 = 4;
 
 /// What the user selected.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -57,7 +61,8 @@ pub struct NetworkConfig {
     /// Hold all traffic, whatever the mode, until this is cleared: the state is
     /// [`ConnectionState::Error`] with this reason, and the policy counts as protected, so the
     /// engines start as they would behind the kill switch. For settings that need the user's
-    /// confirmation before anything is sent (the removed VPN adapter mode).
+    /// confirmation before anything is sent: settings that could not be read, or the removed VPN
+    /// adapter mode (see `NetworkHold` in torrentplayer-settings).
     pub hold: Option<String>,
 }
 
@@ -88,12 +93,42 @@ pub struct NetworkOptions {
     /// as not responding and the kill switch engages. A tunnel that has heard nothing for half
     /// of this is probed. See [`WIREGUARD_REPLY_TIMEOUT`].
     pub wireguard_reply_timeout: Duration,
+    /// How long a WireGuard server may leave traffic unanswered before the tunnel is replaced
+    /// by a new one (a fresh handshake and source port). See [`WIREGUARD_RESTART_AFTER`].
+    pub wireguard_restart_after: Duration,
+    /// Open local sockets on loopback instead of every interface: the direct-mode incoming
+    /// listener, direct UDP sockets, SOCKS5 UDP relay sockets, and the WireGuard socket. Only for
+    /// tests, whose servers are all on loopback: a socket on every interface makes Windows ask
+    /// whether to allow each newly built test binary through the firewall. Off by default.
+    pub loopback_only: bool,
+    /// How long a UPnP port mapping is leased for. It is renewed at half of this, and counts as
+    /// lost once a lease passes without a renewal. See [`UPNP_LEASE`].
+    pub upnp_lease: Duration,
+    /// The router's UPnP control URL (its `WANIPConnection` service), used instead of
+    /// discovering one, even with `loopback_only`. Only for tests, whose fake router is on
+    /// loopback; `None` by default.
+    pub upnp_control_url: Option<String>,
+    /// How long after a peer last connected in the listening port still counts as reachable
+    /// ([`Network::reachable_port`]). See [`REACHABLE_AFTER_INBOUND`].
+    pub reachable_after_inbound: Duration,
 }
+
+/// The default [`NetworkOptions::upnp_lease`].
+pub const UPNP_LEASE: Duration = Duration::from_secs(60);
+
+/// The default [`NetworkOptions::reachable_after_inbound`]: about as long as DHT nodes keep an
+/// announced peer, so one inbound peer per announcement keeps the port announced.
+pub const REACHABLE_AFTER_INBOUND: Duration = Duration::from_secs(30 * 60);
 
 /// The default [`NetworkOptions::wireguard_reply_timeout`]: WireGuard's `KEEPALIVE_TIMEOUT`
 /// (10 s, within which a peer that received data answers, if only with a keepalive) plus two
 /// `REKEY_TIMEOUT`s (5 s each, for a handshake retried while the session is renewed).
 pub const WIREGUARD_REPLY_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The default [`NetworkOptions::wireguard_restart_after`]: twice WireGuard's
+/// `REJECT_AFTER_TIME` (180 s), long after every session the server could still hold has
+/// expired. At most one handshake for a new tunnel every 6 minutes.
+pub const WIREGUARD_RESTART_AFTER: Duration = Duration::from_secs(360);
 
 impl Default for NetworkOptions {
     fn default() -> Self {
@@ -105,6 +140,11 @@ impl Default for NetworkOptions {
             ip_check_v4_url: IP_CHECK_V4_URL.to_owned(),
             ip_check_v6_url: Some(IP_CHECK_V6_URL.to_owned()),
             wireguard_reply_timeout: WIREGUARD_REPLY_TIMEOUT,
+            wireguard_restart_after: WIREGUARD_RESTART_AFTER,
+            loopback_only: false,
+            upnp_lease: UPNP_LEASE,
+            upnp_control_url: None,
+            reachable_after_inbound: REACHABLE_AFTER_INBOUND,
         }
     }
 }
@@ -194,7 +234,9 @@ pub struct NetworkStatus {
     /// Whether the kill switch is blocking traffic (a protected mode that is not connected).
     pub kill_switch_engaged: bool,
     /// Whether scoped UDP is available: direct, through WireGuard, or via a SOCKS5 UDP
-    /// association. Proxy UDP support is negotiated per association, not by the health check.
+    /// association. Proxy UDP support is negotiated per association, not by the health check:
+    /// this turns false once the proxy refuses one (no UDP support, or an unusable relay), until
+    /// one succeeds or the settings change.
     pub udp_allowed: bool,
     /// Whether trackers may be contacted.
     pub trackers_allowed: bool,
@@ -299,6 +341,14 @@ pub(crate) struct Inner {
     bridge_addr: SocketAddr,
     pub(crate) bridge_token: Secret,
     cancel: CancellationToken,
+    /// When a failed dial last woke the health check (see `wake_after_failed_dial`).
+    last_dial_wake: Mutex<Option<std::time::Instant>>,
+    /// Test seam: how long host name lookups through the system resolver take.
+    #[cfg(test)]
+    pub(crate) resolve_delay: Mutex<Duration>,
+    /// Test seam: how long direct connections take to start.
+    #[cfg(test)]
+    pub(crate) connect_delay: Mutex<Duration>,
 }
 
 impl Drop for Inner {
@@ -329,6 +379,15 @@ pub(crate) struct State {
     events: VecDeque<NetEvent>,
     /// Incoming peer connections.
     pub(crate) incoming: IncomingState,
+    /// A connected SOCKS5 proxy failed one check, under this generation (see `on_check`).
+    proxy_failed_once: Option<u64>,
+    /// Traffic was routed through the proxy since its last check.
+    proxy_used: bool,
+    /// Checks in a row that found the connected proxy working and unused: the gap before the
+    /// next one doubles with each (see [`IDLE_CHECK_DOUBLINGS`]).
+    idle_checks: u32,
+    /// The SOCKS5 proxy refused a UDP association in this epoch (see [`NetworkStatus::udp_allowed`]).
+    proxy_udp_refused: Option<u64>,
 }
 
 impl State {
@@ -454,6 +513,42 @@ impl Inner {
         self.incoming_wake.notify_one();
     }
 
+    /// Wakes the health check after a failed connection to the proxy, at most once per
+    /// [`NetworkOptions::health_interval`]: every failed dial used to, so a burst of them (a
+    /// provider's connection cap) kept the proxy busy with checks. Returns whether it woke it.
+    pub(crate) fn wake_after_failed_dial(&self) -> bool {
+        let mut last = self
+            .last_dial_wake
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if last.is_some_and(|at| at.elapsed() < self.options.health_interval) {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+        self.wake.notify_one();
+        true
+    }
+
+    /// Records whether the SOCKS5 proxy accepted a UDP association opened in `epoch`, for
+    /// [`NetworkStatus::udp_allowed`]. A refusal counts (no UDP support, or a relay that cannot
+    /// be used); a proxy that is down or slow does not, as the kill switch covers that.
+    fn note_proxy_udp<T>(&self, epoch: u64, opened: &Result<T, NetError>) {
+        let refused = match opened {
+            Ok(_) => false,
+            Err(NetError::Proxy(socks5::Socks5Error::Refused(_)) | NetError::Unsupported(_)) => {
+                true
+            }
+            Err(_) => return,
+        };
+        let mut st = self.state();
+        if st.epoch != epoch || (st.proxy_udp_refused == Some(epoch)) == refused {
+            return;
+        }
+        st.proxy_udp_refused = refused.then_some(epoch);
+        drop(st);
+        self.status_changed();
+    }
+
     /// Tells [`Network::status_changes`] watchers that the status changed.
     pub(crate) fn status_changed(&self) {
         self.status_seq
@@ -478,8 +573,22 @@ impl Inner {
         }
         st.last_check = Some(SystemTime::now());
         let via = describe(&st.config.mode);
+        let failed_once = st.proxy_failed_once.take() == Some(generation);
+        let used = std::mem::take(&mut st.proxy_used);
         match result {
             Ok(()) => {
+                // A connected proxy nothing has used since the last check is checked less and
+                // less often; the next connection through it snaps back (see `Network::route`),
+                // and so does a failed check.
+                if st.conn == ConnectionState::Connected
+                    && matches!(st.config.mode, NetworkMode::Socks5(_))
+                    && !used
+                    && !failed_once
+                {
+                    st.idle_checks += 1;
+                } else {
+                    st.idle_checks = 0;
+                }
                 match &st.conn {
                     ConnectionState::Connected => {}
                     ConnectionState::Connecting => {
@@ -495,9 +604,24 @@ impl Inner {
                 }
                 st.conn = ConnectionState::Connected;
                 self.publish(&st);
-                interval
+                interval * 2u32.pow(st.idle_checks.min(IDLE_CHECK_DOUBLINGS))
+            }
+            Err(_)
+                if st.conn == ConnectionState::Connected
+                    && matches!(st.config.mode, NetworkMode::Socks5(_))
+                    && !failed_once =>
+            {
+                // A connected proxy must fail twice in a row before its connections are
+                // closed: one refused or slow check (a provider's connection cap, a busy
+                // proxy) would otherwise drop every connection, and reconnecting them can
+                // hit the cap again. Nothing goes around the proxy meanwhile; its own
+                // connections just fail. WireGuard has its own grace (the reply timeout).
+                st.proxy_failed_once = Some(generation);
+                st.idle_checks = 0;
+                self.options.retry_interval
             }
             Err(error) => {
+                st.idle_checks = 0;
                 let reason = error.to_string();
                 let next = match &st.conn {
                     ConnectionState::Connected => {
@@ -558,6 +682,10 @@ impl Network {
             connected_since: None,
             events: VecDeque::new(),
             incoming: IncomingState::default(),
+            proxy_failed_once: None,
+            proxy_used: false,
+            idle_checks: 0,
+            proxy_udp_refused: None,
         };
         let message = format!("Network mode: {}", describe(&st.config.mode));
         st.log(EventLevel::Info, message);
@@ -578,6 +706,11 @@ impl Network {
             bridge_addr,
             bridge_token: token,
             cancel: cancel.clone(),
+            last_dial_wake: Mutex::default(),
+            #[cfg(test)]
+            resolve_delay: Mutex::default(),
+            #[cfg(test)]
+            connect_delay: Mutex::default(),
         });
         tokio::spawn(monitor(Arc::downgrade(&inner), wake, cancel.clone()));
         tokio::spawn(bridge::serve(
@@ -614,6 +747,8 @@ impl Network {
             st.generation += 1;
             st.epoch += 1;
             st.last_check = None;
+            st.proxy_used = false;
+            st.idle_checks = 0;
             let message = format!("Network mode changed: {}", describe(&st.config.mode));
             st.log(EventLevel::Info, message);
             if let ConnectionState::Error { reason } = &st.conn {
@@ -658,7 +793,7 @@ impl Network {
             endpoint: st.config.mode.endpoint(),
             traffic_allowed: policy.traffic_allowed,
             kill_switch_engaged: policy.protected && !policy.traffic_allowed,
-            udp_allowed: policy.bound_udp_allowed,
+            udp_allowed: policy.bound_udp_allowed && st.proxy_udp_refused != Some(st.epoch),
             trackers_allowed: policy.trackers_allowed,
             last_check_ms: st.last_check.map(unix_ms),
             connected_since_ms: st
@@ -675,6 +810,13 @@ impl Network {
         }
     }
 
+    /// Whether local sockets stay on loopback ([`NetworkOptions::loopback_only`], for tests),
+    /// for listeners other engines open themselves.
+    #[must_use]
+    pub fn loopback_only(&self) -> bool {
+        self.inner.options.loopback_only
+    }
+
     /// What connections may do right now.
     #[must_use]
     pub fn policy(&self) -> Policy {
@@ -687,8 +829,9 @@ impl Network {
         self.inner.policy.subscribe()
     }
 
-    /// Notified whenever [`Network::status`] may have changed: every policy change, and changes
-    /// of the incoming-connection listener.
+    /// Notified whenever [`Network::status`] or [`Network::reachable_port`] may have changed:
+    /// every policy change, and changes of the incoming-connection listener, its port mapping,
+    /// or whether a peer connected in recently.
     #[must_use]
     pub fn status_changes(&self) -> watch::Receiver<u64> {
         self.inner.status_seq.subscribe()
@@ -720,7 +863,7 @@ impl Network {
     /// otherwise. Never connects any other way than the selected mode.
     pub async fn connect(&self, target: SocketAddr) -> Result<(TcpStream, Lease), NetError> {
         let (route, lease, ipv4_only) = self.route()?;
-        let stream = self.dial(&route, target, ipv4_only).await?;
+        let stream = self.dial(&route, target, ipv4_only, &lease).await?;
         Self::check_lease(stream, lease)
     }
 
@@ -775,12 +918,8 @@ impl Network {
         }
         let socket = match &route {
             Route::Direct => {
-                let any = if target.is_ipv4() {
-                    SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
-                } else {
-                    SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0))
-                };
-                std::net::UdpSocket::bind(any)?
+                let ip = crate::addr::local_ip(target.is_ipv6(), self.inner.options.loopback_only);
+                std::net::UdpSocket::bind(SocketAddr::new(ip, 0))?
             }
             Route::WireGuard(tunnel) => {
                 let socket = tunnel.udp_socket(target).await?;
@@ -792,12 +931,19 @@ impl Network {
                 return Ok((socket.ipv4_only(ipv4_only).with_lease(lease.clone()), lease));
             }
             Route::Socks(cfg) => {
-                let socket = tokio::time::timeout(
+                let opened = tokio::time::timeout(
                     self.inner.options.connect_timeout,
-                    crate::socks_udp::SocksUdp::open(cfg, lease.clone()),
+                    crate::socks_udp::SocksUdp::open(
+                        cfg,
+                        lease.clone(),
+                        self.inner.options.loopback_only,
+                    ),
                 )
                 .await
-                .map_err(|_| NetError::Timeout)??;
+                .map_err(|_| NetError::Timeout)
+                .flatten();
+                self.inner.note_proxy_udp(lease.epoch, &opened);
+                let socket = opened?;
                 if !lease.is_valid() {
                     return Err(NetError::KillSwitch(
                         "the network settings changed while opening UDP".into(),
@@ -928,7 +1074,7 @@ impl Network {
         let mut last = None;
         let addresses = match &route {
             Route::WireGuard(tunnel) => tunnel.resolve(host, port, ipv4_only).await?,
-            _ => tokio::net::lookup_host((host, port)).await?.collect(),
+            _ => self.system_lookup(host, port).await?,
         };
         for addr in addresses {
             if ipv4_only && addr.is_ipv6() {
@@ -938,7 +1084,14 @@ impl Network {
                 last.get_or_insert(NetError::NotPublic);
                 continue;
             }
-            match self.dial(&route, addr, ipv4_only).await {
+            // The route was chosen before the lookup and the previous attempts, which can
+            // take seconds: a direct route must not dial once the mode is protected.
+            if !lease.is_valid() {
+                return Err(NetError::KillSwitch(
+                    "the network settings changed while connecting".into(),
+                ));
+            }
+            match self.dial(&route, addr, ipv4_only, &lease).await {
                 Ok(stream) => return Self::check_lease(stream, lease),
                 Err(error) => last = Some(error),
             }
@@ -951,10 +1104,49 @@ impl Network {
         }))
     }
 
+    /// Resolves `host` with the system resolver.
+    async fn system_lookup(&self, host: &str, port: u16) -> std::io::Result<Vec<SocketAddr>> {
+        #[cfg(test)]
+        {
+            let delay = *self
+                .inner
+                .resolve_delay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            tokio::time::sleep(delay).await;
+        }
+        Ok(tokio::net::lookup_host((host, port)).await?.collect())
+    }
+
+    /// Connects to `target` directly.
+    async fn direct_connect(&self, target: SocketAddr) -> std::io::Result<TcpStream> {
+        #[cfg(test)]
+        {
+            let delay = *self
+                .inner
+                .connect_delay
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            tokio::time::sleep(delay).await;
+        }
+        TcpStream::connect(target).await
+    }
+
     pub(crate) fn route(&self) -> Result<(Route, Lease, bool), NetError> {
-        let st = self.inner.state();
+        let mut st = self.inner.state();
         if !st.conn.allows_traffic() {
             return Err(st.blocked());
+        }
+        if matches!(st.config.mode, NetworkMode::Socks5(_)) {
+            st.proxy_used = true;
+            if st.idle_checks > 0 {
+                // Checked less often while unused, so it may have gone down since: check it
+                // now rather than at the next interval. Nothing can go around a proxy that is
+                // down (its connections just fail, and the kill switch engages within a retry
+                // interval of the check), so this connection need not wait for the check.
+                st.idle_checks = 0;
+                self.inner.wake.notify_one();
+            }
         }
         let route = match &st.config.mode {
             NetworkMode::Direct => Route::Direct,
@@ -976,14 +1168,26 @@ impl Network {
         route: &Route,
         target: SocketAddr,
         ipv4_only: bool,
+        lease: &Lease,
     ) -> Result<TcpStream, NetError> {
         if ipv4_only && target.is_ipv6() {
             return Err(NetError::Ipv6Disabled);
         }
         match route {
-            Route::Direct => Ok(TcpStream::connect(target).await?),
+            Route::Direct => {
+                // A switch to a protected mode abandons the dial at once, rather than letting
+                // it reach the peer directly and dropping the connection only afterwards.
+                let mut lease = lease.clone();
+                tokio::select! {
+                    biased;
+                    () = lease.revoked() => Err(NetError::KillSwitch(
+                        "the network settings changed while connecting".into(),
+                    )),
+                    stream = self.direct_connect(target) => Ok(stream?),
+                }
+            }
             Route::Socks(cfg) => self.socks_dial(cfg, &Target::Addr(target)).await,
-            Route::WireGuard(tunnel) => tunnel.connect(target).await,
+            Route::WireGuard(tunnel) => tunnel.connect(target, Some(lease.clone())).await,
         }
     }
 
@@ -992,7 +1196,7 @@ impl Network {
             Ok(s) => s,
             Err(error) => {
                 // Probably the proxy went down: check now rather than at the next interval.
-                self.inner.wake.notify_one();
+                self.inner.wake_after_failed_dial();
                 return Err(NetError::ProxyUnreachable(error));
             }
         };
@@ -1174,8 +1378,9 @@ struct IpAnswer {
     ip: String,
 }
 
-/// Checks the selected mode every [`NetworkOptions::health_interval`], and immediately after
-/// a change or a failed connection.
+/// Checks the selected mode every [`NetworkOptions::health_interval`] (less often while a
+/// connected proxy goes unused, see `Inner::on_check`), and immediately after a change, a
+/// failed connection, or the first connection through an idle proxy.
 async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToken) {
     loop {
         let Some(net) = inner.upgrade() else {
@@ -1196,15 +1401,18 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
             NetworkMode::Socks5(cfg) => Some(probe(&cfg, timeout).await),
             NetworkMode::WireGuard(cfg) => {
                 let check = async {
-                    let existing = net
-                        .state()
-                        .tunnel
-                        .clone()
-                        .filter(|tunnel| !tunnel.is_closed());
-                    let tunnel = if let Some(tunnel) = existing {
-                        tunnel
+                    let existing = net.state().tunnel.clone();
+                    let tunnel = if let Some(tunnel) =
+                        existing.as_ref().filter(|tunnel| !tunnel.is_closed())
+                    {
+                        tunnel.clone()
                     } else {
-                        let tunnel = Tunnel::start(&cfg).await?;
+                        // A tunnel the health check closed is replaced by one at the endpoint's
+                        // next address; if its server had stopped answering, the new one must
+                        // hear from the server before traffic resumes.
+                        let tunnel =
+                            Tunnel::start(&cfg, existing.as_ref(), net.options.loopback_only)
+                                .await?;
                         let mut st = net.state();
                         if st.generation != generation || st.conn == ConnectionState::Disconnected {
                             tunnel.close();
@@ -1214,7 +1422,11 @@ async fn monitor(inner: Weak<Inner>, wake: Arc<Notify>, cancel: CancellationToke
                         tunnel
                     };
                     tunnel
-                        .healthy(timeout, net.options.wireguard_reply_timeout)
+                        .healthy(
+                            timeout,
+                            net.options.wireguard_reply_timeout,
+                            net.options.wireguard_restart_after,
+                        )
                         .await
                 };
                 // Mostly a handshake that did not complete in time: one reason for both, so a
@@ -1257,4 +1469,70 @@ async fn probe(cfg: &Socks5Config, timeout: Duration) -> Result<(), NetError> {
     })
     .await
     .map_err(|_| NetError::Timeout)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn an_unused_proxy_is_checked_less_and_less_until_used_or_failing() {
+        let ms = Duration::from_millis;
+        let options = NetworkOptions {
+            health_interval: ms(100),
+            retry_interval: ms(10),
+            loopback_only: true,
+            ..NetworkOptions::default()
+        };
+        let net = Network::start(NetworkConfig::default(), options)
+            .await
+            .unwrap();
+        // No monitor: only the checks below. It sees direct mode and the cancellation, and
+        // stops.
+        net.inner.cancel.cancel();
+        tokio::task::yield_now().await;
+        let generation = {
+            let mut st = net.inner.state();
+            st.config.mode = NetworkMode::Socks5(Socks5Config {
+                host: Ipv4Addr::LOCALHOST.to_string(),
+                port: 9,
+                username: None,
+                password: None,
+                remote_dns: true,
+                proxy_trackers: true,
+                proxy_dht: true,
+            });
+            st.conn = ConnectionState::Connecting;
+            st.generation
+        };
+        let check = |result: Result<(), NetError>| net.inner.on_check(generation, result);
+        let failed = || Err(NetError::Timeout);
+
+        assert_eq!(check(Ok(())), ms(100), "just connected");
+        for expected in [200, 400, 800, 1600, 1600, 1600] {
+            assert_eq!(check(Ok(())), ms(expected), "unused");
+        }
+        // The first connection through it asks for a check at once, at the normal interval.
+        net.route().unwrap();
+        assert_eq!(net.inner.state().idle_checks, 0);
+        assert_eq!(check(Ok(())), ms(100), "used");
+        net.route().unwrap();
+        assert_eq!(check(Ok(())), ms(100), "used");
+        assert_eq!(check(Ok(())), ms(200), "unused again");
+        assert_eq!(check(Ok(())), ms(400));
+
+        // One failed check is retried soon; the next ones are at the normal interval again.
+        assert_eq!(check(failed()), ms(10));
+        assert_eq!(net.inner.state().conn, ConnectionState::Connected);
+        assert_eq!(check(Ok(())), ms(100), "after a failed check");
+        assert_eq!(check(Ok(())), ms(200));
+        // Two in a row engage the kill switch; once restored, it starts over.
+        assert_eq!(check(failed()), ms(10));
+        assert_eq!(check(failed()), ms(10));
+        assert!(!net.inner.state().conn.allows_traffic());
+        assert!(net.route().is_err(), "nothing is routed while it is down");
+        assert_eq!(check(Ok(())), ms(100), "restored");
+        assert_eq!(check(Ok(())), ms(200));
+        net.shutdown();
+    }
 }

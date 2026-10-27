@@ -10,17 +10,17 @@ repositories, and documentation (sources below). Products change; corrections ar
 
 ## At a glance
 
-|                                       | TorrentPlayer                              | Stremio (torrent add-ons)                               | WebTorrent Desktop            | qBittorrent + VLC                                         | Debrid / cloud (Real-Debrid, Seedr)          | webtor.io (browser)                              |
-| ------------------------------------- | ------------------------------------------ | ------------------------------------------------------- | ----------------------------- | --------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------ |
-| Video comes from                      | Peers, directly to your app                | A local streaming server on your machine, from peers    | Peers, directly               | Peers, directly                                           | The provider's servers                       | webtor.io's servers                              |
-| Stream and skip anywhere              | Yes: the spot you skip to is fetched first | Yes (local cache); seek performance not documented      | Yes                           | Plays in order only; skipping ahead of the download fails | Once the provider has fetched the file       | Yes, from the server (transcoded when needed)    |
-| Speed limited by                      | The swarm and your connection              | The swarm and your connection                           | The swarm and your connection | The swarm and your connection                             | Your plan and the provider                   | Free speed cap; paid tiers 20–100 Mbps           |
-| Cost / account                        | Free, no account                           | Free tier (guest mode, no account); paid plan optional  | Free, no account              | Free, no account                                          | Paid plans (Seedr: 2 GB, 480p free tier)     | Free basic use; paid tiers for speed and storage |
-| Fully open source                     | Yes (MIT or Apache-2.0)                    | Partly: the streaming server is proprietary             | Yes (MIT)                     | Yes (GPL)                                                 | No                                           | Yes (MIT)                                        |
-| Built-in VPN / WireGuard, kill switch | Yes: WireGuard, SOCKS5; kill switch        | No (bring your own VPN)                                 | No                            | Proxy and interface binding; no built-in VPN              | Not applicable (the service joins the swarm) | Not applicable (the service joins the swarm)     |
-| Queue that downloads ahead            | Yes, sharing bandwidth with what you watch | Download manager on the paid plan                       | No                            | Yes (as a download client)                                | Cloud storage                                | Cloud storage on paid tiers                      |
-| Telemetry                             | None                                       | Analytics and error monitoring (per its privacy policy) | Basic usage stats             | None documented                                           | Not checked                                  | Not checked                                      |
-| Maintained                            | Active                                     | Active                                                  | Last release 2020             | Active                                                    | Operating                                    | Active                                           |
+|                                       | TorrentPlayer                                        | Stremio (torrent add-ons)                               | WebTorrent Desktop            | qBittorrent + VLC                                         | Debrid / cloud (Real-Debrid, Seedr)          | webtor.io (browser)                              |
+| ------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------- | ----------------------------- | --------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------ |
+| Video comes from                      | Peers, directly to your app                          | A local streaming server on your machine, from peers    | Peers, directly               | Peers, directly                                           | The provider's servers                       | webtor.io's servers                              |
+| Stream and skip anywhere              | Yes: the spot you skip to is fetched first           | Yes (local cache); seek performance not documented      | Yes                           | Plays in order only; skipping ahead of the download fails | Once the provider has fetched the file       | Yes, from the server (transcoded when needed)    |
+| Speed limited by                      | The swarm and your connection                        | The swarm and your connection                           | The swarm and your connection | The swarm and your connection                             | Your plan and the provider                   | Free speed cap; paid tiers 20–100 Mbps           |
+| Cost / account                        | Free, no account                                     | Free tier (guest mode, no account); paid plan optional  | Free, no account              | Free, no account                                          | Paid plans (Seedr: 2 GB, 480p free tier)     | Free basic use; paid tiers for speed and storage |
+| Fully open source                     | Yes (MIT or Apache-2.0; bundled parts LGPL, MPL-2.0) | Partly: the streaming server is proprietary             | Yes (MIT)                     | Yes (GPL)                                                 | No                                           | Yes (MIT)                                        |
+| Built-in VPN / WireGuard, kill switch | Yes: WireGuard, SOCKS5; kill switch                  | No (bring your own VPN)                                 | No                            | Proxy and interface binding; no built-in VPN              | Not applicable (the service joins the swarm) | Not applicable (the service joins the swarm)     |
+| Queue that downloads ahead            | Yes, sharing bandwidth with what you watch           | Download manager on the paid plan                       | No                            | Yes (as a download client)                                | Cloud storage                                | Cloud storage on paid tiers                      |
+| Telemetry                             | None                                                 | Analytics and error monitoring (per its privacy policy) | Basic usage stats             | None documented                                           | Not checked                                  | Not checked                                      |
+| Maintained                            | Active                                               | Active                                                  | Last release 2020             | Active                                                    | Operating                                    | Active                                           |
 
 ## What makes TorrentPlayer different
 
@@ -43,20 +43,26 @@ repositories, and documentation (sources below). Products change; corrections ar
 - **A queue that thinks about bandwidth.** Everything queued downloads in the background while
   you watch, but only with what playback does not need; it pauses if playback runs low and
   resumes at full speed once you are ahead.
-- **No account, no telemetry, fully open source.** Every component is MIT or Apache-2.0,
-  including the streaming engine.
+- **No account, no telemetry, fully open source.** TorrentPlayer itself, including the streaming
+  engine, is MIT or Apache-2.0. It ships a few third-party parts under other open licenses: a
+  playback-only LGPL build of FFmpeg for Dolby and DTS audio, and a handful of unmodified MPL-2.0
+  crates that Tauri uses (see `THIRD_PARTY_NOTICES.md`).
 
 ## Where others are a better fit
 
 - **Watching on a TV, phone, or tablet:** Stremio and Kodi run on far more devices.
   TorrentPlayer is a desktop app (Windows, macOS, Linux).
-- **Codecs the system web engine cannot play** (for example AC-3 or DTS audio on Windows):
-  players built on VLC or libmpv play more formats today. TorrentPlayer warns you about such
-  files; a libmpv player is on the roadmap.
+- **Codecs the system web engine cannot play:** players built on VLC or libmpv play more formats
+  today. TorrentPlayer converts Dolby (AC-3, E-AC-3, TrueHD) and DTS audio to stereo with its
+  bundled FFmpeg, so those play with sound, but surround channels are mixed down, and some
+  containers and codecs (AVI, MPEG-TS, Xvid, AC-4 audio) still need another player; a libmpv
+  player is on the roadmap.
 - **Hiding your address from the swarm without a VPN:** cloud services join the swarm for you.
   With TorrentPlayer, use its WireGuard or proxy modes.
-- **Sharing back:** TorrentPlayer's own engine does not upload yet, so it takes from the swarm
-  without seeding. Full download clients seed; seeding controls are on TorrentPlayer's roadmap.
+- **Running a seedbox:** TorrentPlayer keeps seeding queued torrents until you pause or remove
+  them, but only while the app is open, and it accepts
+  incoming connections only when you turn that on. Full download clients are built to seed
+  around the clock.
 
 ## Sources
 

@@ -310,7 +310,7 @@ mod tests {
                 ..Candidate::default()
             })
             .collect();
-        let mut r = build_response(candidates, Vec::new(), false);
+        let mut r = build_response(candidates, Vec::new(), false, false);
         rank(&mut r.results, "sintel");
         r.results.into_iter().find(|r| r.best_pick).map(|r| r.link)
     }

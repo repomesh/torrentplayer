@@ -24,6 +24,8 @@ fn fast_options() -> NetworkOptions {
         retry_interval: Duration::from_millis(50),
         check_timeout: Duration::from_secs(2),
         connect_timeout: Duration::from_secs(5),
+        // Sockets stay on loopback, where every test server is (see the option).
+        loopback_only: true,
         ..NetworkOptions::default()
     }
 }
@@ -203,6 +205,169 @@ async fn public_only_clients_cannot_reach_the_local_network() {
         net.connect_host_public("LocalHost.", server.port()).await,
         Err(NetError::NotPublic)
     ));
+    net.shutdown();
+}
+
+/// A TCP front for `upstream` that closes the next `refuse` connections at once, like a proxy
+/// at its connection cap.
+async fn refusing_front(upstream: SocketAddr) -> (SocketAddr, Arc<AtomicUsize>) {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let refuse = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&refuse);
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            if count
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .is_ok()
+            {
+                continue;
+            }
+            tokio::spawn(async move {
+                if let Ok(mut proxy) = tokio::net::TcpStream::connect(upstream).await {
+                    let _ = tokio::io::copy_bidirectional(&mut stream, &mut proxy).await;
+                }
+            });
+        }
+    });
+    (addr, refuse)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_failed_proxy_check_does_not_drop_connections() {
+    // Each check opens a connection to the proxy. One refused check while connected used to
+    // start a new epoch and close every connection; it takes two in a row now.
+    let proxy = TestProxy::start(None).await.unwrap();
+    let (front, refuse) = refusing_front(proxy.addr()).await;
+    let (echo, _) = echo_server().await;
+    let mut config = socks_mode(&proxy, None);
+    if let NetworkMode::Socks5(cfg) = &mut config.mode {
+        cfg.port = front.port();
+    }
+    let net = Network::start(config, fast_options()).await.unwrap();
+    assert_eq!(
+        net.settled(Duration::from_secs(5)).await.state,
+        ConnectionState::Connected
+    );
+    let (mut stream, lease) = net.connect(echo).await.unwrap();
+    let epoch = net.policy().epoch;
+
+    refuse.store(1, Ordering::SeqCst);
+    while refuse.load(Ordering::SeqCst) > 0 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Several checks later: still connected, same epoch, the connection still works.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(net.status().state, ConnectionState::Connected);
+    assert_eq!(net.policy().epoch, epoch);
+    assert!(lease.is_valid());
+    stream.write_all(b"ping").await.unwrap();
+    let mut reply = [0; 4];
+    stream.read_exact(&mut reply).await.unwrap();
+    assert_eq!(&reply, b"ping");
+
+    // Two in a row engage the kill switch.
+    refuse.store(usize::MAX, Ordering::SeqCst);
+    let state = wait_for_state(&net, |s| !matches!(s, ConnectionState::Connected)).await;
+    assert!(
+        matches!(
+            state,
+            ConnectionState::Reconnecting { .. } | ConnectionState::KillSwitchActive { .. }
+        ),
+        "{state:?}"
+    );
+    assert!(!lease.is_valid());
+    net.shutdown();
+}
+
+#[tokio::test]
+async fn failed_proxy_dials_wake_the_health_check_at_most_once_per_interval() {
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    assert!(net.inner.wake_after_failed_dial());
+    for _ in 0..20 {
+        assert!(!net.inner.wake_after_failed_dial());
+    }
+    tokio::time::sleep(fast_options().health_interval).await;
+    assert!(net.inner.wake_after_failed_dial());
+    net.shutdown();
+}
+
+/// Health checks the proxy has had: connections that requested nothing through it.
+fn proxy_checks(proxy: &TestProxy) -> u64 {
+    proxy.accepted() - proxy.connections().len() as u64
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_used_proxy_is_checked_at_the_normal_interval() {
+    let proxy = TestProxy::start(None).await.unwrap();
+    let (echo, _) = echo_server().await;
+    let net = Network::start(socks_mode(&proxy, None), fast_options())
+        .await
+        .unwrap();
+    net.settled(Duration::from_secs(5)).await;
+    let before = proxy_checks(&proxy);
+    for _ in 0..20 {
+        drop(net.connect(echo).await.unwrap());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // About 1 s of traffic, checked every 100 ms (unused, it would be 3 or 4 times).
+    let checks = proxy_checks(&proxy) - before;
+    assert!(checks >= 6, "{checks} checks");
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_idle_proxy_that_went_down_blocks_the_first_traffic_and_is_rechecked_at_once() {
+    let proxy = TestProxy::start(None).await.unwrap();
+    // Goes down by closing connections at once: a refused connection to a closed port takes
+    // Windows seconds to report.
+    let (front, refuse) = refusing_front(proxy.addr()).await;
+    let (echo, echo_hits) = echo_server().await;
+    let mut config = socks_mode(&proxy, None);
+    if let NetworkMode::Socks5(cfg) = &mut config.mode {
+        cfg.port = front.port();
+    }
+    let options = NetworkOptions {
+        health_interval: Duration::from_millis(500),
+        ..fast_options()
+    };
+    let net = Network::start(config, options).await.unwrap();
+    net.settled(Duration::from_secs(5)).await;
+    // Unused for 4 s: checked after 1, 2, and 4 s instead of every 0.5 s; the next one is 4 s
+    // away.
+    let before = proxy_checks(&proxy);
+    tokio::time::sleep(Duration::from_millis(4200)).await;
+    let checks = proxy_checks(&proxy) - before;
+    assert!((1..=4).contains(&checks), "{checks} checks");
+    assert_eq!(net.status().state, ConnectionState::Connected);
+
+    refuse.store(usize::MAX, Ordering::SeqCst);
+    let started = std::time::Instant::now();
+    assert!(net.connect(echo).await.is_err(), "no way around the proxy");
+    let state = wait_for_state(&net, |s| !matches!(s, ConnectionState::Connected)).await;
+    assert!(
+        matches!(
+            state,
+            ConnectionState::Reconnecting { .. } | ConnectionState::KillSwitchActive { .. }
+        ),
+        "{state:?}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "re-checked at the first use, not at the next idle check: {:?}",
+        started.elapsed()
+    );
+    assert!(matches!(
+        net.connect(echo).await,
+        Err(NetError::KillSwitch(_))
+    ));
+    assert_eq!(
+        echo_hits.load(Ordering::SeqCst),
+        0,
+        "nothing reached the target"
+    );
     net.shutdown();
 }
 
@@ -445,6 +610,70 @@ async fn dead_proxy() -> NetworkConfig {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_direct_dial_started_before_a_switch_to_protected_never_goes_out() {
+    // A host name connection resolves before it dials. If the mode becomes protected during
+    // the lookup, the direct route chosen before it must not be used.
+    let (echo, hits) = echo_server().await;
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    *net.inner.resolve_delay.lock().unwrap() = Duration::from_millis(500);
+    let connecting = tokio::spawn({
+        let net = net.clone();
+        async move { net.connect_host("localhost", echo.port()).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    net.apply(NetworkConfig {
+        hold: Some("confirm the network settings first".into()),
+        ..NetworkConfig::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        connecting.await.unwrap(),
+        Err(NetError::KillSwitch(_))
+    ));
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "a direct connection went out"
+    );
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_switch_to_protected_abandons_a_direct_dial_in_flight() {
+    // A dial still in progress when the mode becomes protected must not reach the peer, not
+    // even to be dropped once it connects.
+    let (echo, hits) = echo_server().await;
+    let net = Network::start(NetworkConfig::default(), fast_options())
+        .await
+        .unwrap();
+    *net.inner.connect_delay.lock().unwrap() = Duration::from_millis(500);
+    let connecting = tokio::spawn({
+        let net = net.clone();
+        async move { net.connect(echo).await }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    net.apply(NetworkConfig {
+        hold: Some("confirm the network settings first".into()),
+        ..NetworkConfig::default()
+    })
+    .unwrap();
+    assert!(matches!(
+        connecting.await.unwrap(),
+        Err(NetError::KillSwitch(_))
+    ));
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        0,
+        "a direct connection went out"
+    );
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hold_blocks_direct_mode_until_cleared() {
     let (echo, hits) = echo_server().await;
     let held = NetworkConfig {
@@ -603,10 +832,22 @@ async fn unsupported_proxy_udp_is_refused_without_fallback_and_the_kill_switch_b
         .unwrap();
     net.settled(Duration::from_secs(5)).await;
     assert!(net.policy().bound_udp_allowed);
+    assert!(
+        net.status().udp_allowed,
+        "unknown until a UDP association is asked for"
+    );
+    let mut changes = net.status_changes();
+    changes.borrow_and_update();
     assert!(matches!(
         net.udp_socket(target).await,
         Err(NetError::Proxy(_))
     ));
+    assert!(changes.has_changed().unwrap(), "the refusal is announced");
+    assert!(!net.status().udp_allowed, "the status shows the refusal");
+    // Until the settings change.
+    net.apply(socks_mode(&proxy, Some(("alice", "pw"))))
+        .unwrap();
+    assert!(net.status().udp_allowed);
     net.shutdown();
 
     let net = Network::start(dead_proxy().await, fast_options())
@@ -644,6 +885,7 @@ async fn socks_udp_uses_only_the_relay_and_dies_with_its_control_connection() {
     let net = Network::start(cfg, fast_options()).await.unwrap();
     assert!(net.settled(Duration::from_secs(3)).await.traffic_allowed);
     let (socket, lease) = net.udp_socket(destination).await.unwrap();
+    assert!(net.status().udp_allowed);
     socket.send_to(b"via proxy", destination).await.unwrap();
     let mut bytes = [0; 64];
     let (n, from) = tokio::time::timeout(Duration::from_secs(2), socket.recv_from(&mut bytes))
@@ -740,7 +982,7 @@ fn reads_plain_text_and_json_connection_check_answers() {
 
 /// A port nothing listens on right now.
 fn free_port() -> u16 {
-    let probe = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let probe = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     probe.local_addr().unwrap().port()
 }
 
@@ -794,7 +1036,7 @@ async fn incoming_connections_are_off_until_turned_on_and_follow_the_setting() {
     let status = wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
     assert!(
         matches!(&status, IncomingStatus::Listening { port: p, upnp: false, addresses }
-            if *p == port && addresses.contains(&format!("0.0.0.0:{port}"))),
+            if *p == port && addresses.contains(&format!("127.0.0.1:{port}"))),
         "{status:?}"
     );
     assert_eq!(net.incoming_port(), Some(port));
@@ -861,7 +1103,7 @@ async fn a_random_port_is_chosen_once_and_kept() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_port_in_use_is_reported() {
-    let taken = std::net::TcpListener::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+    let taken = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = taken.local_addr().unwrap().port();
     let net = Network::start(NetworkConfig::default(), fast_options())
         .await
@@ -981,5 +1223,196 @@ async fn a_blocked_protected_mode_does_not_listen() {
     wait_for_state(&net, |s| matches!(s, ConnectionState::Error { .. })).await;
     wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Paused { .. })).await;
     assert!(!accepts_on_loopback(port).await);
+    net.shutdown();
+}
+
+/// Waits until [`Network::reachable_port`] is `want`.
+async fn wait_for_reachable(net: &Network, want: Option<u16>) {
+    let mut rx = net.status_changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while net.reachable_port() != want {
+            let _ = tokio::time::timeout(Duration::from_millis(50), rx.changed()).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("reachable port never became {want:?}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_port_is_reachable_only_while_the_router_confirms_a_public_mapping() {
+    use crate::test_util::TestGateway;
+    let public = std::net::IpAddr::from([93, 184, 216, 34]);
+    let gateway = TestGateway::start(public).await.unwrap();
+    let net = Network::start(
+        NetworkConfig::default(),
+        NetworkOptions {
+            upnp_lease: Duration::from_secs(1),
+            upnp_control_url: Some(gateway.control_url()),
+            ..fast_options()
+        },
+    )
+    .await
+    .unwrap();
+    let _peers = net.incoming_peers();
+    let port = free_port();
+    // Listening without a mapping: not reachable.
+    net.set_incoming(incoming(port));
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(net.reachable_port(), None);
+    assert!(gateway.mapped_ports().is_empty(), "UPnP is off");
+
+    // The router maps the port.
+    net.set_incoming(IncomingConfig {
+        upnp: true,
+        ..incoming(port)
+    });
+    wait_for_reachable(&net, Some(port)).await;
+    assert!(gateway.mapped_ports().contains(&port));
+
+    // The router stops renewing it: lost once the lease ends.
+    gateway.set_external(None);
+    wait_for_reachable(&net, None).await;
+    // Back again.
+    gateway.set_external(Some(public));
+    wait_for_reachable(&net, Some(port)).await;
+
+    // A mapping on a router behind another NAT does not count.
+    gateway.set_external(Some(std::net::IpAddr::from([100, 64, 0, 1])));
+    wait_for_reachable(&net, None).await;
+    gateway.set_external(Some(public));
+    wait_for_reachable(&net, Some(port)).await;
+
+    // Closing the listener forgets the mapping at once, and asks the router to remove it.
+    assert!(gateway.unmapped_ports().is_empty());
+    net.set_incoming(IncomingConfig::default());
+    wait_for_incoming(&net, |s| *s == IncomingStatus::Off).await;
+    assert_eq!(net.reachable_port(), None);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while gateway.unmapped_ports().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the mapping is removed");
+    assert_eq!(gateway.unmapped_ports(), [port]);
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_closed_listener_abandons_a_pending_port_mapping() {
+    // A router that takes requests and never answers them, counting the connections and those
+    // the client closed.
+    let router = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = router.local_addr().unwrap();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(AtomicUsize::new(0));
+    let (counted, ended) = (Arc::clone(&requests), Arc::clone(&closed));
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = router.accept().await {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let ended = Arc::clone(&ended);
+            tokio::spawn(async move {
+                let mut buf = [0; 4096];
+                while matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {}
+                ended.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+    });
+    let net = Network::start(
+        NetworkConfig::default(),
+        NetworkOptions {
+            upnp_lease: Duration::from_millis(400),
+            upnp_control_url: Some(format!("http://{addr}/control")),
+            ..fast_options()
+        },
+    )
+    .await
+    .unwrap();
+    let _peers = net.incoming_peers();
+    let port = free_port();
+    net.set_incoming(IncomingConfig {
+        upnp: true,
+        ..incoming(port)
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while requests.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the mapping is requested");
+    net.set_incoming(IncomingConfig::default());
+    wait_for_incoming(&net, |s| *s == IncomingStatus::Off).await;
+    let sent = requests.load(Ordering::SeqCst);
+    // The pending request is dropped at once, well within the request timeout (5 s), and
+    // several renewal periods later nothing more was sent and nothing was recorded.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(
+        closed.load(Ordering::SeqCst),
+        sent,
+        "the request was abandoned"
+    );
+    assert_eq!(requests.load(Ordering::SeqCst), sent);
+    assert_eq!(net.reachable_port(), None);
+    net.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peer_connecting_in_makes_the_port_reachable_for_a_while() {
+    let net = Network::start(
+        NetworkConfig::default(),
+        NetworkOptions {
+            reachable_after_inbound: Duration::from_secs(1),
+            ..fast_options()
+        },
+    )
+    .await
+    .unwrap();
+    let mut peers = net.incoming_peers();
+    let port = free_port();
+    // Listening, no UPnP, nobody connected yet: not reachable.
+    net.set_incoming(incoming(port));
+    wait_for_incoming(&net, |s| matches!(s, IncomingStatus::Listening { .. })).await;
+    assert_eq!(net.reachable_port(), None);
+
+    // A peer connects in (a port forwarded by hand, as far as TorrentPlayer can tell).
+    let _client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), peers.next())
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for_reachable(&net, Some(port)).await;
+    // Nobody else connects: no longer reachable once the time is up, and status_changes says
+    // so.
+    let mut changes = net.status_changes();
+    changes.borrow_and_update();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while net.reachable_port().is_some() {
+            changes.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("a status change reports the expiry");
+
+    // A peer of a closed listener does not count for the next one.
+    let _client = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), peers.next())
+        .await
+        .unwrap()
+        .unwrap();
+    wait_for_reachable(&net, Some(port)).await;
+    let moved = free_port();
+    net.set_incoming(incoming(moved));
+    wait_for_incoming(
+        &net,
+        |s| matches!(s, IncomingStatus::Listening { port, .. } if *port == moved),
+    )
+    .await;
+    assert_eq!(net.reachable_port(), None);
     net.shutdown();
 }

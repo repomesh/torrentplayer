@@ -14,9 +14,9 @@ The webview talks to the Rust backend only through Tauri commands (request/respo
   `cargo test -p torrentplayer-app` writes them to `ui/src/lib/bindings/`. Never edit those files by hand;
   CI fails if they are out of date.
 - **One wrapper module.** Frontend code calls commands only through `ui/src/lib/ipc.ts`.
-- **Naming.** Commands are `snake_case` verbs or nouns (`app_info`, `add_torrent`). Events are
-  `kebab-case` with a subsystem prefix (`stream-stats`, `net-state-changed`). Payload fields are
-  `camelCase` (`#[serde(rename_all = "camelCase")]`).
+- **Naming.** Commands are `snake_case` verbs or nouns (`app_info`, `add_torrent_link`). Events
+  are `kebab-case` with a subsystem prefix (`settings-changed`, `network-status`). Payload fields
+  are `camelCase` (`#[serde(rename_all = "camelCase")]`).
 
 ## Errors
 
@@ -50,20 +50,24 @@ a generic message).
 
 `errorMessage` in `ui/src/lib/ipc.ts` shows `message` as is, and for `kill-switch` and
 `network-unavailable` adds what it means and what to do (nothing was sent; traffic resumes by
-itself; check Settings → Network).
+itself; check Settings → Network & VPN).
 
 ## Engines
 
 Torrents are served by one of two engines behind the same commands (`torrentplayer_torrent::StreamEngine`):
 
-- **torrentplayer-swarm**, TorrentPlayer's own streaming-first engine, for `.torrent` files and http(s) links to
-  them. See [ADR 0006](adr/0006-streaming-engine.md).
-- **librqbit** for magnet links (torrentplayer-swarm resolves magnets from milestone M3). It starts
-  lazily, the first time a magnet link is added.
+- **torrentplayer-swarm**, TorrentPlayer's own streaming-first engine, for every source by
+  default: `.torrent` files, http(s) links to them, and magnet links. See
+  [ADR 0006](adr/0006-streaming-engine.md).
+- **librqbit** fetches a magnet link's metadata for torrentplayer-swarm (metadata only), and
+  serves every torrent when it is chosen as the engine. It starts lazily, the first time it is
+  needed, and its session (DHT node, trackers, listener) stops after a minute with no torrents
+  and nothing in flight; the next magnet link starts a new one.
 
-The `TORRENTPLAYER_ENGINE` environment variable overrides the choice: `auto` (default), `swarm` (magnet
-links are refused with `source-refused`), or `rqbit` (everything through librqbit). The engine
-serving a stream is reported in `StreamStats.engine` and logged when the stream starts.
+The `advanced.engine` setting, or the `TORRENTPLAYER_ENGINE` environment variable (which
+overrides it), chooses: `auto` (default) or `swarm` (torrentplayer-swarm for everything), or
+`rqbit` (everything through librqbit). The engine serving a stream is reported in
+`StreamStats.engine` and logged when the stream starts.
 
 ## Commands
 
@@ -90,13 +94,17 @@ type AppInfo = {
 
 Adds a torrent from a magnet link or an http(s) link to a `.torrent` file, with no files
 selected. Only `magnet:`, `http:`, and `https:` are accepted; downloaded `.torrent` files are
-limited to 16 MiB. Redirects are followed only to http(s); an http(s) link that redirects to a
+limited to 16 MiB. Links and their redirects must lead to public hosts: addresses and names that
+resolve to the local network (private, loopback, link-local, `localhost`) are refused, and
+redirects are followed at most 5 times, only to http(s), and never from https to http. An http(s) link that redirects to a
 magnet link (as search sites' download links, such as `search.emberglow.tech/download/…`, do
 for indexers that only have magnets) adds that magnet link (`StreamEngine::resolve_source`;
 adds, preloads, and prefetches resolve links the same way). What each link gave is remembered
 (256 links), so following it again sends no request; links are never logged, since search sites
 put tokens in them. The search service's own download links count against the search rate
-limiter. Adding a torrent that is already present returns the existing one. `TorrentSummary.magnet` is a magnet link that adds the torrent again; for
+limiter. Before either engine reads a `.torrent` file (from a file, a link, or a search
+result), it is refused as malformed if its piece length is 0 or above 64 MiB, it has no data,
+or its file lengths overflow. Adding a torrent that is already present returns the existing one. `TorrentSummary.magnet` is a magnet link that adds the torrent again; for
 torrents in torrentplayer-swarm it carries up to 20 of their trackers (about 4 KiB at most).
 
 |            |                                                                  |
@@ -142,7 +150,7 @@ and the final 10 seconds are not offered.
 
 Reports the player's position, on every seek and about once a second. Seeks re-prioritize
 immediately. Playback history is persisted on the first report, after a seek, at completion,
-every five seconds during ordinary playback, on stream stop, and at shutdown. Database failures
+every 30 seconds during ordinary playback, on stream stop, and at shutdown. Database failures
 are logged but never interrupt playback. Without `durationSecs` (the player cannot tell, for
 example a Matroska file with no
 duration in its header), the duration from the container header or `ffprobe` is used, once
@@ -224,13 +232,16 @@ from `start` seconds, and stops the stream's previous conversion. Waits for the 
 FFmpeg's initialization segment (at most 60 s). The result is a live stream: fragmented MP4 with
 the video copied and the original timestamps, read once with `fetch` and fed to Media Source
 Extensions (see `ui/src/lib/converted.ts` and [ADR 0007](adr/0007-dolby-and-dts-audio.md)).
+The player keeps what it buffers within 96 MiB, sized by the stream's measured bitrate (10–60 s
+ahead and 4–30 s behind, the short end for high-bitrate video), waits for playback when the
+buffer is full anyway, and retries a failed start or read twice before giving up.
 
-|            |                                                                                                      |
-| ---------- | ---------------------------------------------------------------------------------------------------- |
-| Arguments  | `{ streamId: number, start: number }`                                                                |
-| Returns    | [`ConvertedStream`](../ui/src/lib/bindings/ConvertedStream.ts)                                       |
-| Errors     | `not-found`, `invalid-argument` (bad `start`, or audio that needs no conversion), `audio-conversion` |
-| Permission | `allow-convert-audio`                                                                                |
+|            |                                                                                                                                                                                    |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Arguments  | `{ streamId: number, start: number }`                                                                                                                                              |
+| Returns    | [`ConvertedStream`](../ui/src/lib/bindings/ConvertedStream.ts)                                                                                                                     |
+| Errors     | `not-found` (also when a newer call replaced this one), `invalid-argument` (bad `start`, or audio that needs no conversion), `audio-conversion` (also a build without the sidecar) |
+| Permission | `allow-convert-audio`                                                                                                                                                              |
 
 ```ts
 type ConvertedStream = {
@@ -362,7 +373,8 @@ the container, and a size check that flags fake 4K. The formula is documented in
 `crates/torrentplayer-search/src/rank.rs`. Each result carries its parsed `quality`, a short `reason`
 (for example `1080p WEB-DL · 412 seeders · plays in built-in player`), its `quality.kind`
 (`video`, `notVideo` for audio, ebooks, software, and games, or `unknown`; with
-`quality.audio` and `quality.audioPlays` for the audio codec the title names; `health` and
+`quality.audio`, `quality.audioPlays`, and `quality.audioConverted` for the audio codec the title
+names (Dolby and DTS play, converted to stereo, when the build has the bundled FFmpeg); `health` and
 `suspicious` from the search service; the search page hides
 `notVideo` results by default and never hides `unknown` ones), and `bestPick`: at most
 one result, always first, that contains every query word, has seeders, is a video, and is not a
@@ -464,7 +476,7 @@ sent to `onReady` as it is ready. A result with a download link on the search se
 fetched through it first (plain HTTP when the link serves the `.torrent` file, which also works
 without the DHT; most redirect to a magnet link), the torrent it gives is checked against
 `infoHash` when that is known, and the magnet link is used if the link fails, is refused (16 MiB
-limit, http(s)-only redirects), or gives another torrent. Download links count against the
+limit, public hosts and http(s)-only redirects without downgrades), or gives another torrent. Download links count against the
 search rate limiter, and only the first four per call are followed: each new one costs the
 service a request to an indexer, and its operators ask clients to follow only links they will
 use. A newer
@@ -473,12 +485,13 @@ from peers (no files are created, nothing is downloaded or uploaded); a `.torren
 downloaded. The metadata gets the same checks as an add (file paths, file count) and is kept in
 the engine with the peers seen (64 torrents, 64 MiB at most, least recently used evicted), so
 adding or preloading that torrent later skips asking peers for it: in torrentplayer-swarm it uses the
-kept metadata and peers, and with librqbit (automatic engine, magnet links) it is added from
-the kept metadata and still finds peers through the DHT and trackers. Concurrent fetches of the
-same torrent (a prefetch and an add) wait for each other. Failures are only logged; playing a
-result fetches its metadata itself if needed. Traffic follows the network mode: protected modes
-have no DHT, so magnet links without working trackers fail there, and in protected modes
-librqbit is given the magnet link, not the kept metadata. Does nothing while
+kept metadata and peers, and with the `rqbit` engine choice librqbit adds it from the kept
+metadata and still finds peers through the DHT and trackers. Concurrent fetches of the same
+torrent (a prefetch and an add) wait for each other. Failures are only logged; playing a result
+fetches its metadata itself if needed. Traffic follows the network mode: in protected modes
+peers come from the mode's own scoped DHT and trackers (no UDP through a TCP-only SOCKS5 proxy,
+so magnet links without working HTTP trackers fail there), and librqbit, when it is the engine,
+is given the magnet link, not the kept metadata. Does nothing while
 `search.preloadTopResult` is off. Starts the engine.
 
 |            |                                                                                                       |
@@ -566,9 +579,12 @@ the magnet link, as [`prefetch_torrents`](#prefetch_torrents) does), which start
 
 Opens an indexer's page (a result's `detailsUrl`) in the system browser. Only http(s) links
 with a host name, no user name or password, at most 2 KiB, and not on this computer or the local
-network (`localhost`, `.local`, loopback, private, and link-local addresses) are opened; the
-link is handed to the system's own handler as one argument (`rundll32 url.dll` on Windows,
-`open` on macOS, `xdg-open` on Linux), never through a shell, and is not logged.
+network (`localhost`, `.local`, and every address `torrentplayer_net::is_public_ip` rejects:
+loopback, private, link-local, `100.64.0.0/10`, IPv4-mapped IPv6, and other reserved ranges) are
+opened; the link is handed to the system's own handler as one argument (`rundll32 url.dll` on
+Windows, `open` on macOS, `xdg-open` on Linux), never through a shell, and is not logged. The
+browser does not use TorrentPlayer's network mode, so in the SOCKS5 and WireGuard modes the
+result details say the page opens outside the proxy or tunnel.
 
 |            |                                                   |
 | ---------- | ------------------------------------------------- |
@@ -633,16 +649,22 @@ whole after each change. Each item holds only what is needed to play it again: t
 link (`source`: a magnet link, or an http(s) link to a `.torrent` file; torrents opened from a
 file are saved as their `TorrentSummary.magnet`, with the info hash, name, and up to 20 of the
 file's trackers; a magnet link may list at most 64 trackers), `fileIndex` (`null` plays the
-torrent's main video), `title`, `torrentName`, `sizeBytes`, and `infoHash`. The `paused`,
-`skipped`, and `played` flags separately record download pauses, videos passed over, and videos
-that reached their end. Stream URLs are never stored: links to this computer (`localhost`,
+torrent's main video), `title`, `torrentName`, `sizeBytes`, `infoHash`, and `addedAt` (when
+it was queued, milliseconds since the Unix epoch; absent for items queued before 0.3.1). The
+`paused` and `played` flags separately record the user's pause (of download and upload together)
+and videos that reached their end; only the user sets `paused`. Items saved with `skipped: true`
+(0.3.0) load as paused, and `skipped` and the queue's old `order` are dropped on the next save. Stream URLs are never stored: links to this computer (`localhost`,
 loopback addresses) are refused.
 
 #### `load_queue`
 
 The saved queue (`queue.json` in the app data folder), or an empty one. Invalid items are
-dropped, a `current` that names no item is cleared, and a damaged file is set aside as
-`queue.invalid.json`.
+dropped and a `current` that names no item is cleared. A file that cannot be read or is damaged
+gives an empty queue and is copied to `queue.invalid-<time>.json` (an existing copy is never
+replaced); a file with dropped items, or from a newer version (`queue.newer-<time>.json`), is
+copied the same way before it is first replaced. `save_queue` fails rather than replace a file
+that has no copy yet. While the queue loaded with such problems, finished downloads are not
+cleaned up.
 
 |            |                                                                          |
 | ---------- | ------------------------------------------------------------------------ |
@@ -690,8 +712,7 @@ playback are left and the rest of the file arrives in under half that time
 
 #### `queue_readiness`
 
-How ready queued videos are to play, for the queue's "Ready" badges and "Play ready videos
-first" (`playback.optimizeQueue`). Each answer is `complete` (downloaded), `ready` (its start
+How ready queued videos are to play, for the queue's "Ready" labels. Each answer is `complete` (downloaded), `ready` (its start
 and end are present, as much as a preload leaves, so it starts at once), or `waiting`. Only
 items in torrents that are already added (a preload's included) and that name a 40-hex info
 hash are answered; the others, and everything before the engine has started, are left out. It
@@ -713,12 +734,13 @@ the video being watched (see "Background downloads" in [architecture](architectu
 item reports a `state` (`queued`, `starting`, `connecting`, `downloading`, `paused`,
 `complete`, `watching`, `failed`), its torrent's rate and peers, its file's downloaded bytes
 and length, the time left at the current rate, whether it can start at once (`startable`),
-whether its rate is held back for playback (`limited`), and why a queued item waits
-(`waitReason`: `playback` or `limit`). `link` gives the estimated capacity, the total rate,
+whether its rate is held back for playback (`limited`), whether its torrent shares with other
+peers now (`uploading`), and why a queued item waits (`waitReason`: `playback`, shown as
+"Waiting for playback", or `limit`). `paused` is only ever the user's pause. `link` gives the estimated capacity, the total rate,
 playback's need, the pressure (`relaxed`, `guarded`, `starving`), the user's maximum of
 downloads at once (`maxActive`, `null` for none), and how many items download. The downloader updates it about once a second; the call only reads
-that, so it never starts the engine. Pause an item, or change the order, with `save_queue`
-(`QueueItem.paused`, `Queue.order`). The UI asks every second while the queue is on screen.
+that, so it never starts the engine. Pause an item with `save_queue` (`QueueItem.paused`);
+the queue downloads in its own order. The UI asks every second while the queue is on screen.
 
 |            |                                                                                                                                                                                                     |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -726,6 +748,19 @@ that, so it never starts the engine. Pause an item, or change the order, with `s
 | Returns    | [`DownloadsSnapshot`](../ui/src/lib/bindings/DownloadsSnapshot.ts): `items` ([`ItemDownload`](../ui/src/lib/bindings/ItemDownload.ts)`[]`), `link` ([`LinkUse`](../ui/src/lib/bindings/LinkUse.ts)) |
 | Errors     | none                                                                                                                                                                                                |
 | Permission | `allow-queue-downloads`                                                                                                                                                                             |
+
+#### `link_use`
+
+Only the `link` part of `queue_downloads`, for the status bar's total download and upload
+speed, so the bar does not receive every queue item. Never starts the engine. The UI asks
+every 2 s.
+
+|            |                                                                        |
+| ---------- | ---------------------------------------------------------------------- |
+| Arguments  | none                                                                   |
+| Returns    | [`LinkUse`](../ui/src/lib/bindings/LinkUse.ts) (see `queue_downloads`) |
+| Errors     | none                                                                   |
+| Permission | `allow-link-use`                                                       |
 
 #### `preview_file`
 
@@ -742,7 +777,9 @@ call stops the previous one's wait (its answer is empty). Never starts the engin
   as text, never as HTML.
 - **Videos**: a stream URL in `video` for a still frame, only when the file's start and end
   are already downloaded (so showing it downloads nothing new); otherwise a `note`. The URL
-  carries a session token: never log it. The previous preview's URL is withdrawn.
+  carries a session token: never log it. The previous preview's URL is withdrawn, also when a
+  file of another kind is previewed. While it is published, its torrent is kept from cache
+  clean-up.
 - **Anything else** (PDFs, archives, HTML, programs): metadata only. Nothing is rendered,
   executed, or opened.
 
@@ -754,6 +791,18 @@ A file that does not arrive within 20 s gives a `note` ("Still downloading…").
 | Returns    | [`FilePreviewDto`](../ui/src/lib/bindings/FilePreviewDto.ts): `kind`, `image`, `text`, `truncated`, `video`, `note` |
 | Errors     | `not-found` (torrent or file, or the engine has not started)                                                        |
 | Permission | `allow-preview-file`                                                                                                |
+
+#### `stop_preview`
+
+Called when the file explorer closes: stops a preview still waiting and withdraws the preview
+video's stream, so its torrent is no longer kept from cache clean-up.
+
+|            |                      |
+| ---------- | -------------------- |
+| Arguments  | none                 |
+| Returns    | nothing              |
+| Errors     | none                 |
+| Permission | `allow-stop-preview` |
 
 ### FFmpeg (optional)
 
@@ -799,16 +848,17 @@ prints, for the Settings page.
 
 #### `choose_ffmpeg_dir`
 
-Opens the system folder picker for the FFmpeg folder and returns the chosen path, or `null` if
-the user cancelled. Nothing is saved: the Settings page passes it to `update_settings` as
-`advanced.ffmpegDir`.
+Opens the system folder picker for the FFmpeg folder and saves the choice as
+`advanced.ffmpegDir` (validated like any change, and refused inside a download folder). Returns the
+saved `SettingsView`, or `null` if the user cancelled. This is the only way to set the folder:
+`update_settings` refuses a new value, because the programs in it run.
 
-|            |                           |
-| ---------- | ------------------------- |
-| Arguments  | none                      |
-| Returns    | `string` or `null`        |
-| Errors     | none                      |
-| Permission | `allow-choose-ffmpeg-dir` |
+|            |                                                                                      |
+| ---------- | ------------------------------------------------------------------------------------ |
+| Arguments  | none                                                                                 |
+| Returns    | `SettingsView` or `null`                                                             |
+| Errors     | `invalid-argument` (a network folder, or one inside the download folder), `internal` |
+| Permission | `allow-choose-ffmpeg-dir`                                                            |
 
 ### Settings
 
@@ -835,8 +885,9 @@ Applies a partial update with the same shape as
 [`Settings`](../ui/src/lib/bindings/Settings.ts), containing only the changed fields, for example
 `{ "bandwidth": { "peerLimit": 80 } }`; `null` clears an optional setting. The patch must be an
 object of at most 64 KiB, may not contain `version`, and may name only existing settings. The
-merged result is fully validated, and nothing is saved unless all of it is valid. A changed
-download folder is created and checked for write access first. On success the file is saved
+merged result is fully validated, and nothing is saved unless all of it is valid. A new
+`storage.downloadDir` or `advanced.ffmpegDir` is refused (`invalid-argument`): only
+`choose_download_dir` and `choose_ffmpeg_dir` set them; `null` (the default) is accepted. On success the file is saved
 atomically, the log level is applied at once, and `settings-changed` is emitted.
 
 |            |                                                                                                                   |
@@ -913,17 +964,17 @@ frontend asks for confirmation first.
 #### `choose_download_dir`
 
 Opens the system folder picker (modal to the window), starting at the saved download folder if it
-exists, and returns the chosen folder's full path, or `null` if the user cancelled. Nothing is
-saved: the Settings page passes the result to `update_settings` as `storage.downloadDir`, which
-validates it and checks that it is writable. The webview gets no general file-dialog or
+exists, and saves the chosen folder as `storage.downloadDir` (validated, and checked to be
+writable). Returns the saved `SettingsView`, or `null` if the user cancelled. This is the only way
+to set the folder: `update_settings` refuses a new value (`null`, the default folder, is allowed). The webview gets no general file-dialog or
 file-system permission.
 
-|            |                             |
-| ---------- | --------------------------- |
-| Arguments  | none                        |
-| Returns    | `string` or `null`          |
-| Errors     | none                        |
-| Permission | `allow-choose-download-dir` |
+|            |                                                                                  |
+| ---------- | -------------------------------------------------------------------------------- |
+| Arguments  | none                                                                             |
+| Returns    | `SettingsView` or `null`                                                         |
+| Errors     | `invalid-argument` (a network folder, or one that cannot be written), `internal` |
+| Permission | `allow-choose-download-dir`                                                      |
 
 ### Network
 
@@ -933,9 +984,10 @@ the backend follows every `update_settings`, `set_secret`, and `clear_secret` (t
 command). A Settings page saves the network section, then shows `network-status` events or
 calls `network_status`. A protected mode with incomplete settings (no host, no WireGuard
 configuration, a username without a stored password) is reported as state `error` with a
-reason, and blocks traffic. So is Direct mode while `network.vpnAdapterModeRemoved` is set
-(settings migrated from the removed VPN adapter mode): traffic is held until
-`update_settings` clears it (see [Network](network.md#using-a-vpn-app)).
+reason, and blocks traffic. So is Direct mode while `network.hold` is set
+(settings migrated from the removed VPN adapter mode, or settings that could not be read):
+traffic is held until `update_settings` clears it with `{"network": {"hold": null}}` (see
+[Network](network.md#using-a-vpn-app)).
 
 #### `network_status`
 
@@ -957,8 +1009,9 @@ carry a `reason`.
 
 #### `recheck_network`
 
-Checks the proxy or WireGuard tunnel now instead of at the next 5-second interval (a "Try again" button
-while the kill switch is engaged), waits up to 6 s for the result, and returns the status.
+Checks the proxy or WireGuard tunnel now instead of at the next scheduled check (every 5 s, up
+to 80 s for an idle SOCKS5 proxy; a "Try again" button while the kill switch is engaged), waits
+up to 6 s for the result, and returns the status.
 
 |            |                                                            |
 | ---------- | ---------------------------------------------------------- |
@@ -991,9 +1044,10 @@ checks it as `validate_wireguard_config` does, refuses files with more than one 
 preshared key, if any, under `wireGuardPresharedKey` (removing an old one otherwise), and saves
 the non-secret parts (addresses, DNS, MTU, the peer's public key, endpoint, allowed ranges, and
 keep-alive, plus `name`) in `network.wireguard`. The merged settings are validated before any key
-is stored, so an invalid file saves nothing. The text is wiped from memory after parsing. Emits
-`settings-changed` once. The built-in tunnel does not exist yet, so importing does not change the
-mode.
+is stored, so an invalid file saves nothing, and if the settings cannot be saved the previous
+keys are put back; no other settings change can run during the import. The text is wiped from
+memory after parsing. Emits `settings-changed` once. Importing does not change the mode; while
+WireGuard is selected, the new configuration starts a new tunnel.
 
 |            |                                                                                                                                          |
 | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1038,7 +1092,7 @@ The status bar's latest public addresses, kept current by the app (see the publi
 | `library-changed`   | [`LibraryItem`](../ui/src/lib/bindings/LibraryItem.ts)     | After an item is opened or a playback checkpoint is saved.         |
 | `network-status`    | [`NetworkStatus`](../ui/src/lib/bindings/NetworkStatus.ts) | At start-up and whenever the network state changes.                |
 | `network-public-ip` | [`PublicIp`](../ui/src/lib/bindings/PublicIp.ts) or `null` | When the status bar's public addresses change (see `public_ip`).   |
-| `seeding-started`   | none                                                       | When a torrent starts seeding after a playback ends (once each).   |
+| `seeding-started`   | none                                                       | The first time in a run that a torrent uploads to other peers.     |
 
 The main window may listen to events (`core:event:allow-listen` and `core:event:allow-unlisten`
 in `src-tauri/capabilities/main.json`; it cannot emit them). The frontend follows

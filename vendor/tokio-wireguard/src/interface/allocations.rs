@@ -56,16 +56,22 @@ impl Allocations {
 
         match address.port() {
             0 => {
+                // Modified for TorrentPlayer: try every ephemeral port once, from a random
+                // start. The loop used to stop as soon as the start port was taken (its check
+                // matched on the first try), so one collision failed the bind.
                 let start = rng.gen_range(Self::EPHEMERAL_RANGE);
                 let mut port = start;
                 loop {
-                    match self.acquire((ip, port), proto, rng) {
-                        Some(port) => break Some(port),
-                        None if port == start => break None,
-                        None if port == Self::EPHEMERAL_RANGE.end => {
-                            port = Self::EPHEMERAL_RANGE.start
-                        }
-                        None => port += 1,
+                    if let Some(allocation) = self.acquire((ip, port), proto, rng) {
+                        break Some(allocation);
+                    }
+                    port = if port + 1 >= Self::EPHEMERAL_RANGE.end {
+                        Self::EPHEMERAL_RANGE.start
+                    } else {
+                        port + 1
+                    };
+                    if port == start {
+                        break None;
                     }
                 }
             }
