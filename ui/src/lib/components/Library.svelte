@@ -4,15 +4,36 @@
   import { formatBytes } from '../format';
   import { groupLibrary, resumePosition, watchedFraction, watchedLabel } from '../library';
   import { formatTime } from '../seekbar';
+  import { errorMessage } from '../ipc';
 
   interface Props {
     items: readonly LibraryItem[];
     isBusy: (item: LibraryItem) => boolean;
     onPlay: (item: LibraryItem) => void;
+    onRemove: (infoHash: string) => Promise<void>;
   }
 
-  let { items, isBusy, onPlay }: Props = $props();
+  let { items, isBusy, onPlay, onRemove }: Props = $props();
   const courses = $derived(groupLibrary(items));
+  let confirming = $state<string | null>(null);
+  let removing = $state<string | null>(null);
+  let removeError = $state<string | null>(null);
+
+  async function remove(infoHash: string): Promise<void> {
+    if (removing !== null) {
+      return;
+    }
+    removing = infoHash;
+    removeError = null;
+    try {
+      await onRemove(infoHash);
+      confirming = null;
+    } catch (reason: unknown) {
+      removeError = errorMessage(reason);
+    } finally {
+      removing = null;
+    }
+  }
 
   function progress(item: LibraryItem): string {
     const saved = watchedLabel(item);
@@ -60,13 +81,54 @@
     <div class="courses">
       {#each courses as course (course.key)}
         <section class="course" aria-labelledby={`course-${course.key}`}>
-          <h3 id={`course-${course.key}`}>{course.name}</h3>
+          <div class="course-heading">
+            <h3 id={`course-${course.key}`}>{course.name}</h3>
+            <button
+              type="button"
+              class="remove"
+              disabled={removing !== null || course.items.some(isBusy)}
+              aria-label={`Remove ${course.name} from the library and delete its downloads`}
+              aria-expanded={confirming === course.key}
+              onclick={() => {
+                confirming = course.key;
+                removeError = null;
+              }}>Remove torrent</button
+            >
+          </div>
+          {#if confirming === course.key}
+            <div class="confirm" role="group" aria-labelledby={`remove-${course.key}`}>
+              <p id={`remove-${course.key}`}>
+                Remove this torrent from the library and queue and permanently delete all its
+                downloaded files? Playback of this torrent will stop.
+              </p>
+              <div class="confirm-actions">
+                <button
+                  type="button"
+                  class="danger"
+                  disabled={removing !== null}
+                  onclick={() => void remove(course.key)}
+                >
+                  {removing === course.key ? 'Removing…' : 'Remove and delete downloads'}
+                </button>
+                <button
+                  type="button"
+                  disabled={removing !== null}
+                  onclick={() => {
+                    confirming = null;
+                    removeError = null;
+                  }}>Cancel</button
+                >
+              </div>
+              {#if removeError}<p class="error" role="alert">{removeError}</p>{/if}
+            </div>
+          {/if}
           <ul>
             {#each course.items as item (`${item.infoHash}:${String(item.fileIndex)}`)}
               {@const fraction = watchedFraction(item)}
               <li>
                 <button
                   type="button"
+                  class="open"
                   disabled={isBusy(item)}
                   onclick={() => {
                     onPlay(item);
@@ -160,7 +222,7 @@
   }
 
   .course h3 {
-    margin: 0 0 0.55rem;
+    margin: 0;
     color: var(--text-muted);
     font-size: 0.8rem;
     font-weight: 600;
@@ -176,7 +238,7 @@
     list-style: none;
   }
 
-  button {
+  button.open {
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
@@ -315,9 +377,59 @@
       display: none;
     }
 
-    button {
+    button.open {
       grid-template-columns: auto minmax(0, 1fr);
     }
+  }
+
+  .course-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 0.55rem;
+  }
+
+  .course-heading h3 {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .remove,
+  .confirm button {
+    flex: none;
+    padding: 0.4rem 0.65rem;
+    border: 1px solid rgb(255 255 255 / 15%);
+    border-radius: 0.4rem;
+    background: var(--surface);
+    color: var(--text-muted);
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+  }
+
+  .confirm {
+    margin-bottom: 0.75rem;
+    padding: 0.8rem;
+    border: 1px solid rgb(232 144 122 / 35%);
+    border-radius: 0.6rem;
+    background: rgb(232 144 122 / 6%);
+    font-size: 0.85rem;
+  }
+
+  .confirm p {
+    margin: 0 0 0.6rem;
+  }
+
+  .confirm-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .confirm .danger,
+  .confirm .error {
+    color: #e8907a;
   }
 
   @media (prefers-reduced-motion: reduce) {

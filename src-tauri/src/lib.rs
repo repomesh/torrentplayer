@@ -244,6 +244,7 @@ pub fn run() -> anyhow::Result<()> {
             downloads::file_save_status,
             commands::link_use,
             library::library_items,
+            library::remove_library_torrent,
             preview::preview_file,
             preview::stop_preview,
             media::seek_thumbnail,

@@ -135,12 +135,14 @@
       label="Current download folder"
       help="Downloads continue here until TorrentPlayer restarts. Click the location to select it."
     >
-      <CopyPath
-        id="storage-active-dir"
-        path={view.activeDownloadDir}
-        label="Current download folder"
-        describedBy="storage-active-dir-help"
-      />
+      <div class="folder">
+        <CopyPath
+          id="storage-active-dir"
+          path={view.activeDownloadDir}
+          label="Current download folder"
+          describedBy="storage-active-dir-help"
+        />
+      </div>
     </Field>
   {/if}
   <Field
@@ -267,6 +269,9 @@
     flex-direction: column;
     align-items: flex-end;
     gap: 0.4rem;
+    width: 27rem;
+    max-width: 100%;
+    min-width: 0;
   }
 
   .folder-actions {

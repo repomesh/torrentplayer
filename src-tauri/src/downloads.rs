@@ -67,6 +67,8 @@ struct Inner {
     wake: Notify,
     /// Serializes queue changes and stream starts with cache removal.
     cache_gate: tokio::sync::Mutex<()>,
+    /// Explicitly deleted torrents cannot be restored by an older metadata task.
+    retired: Mutex<HashSet<String>>,
 }
 
 impl DownloadsState {
@@ -78,6 +80,7 @@ impl DownloadsState {
                 snapshot: Mutex::new(DownloadsSnapshot::default()),
                 wake: Notify::new(),
                 cache_gate: tokio::sync::Mutex::new(()),
+                retired: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -85,6 +88,12 @@ impl DownloadsState {
     /// Follows a newly saved queue (order, pauses, items) at once.
     pub(crate) async fn set_queue(&self, queue: Queue) {
         let _gate = self.inner.cache_gate.lock().await;
+        let wanted = crate::cache::queue_hashes(&queue);
+        self.inner
+            .retired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|hash| !wanted.contains(hash));
         *self
             .inner
             .queue
@@ -103,6 +112,23 @@ impl DownloadsState {
 
     pub(crate) fn cache_gate(&self) -> &tokio::sync::Mutex<()> {
         &self.inner.cache_gate
+    }
+
+    /// Called under the cache gate after the torrent is removed from the queue.
+    pub(crate) fn retire_hash(&self, hash: &str) {
+        self.inner
+            .retired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(hash.to_ascii_lowercase());
+    }
+
+    fn is_retired(&self, hash: &str) -> bool {
+        self.inner
+            .retired
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&hash.to_ascii_lowercase())
     }
 
     /// The connection totals from the latest snapshot, without copying the items.
@@ -1029,6 +1055,41 @@ fn spawn_add(
         .await;
         match added {
             Ok(Ok(info)) => {
+                let downloads = app.state::<DownloadsState>();
+                let _gate = downloads.cache_gate().lock().await;
+                if downloads.is_retired(&info.info_hash) {
+                    let queue = downloads.queue();
+                    let wanted = crate::cache::queue_hashes(&queue).contains(&info.info_hash)
+                        || queue
+                            .items
+                            .iter()
+                            .any(|item| item.info_hash.is_none() && item.source == link);
+                    let playing = core
+                        .streams
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .values()
+                        .any(|stream| stream.torrent == info.id);
+                    if !wanted && !playing {
+                        core.engine
+                            .remove(info.id)
+                            .await
+                            .map_err(|error| IpcError::from(error).message)?;
+                        let root = app
+                            .state::<crate::settings::SettingsState>()
+                            .active_download_dir();
+                        crate::settings::remove_cache_entry(root, info.info_hash)
+                            .await
+                            .map_err(|error| error.message)?;
+                        return Err("This torrent was removed from the library.".to_owned());
+                    }
+                    downloads
+                        .inner
+                        .retired
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(&info.info_hash);
+                }
                 tracing::info!(
                     torrent = info.id,
                     "queued torrent added for background download"
@@ -1067,6 +1128,21 @@ mod tests {
         let c = item("c", None, false);
         assert_eq!(group_of(&a), group_of(&b));
         assert_eq!(group_of(&c), "link:https://example.org/c.torrent");
+    }
+
+    #[tokio::test]
+    async fn an_explicit_requeue_allows_a_removed_torrent_to_download_again() {
+        let hash = "a".repeat(40);
+        let state = DownloadsState::new(Queue::default());
+        state.retire_hash(&hash);
+        assert!(state.is_retired(&hash.to_uppercase()));
+        state
+            .set_queue(Queue {
+                items: vec![item("requeued", Some(&hash), false)],
+                current: None,
+            })
+            .await;
+        assert!(!state.is_retired(&hash));
     }
 
     #[test]

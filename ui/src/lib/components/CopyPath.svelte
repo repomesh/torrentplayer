@@ -70,21 +70,21 @@
 
 <style>
   .location {
-    width: 27rem;
+    width: 100%;
     max-width: 100%;
     min-width: 0;
   }
 
   .row {
-    display: flex;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: center;
     gap: 0.4rem;
   }
 
   input {
-    flex: 1;
     min-width: 0;
-    width: 0;
+    width: 100%;
     box-sizing: border-box;
     padding: 0.4rem 0.6rem;
     border: 1px solid rgb(255 255 255 / 10%);

@@ -39,6 +39,7 @@ fn main() {
             "file_save_status",
             "link_use",
             "library_items",
+            "remove_library_torrent",
             "preview_file",
             "stop_preview",
             "seek_thumbnail",

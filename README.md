@@ -345,9 +345,11 @@ unqueued downloads (see
 [configuration](docs/configuration.md)).
 
 Completed video and audio downloads are saved with their original filenames and formats under
-`torrentplayer-swarm/<torrent hash>/files/`. Select a file in the file explorer to see and copy
-its full **Saved file** location. The piece cache is kept for playback and sharing; both the
+`torrentplayer-swarm/<torrent hash>/files/`. Press **Copy path** beside a video or audio file,
+or select it to see its full **Saved file** location. The piece cache is kept for playback and sharing; both the
 saved file and its cache count toward your storage limit and are removed when the torrent is cleared.
+In the Library, **Remove torrent** confirms deletion of its saved files and cache, removes its
+queue entries and history, and stops playback of that torrent.
 
 ## Community
 

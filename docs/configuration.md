@@ -138,9 +138,16 @@ default folder.
 
 As each video or audio file finishes downloading, the default engine saves a normal file with
 its original name and format under `torrentplayer-swarm/<torrent hash>/files/`. The file explorer
-shows the full **Saved file** location with **Copy path**. Pieces stay cached for playback and
+shows the full **Saved file** location with **Copy path**, also available on each video or audio
+row. Pieces stay cached for playback and
 sharing, so the completed file uses additional disk space. Both are included in the storage
 limit and removed together when that torrent is cleared.
+
+The Library's **Remove torrent** button asks for confirmation before deleting that torrent's
+saved files and cached pieces. It stops playback of that torrent and removes all its queue
+entries and library history. If files are in use by another program and cannot be deleted, the
+library entry stays available so deletion can be retried. Torrents share one piece cache across
+their files, so removal applies to the whole torrent.
 
 A download folder must be a full path (not relative), must not be the root of a drive, and cannot
 contain `.` or `..` components, control characters, or device prefixes (`\\?\`, `\\.\`), and

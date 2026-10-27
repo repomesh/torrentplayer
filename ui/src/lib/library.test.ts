@@ -13,10 +13,12 @@ const {
   groupLibrary,
   libraryKey,
   mergeLibrary,
+  queueWithoutLibraryTorrent,
   resumePosition,
   resumeStart,
   watchedFraction,
   watchedLabel,
+  withoutLibraryTorrent,
 } = await import('./library');
 
 const HASH = 'dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c';
@@ -82,8 +84,9 @@ describe('followLibrary', () => {
     let handler: ((event: { payload: LibraryItem }) => void) | undefined;
     const unlisten = vi.fn();
     listen.mockImplementation((name: string, callback: typeof handler) => {
-      expect(name).toBe('library-changed');
-      handler = callback;
+      if (name === 'library-changed') {
+        handler = callback;
+      }
       return Promise.resolve(unlisten);
     });
     let resolveInitial: ((items: LibraryItem[]) => void) | undefined;
@@ -124,8 +127,10 @@ describe('followLibrary', () => {
 
   it('starts empty and follows changes when the initial read keeps failing', async () => {
     let handler: ((event: { payload: LibraryItem }) => void) | undefined;
-    listen.mockImplementation((_name: string, callback: typeof handler) => {
-      handler = callback;
+    listen.mockImplementation((name: string, callback: typeof handler) => {
+      if (name === 'library-changed') {
+        handler = callback;
+      }
       return Promise.resolve(vi.fn());
     });
     invoke.mockRejectedValue(new Error('gone'));
@@ -138,6 +143,79 @@ describe('followLibrary', () => {
     handler?.({ payload: item() });
     expect(seen.at(-1)).toEqual([item()]);
     stop();
+  });
+});
+
+describe('library removal', () => {
+  it('removes only one torrent from history and queue, including unresolved source entries', () => {
+    const other = item({ infoHash: 'a'.repeat(40) });
+    expect(
+      withoutLibraryTorrent([item(), item({ fileIndex: 3 }), other], HASH.toUpperCase()),
+    ).toEqual([other]);
+    const queued = (id: string, infoHash: string | null, source: string) => ({
+      id,
+      infoHash,
+      source,
+      fileIndex: 2,
+      title: id,
+      torrentName: null,
+      sizeBytes: null,
+      paused: false,
+      played: false,
+    });
+    const queue = {
+      current: 'removed',
+      items: [
+        queued('removed', HASH, item().source),
+        queued('unresolved', null, 'https://example.org/course.torrent'),
+        queued('magnet-alias', null, `magnet:?xt=urn:btih:${HASH}&dn=Another+name`),
+        queued('kept', other.infoHash, other.source),
+      ],
+    };
+    const after = queueWithoutLibraryTorrent(
+      queue,
+      HASH.toUpperCase(),
+      new Set(['https://example.org/course.torrent', item().source]),
+    );
+    expect(after.items.map((entry) => entry.id)).toEqual(['kept']);
+    expect(after.current).toBeNull();
+    expect(queueWithoutLibraryTorrent({ ...queue, current: 'kept' }, HASH, new Set()).current).toBe(
+      'kept',
+    );
+  });
+
+  it('applies removals that race the first read and follows later removals', async () => {
+    let removed: ((event: { payload: string }) => void) | undefined;
+    const stops = [vi.fn(), vi.fn()];
+    listen.mockImplementation((name: string, callback: typeof removed) => {
+      if (name === 'library-removed') {
+        removed = callback;
+      }
+      return Promise.resolve(name === 'library-removed' ? stops[1] : stops[0]);
+    });
+    let resolveInitial: ((items: LibraryItem[]) => void) | undefined;
+    invoke.mockReturnValue(
+      new Promise<LibraryItem[]>((resolve) => {
+        resolveInitial = resolve;
+      }),
+    );
+    const seen: LibraryItem[][] = [];
+    const stop = followLibrary((items) => seen.push(items));
+    removed?.({ payload: HASH.toUpperCase() });
+    await vi.waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith('library_items');
+    });
+    const other = item({ infoHash: 'a'.repeat(40) });
+    resolveInitial?.([item(), other]);
+    await vi.waitFor(() => {
+      expect(seen.at(-1)).toEqual([other]);
+    });
+    removed?.({ payload: other.infoHash });
+    expect(seen.at(-1)).toEqual([]);
+    stop();
+    stops.forEach((unlisten) => {
+      expect(unlisten).toHaveBeenCalled();
+    });
   });
 });
 

@@ -126,10 +126,17 @@ export function stopStream(streamId: number): Promise<void> {
 
 /** Event carrying one item whose playback history changed. */
 export const LIBRARY_CHANGED_EVENT = 'library-changed';
+/** Event carrying the info hash of a torrent removed from the library. */
+export const LIBRARY_REMOVED_EVENT = 'library-removed';
 
 /** Saved playback history, most recently used first. */
 export function libraryItems(): Promise<LibraryItem[]> {
   return invoke<LibraryItem[]>('library_items');
+}
+
+/** Deletes a torrent's library history, cached downloads, and saved media files. */
+export function removeLibraryTorrent(infoHash: string): Promise<void> {
+  return invoke<undefined>('remove_library_torrent', { infoHash });
 }
 
 /** Development builds only: a torrent to add and play automatically, if configured. */

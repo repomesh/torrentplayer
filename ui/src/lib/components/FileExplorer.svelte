@@ -7,7 +7,7 @@
    * windows). Previews are safe by construction: pictures as data: URLs, text as text, a
    * video's first frame only when its start is downloaded, and metadata for everything else.
    */
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import type { FileSummary } from '../bindings/FileSummary';
   import type { TorrentSummary } from '../bindings/TorrentSummary';
   import { defaultSelection, previewHint, splitFiles, type ExplorerTorrent } from '../explorer';
@@ -82,6 +82,54 @@
   let previewing = $state(false);
   let savedFile = $state.raw<FileSaveStatusDto | null>(null);
   let saveError = $state<string | null>(null);
+  let copyingFile = $state<number | null>(null);
+  let copiedFile = $state<number | null>(null);
+  let copyMessage = $state<string | null>(null);
+  let copyTimer: ReturnType<typeof setTimeout> | undefined;
+
+  async function copyFilePath(file: FileSummary): Promise<void> {
+    const id = torrent.id;
+    copyingFile = file.index;
+    copiedFile = null;
+    copyMessage = null;
+    clearTimeout(copyTimer);
+    try {
+      const status = await fileSaveStatus(id, file.index);
+      if (torrent.id !== id) {
+        return;
+      }
+      if (status.path === null) {
+        copyMessage =
+          status.error ??
+          (status.saving
+            ? 'This file is being saved. Its path will be available shortly.'
+            : 'The saved path will be available when this file finishes downloading.');
+        return;
+      }
+      await navigator.clipboard.writeText(status.path);
+      if (torrent.id !== id) {
+        return;
+      }
+      copiedFile = file.index;
+      copyMessage = 'File path copied.';
+      copyTimer = setTimeout(() => {
+        copiedFile = null;
+        copyMessage = null;
+      }, 2000);
+    } catch (reason: unknown) {
+      if (torrent.id === id) {
+        copyMessage = `Could not copy the path: ${errorMessage(reason)}`;
+      }
+    } finally {
+      if (torrent.id === id) {
+        copyingFile = null;
+      }
+    }
+  }
+
+  onDestroy(() => {
+    clearTimeout(copyTimer);
+  });
 
   // Follow the selected media until its normal file is published. Late replies from an old
   // selection never replace the current file's location.
@@ -153,6 +201,10 @@
   $effect.pre(() => {
     if (torrent.id !== shownTorrent) {
       shownTorrent = torrent.id;
+      copyingFile = null;
+      copiedFile = null;
+      copyMessage = null;
+      clearTimeout(copyTimer);
       selected = defaultSelection(splitFiles(torrent.files), null, playingIndex);
     }
   });
@@ -287,6 +339,19 @@
         <button
           type="button"
           class="small"
+          disabled={copyingFile !== null}
+          aria-label={`Copy saved file path for ${fileName(file.path)}`}
+          title="Copy the completed file's location"
+          onclick={() => void copyFilePath(file)}
+          >{copyingFile === file.index
+            ? 'Copying…'
+            : copiedFile === file.index
+              ? 'Copied'
+              : 'Copy path'}</button
+        >
+        <button
+          type="button"
+          class="small"
           disabled={starting !== null || busy}
           aria-label={`Play ${fileName(file.path)}`}
           title="Play now"
@@ -374,6 +439,7 @@
         {/if}
       </p>
       {#if error}<p class="error" role="alert">{error}</p>{/if}
+      {#if copyMessage}<p class="copy-message" role="status">{copyMessage}</p>{/if}
     </header>
 
     <div class="panes">
@@ -488,6 +554,12 @@
     display: grid;
     gap: 0.4rem;
     padding: 0.75rem 0;
+    font-size: 0.85rem;
+    min-width: 0;
+  }
+
+  .copy-message {
+    color: var(--text-muted);
     font-size: 0.85rem;
   }
 
@@ -674,6 +746,8 @@
 
   .actions {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 0.25rem;
     padding-right: 0.35rem;
   }
@@ -701,6 +775,7 @@
     flex-direction: column;
     gap: 0.75rem;
     min-height: 0;
+    min-width: 0;
     overflow-y: auto;
     padding: 0.75rem;
     border: 1px solid #24221e;

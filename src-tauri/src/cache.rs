@@ -546,6 +546,25 @@ mod tests {
     }
 
     #[test]
+    fn explicit_removal_deletes_saved_media_and_pieces_from_both_engines() {
+        let root = tempfile::tempdir().unwrap();
+        for engine in CACHE_DIRS {
+            let removed = root.path().join(engine).join(OLD);
+            let saved = removed.join("files/Course");
+            fs::create_dir_all(&saved).unwrap();
+            fs::write(saved.join("Lecture.mp4"), b"completed media").unwrap();
+            fs::write(removed.join("pieces.dat"), b"pieces").unwrap();
+            fs::write(removed.join("pieces.idx"), b"index").unwrap();
+            entry(root.path(), engine, NEW, 10, 1);
+        }
+        remove(root.path(), OLD).unwrap();
+        for engine in CACHE_DIRS {
+            assert!(!root.path().join(engine).join(OLD).exists());
+            assert!(root.path().join(engine).join(NEW).exists());
+        }
+    }
+
+    #[test]
     fn a_plan_measures_the_same_as_measure_in_one_walk() {
         let root = tempfile::tempdir().unwrap();
         entry(root.path(), "torrentplayer-swarm", OLD, 100, 10);

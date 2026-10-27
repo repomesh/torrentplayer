@@ -642,6 +642,24 @@ parameterized queries only. Its directory and file are forced to mode `0700` and
 on Windows they inherit the user's app-data ACL. Writes run on blocking workers, not the async
 runtime.
 
+#### `remove_library_torrent`
+
+Deletes every library entry for one torrent, together with its saved media and cached pieces
+under the active download folder. The UI confirms removal, stops that torrent's playback,
+and persists removal of all its queue entries before calling this command. The backend
+refuses removal while the torrent is still queued or playing, cancels its preload and preview,
+releases engine handles and file writers, and uses the same validated cache directories as
+storage cleanup. History is deleted only after file removal succeeds. Late playback checkpoints
+and background metadata jobs cannot restore an explicitly removed torrent; opening or queuing
+it again allows it to return.
+
+|            |                                                                                 |
+| ---------- | ------------------------------------------------------------------------------- |
+| Arguments  | `{ infoHash: string }` (40 hexadecimal digits)                                  |
+| Returns    | `void`                                                                          |
+| Errors     | `invalid-argument` (invalid hash or protected torrent), `not-found`, `internal` |
+| Permission | `allow-remove-library-torrent`                                                  |
+
 ### Queue
 
 The play queue is a playlist with a cursor, kept by the UI (`ui/src/lib/queue.ts`) and saved
@@ -1113,6 +1131,7 @@ The status bar's latest public addresses, kept current by the app (see the publi
 | ------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------ |
 | `settings-changed`  | [`Settings`](../ui/src/lib/bindings/Settings.ts)           | After `update_settings`, `set_secret`, or `clear_secret` succeeds. |
 | `library-changed`   | [`LibraryItem`](../ui/src/lib/bindings/LibraryItem.ts)     | After an item is opened or a playback checkpoint is saved.         |
+| `library-removed`   | `string` (torrent info hash)                               | After its downloaded files and library entries are removed.        |
 | `network-status`    | [`NetworkStatus`](../ui/src/lib/bindings/NetworkStatus.ts) | At start-up and whenever the network state changes.                |
 | `network-public-ip` | [`PublicIp`](../ui/src/lib/bindings/PublicIp.ts) or `null` | When the status bar's public addresses change (see `public_ip`).   |
 | `seeding-started`   | none                                                       | The first time in a run that a torrent uploads to other peers.     |
@@ -1120,7 +1139,7 @@ The status bar's latest public addresses, kept current by the app (see the publi
 The main window may listen to events (`core:event:allow-listen` and `core:event:allow-unlisten`
 in `src-tauri/capabilities/main.json`; it cannot emit them). The frontend follows
 `network-status` with `followNetwork` in `ui/src/lib/network.ts`, which calls `network_status` once
-and then applies each event. `followLibrary` registers its listener before reading
+and then applies each event. `followLibrary` registers its change and removal listeners before reading
 `library_items`, then overlays any changes that race the initial read. Rust subsystems get the
 same settings and network notifications from `SettingsState::subscribe` (a `watch` channel) and
 `Network::subscribe`. Stream statistics and download progress are polled about once a second;

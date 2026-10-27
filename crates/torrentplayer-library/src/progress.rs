@@ -344,6 +344,25 @@ impl LibraryStore {
         let rows = statement.query_map([], row_item)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// Removes every history entry and resume position for one torrent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid info hash or a database failure.
+    pub fn remove_torrent(&mut self, info_hash: &str) -> Result<usize, LibraryError> {
+        if info_hash.len() != 40 || !info_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(LibraryError::Invalid(
+                "info hash must be 40 hexadecimal digits",
+            ));
+        }
+        self.connection
+            .execute(
+                "DELETE FROM playback WHERE info_hash = ?1",
+                [info_hash.to_ascii_lowercase()],
+            )
+            .map_err(Into::into)
+    }
 }
 
 fn row_item(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryItem> {
@@ -470,6 +489,35 @@ mod tests {
         let finished = store.record(&media(), 100.0, Some(100.0), 4).unwrap();
         assert!(finished.completed);
         assert_eq!(resume_position(&finished), None);
+    }
+
+    #[test]
+    fn removal_is_persistent_and_limited_to_the_chosen_torrent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = LibraryStore::open(dir.path()).unwrap();
+        let first = media();
+        let second = Media {
+            file_index: 3,
+            ..first.clone()
+        };
+        let other = Media {
+            info_hash: "a".repeat(40),
+            ..first.clone()
+        };
+        store.record(&first, 25.0, Some(100.0), 1).unwrap();
+        store.opened(&second, 2).unwrap();
+        let kept = store.opened(&other, 3).unwrap();
+        assert!(matches!(
+            store.remove_torrent("../outside"),
+            Err(LibraryError::Invalid(_))
+        ));
+        assert_eq!(store.list().unwrap().len(), 3);
+        assert_eq!(store.remove_torrent(&HASH.to_uppercase()).unwrap(), 2);
+        assert!(store.get(HASH, first.file_index).unwrap().is_none());
+        drop(store);
+        let mut store = LibraryStore::open(dir.path()).unwrap();
+        assert_eq!(store.list().unwrap(), [kept]);
+        assert_eq!(store.remove_torrent(HASH).unwrap(), 0);
     }
 
     #[test]

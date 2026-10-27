@@ -36,6 +36,7 @@
     "allow-file-save-status",
     "allow-link-use",
     "allow-library-items",
+    "allow-remove-library-torrent",
     "allow-preview-file",
     "allow-stop-preview",
     "allow-seek-thumbnail",

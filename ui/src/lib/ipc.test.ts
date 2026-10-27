@@ -42,6 +42,7 @@ describe('command wrappers', () => {
     await ipc.stopStream(9);
     await ipc.devAutoplay();
     await ipc.libraryItems();
+    await ipc.removeLibraryTorrent('a'.repeat(40));
     await ipc.previewFile(3, 2);
     await ipc.fileSaveStatus(3, 2);
     await ipc.stopPreview();
@@ -58,6 +59,7 @@ describe('command wrappers', () => {
       ['stop_stream', { streamId: 9 }],
       ['dev_autoplay'],
       ['library_items'],
+      ['remove_library_torrent', { infoHash: 'a'.repeat(40) }],
       ['preview_file', { torrentId: 3, fileIndex: 2 }],
       ['file_save_status', { torrentId: 3, fileIndex: 2 }],
       ['stop_preview'],

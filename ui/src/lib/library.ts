@@ -4,7 +4,14 @@
 
 import { listen } from '@tauri-apps/api/event';
 import { formatClock } from './format';
-import { LIBRARY_CHANGED_EVENT, libraryItems, type LibraryItem } from './ipc';
+import {
+  LIBRARY_CHANGED_EVENT,
+  LIBRARY_REMOVED_EVENT,
+  libraryItems,
+  type LibraryItem,
+} from './ipc';
+import type { Queue } from './bindings/Queue';
+import { groupKey } from './queue';
 
 /** Stable key for a playable file. */
 export function libraryKey(item: Pick<LibraryItem, 'infoHash' | 'fileIndex'>): string {
@@ -16,6 +23,36 @@ export function mergeLibrary(items: readonly LibraryItem[], changed: LibraryItem
   return [...items.filter((item) => libraryKey(item) !== libraryKey(changed)), changed].sort(
     (a, b) => b.updatedAtSecs - a.updatedAtSecs || libraryKey(a).localeCompare(libraryKey(b)),
   );
+}
+
+/** Removes all history entries belonging to one torrent. */
+export function withoutLibraryTorrent(
+  items: readonly LibraryItem[],
+  infoHash: string,
+): LibraryItem[] {
+  const hash = infoHash.toLowerCase();
+  return items.filter((item) => item.infoHash.toLowerCase() !== hash);
+}
+
+/** Unqueues a deleted torrent, including entries still identified by their original source. */
+export function queueWithoutLibraryTorrent(
+  queue: Queue,
+  infoHash: string,
+  sources: ReadonlySet<string>,
+): Queue {
+  const hash = infoHash.toLowerCase();
+  const items = queue.items.filter(
+    (item) => groupKey(item) !== hash && !(item.infoHash === null && sources.has(item.source)),
+  );
+  return { items, current: items.some((item) => item.id === queue.current) ? queue.current : null };
+}
+
+type LibraryChange = LibraryItem | string;
+
+function applyLibraryChange(items: LibraryItem[], change: LibraryChange): LibraryItem[] {
+  return typeof change === 'string'
+    ? withoutLibraryTorrent(items, change)
+    : mergeLibrary(items, change);
 }
 
 /** Watched fraction, clamped to 0–1 (zero until duration is known). */
@@ -98,8 +135,8 @@ export function groupLibrary(items: readonly LibraryItem[]): LibraryCourse[] {
 export function followLibrary(onItems: (items: LibraryItem[]) => void): () => void {
   let stopped = false;
   let current: LibraryItem[] | null = null;
-  let pending: LibraryItem[] = [];
-  let unlisten: (() => void) | null = null;
+  let pending: LibraryChange[] = [];
+  const unlisten: (() => void)[] = [];
   let loading = false;
   let retried = false;
   const loadInitial = (): void => {
@@ -112,7 +149,7 @@ export function followLibrary(onItems: (items: LibraryItem[]) => void): () => vo
         if (stopped) {
           return;
         }
-        current = pending.reduce(mergeLibrary, items);
+        current = pending.reduce<LibraryItem[]>(applyLibraryChange, items);
         pending = [];
         onItems(current);
       })
@@ -128,37 +165,41 @@ export function followLibrary(onItems: (items: LibraryItem[]) => void): () => vo
         }
         // Event delivery can still keep the view useful if the initial read alone failed;
         // without a base list, changes would wait in `pending` forever.
-        current = pending.reduce(mergeLibrary, []);
+        current = pending.reduce<LibraryItem[]>(applyLibraryChange, []);
         pending = [];
         onItems(current);
       });
   };
-  listen<LibraryItem>(LIBRARY_CHANGED_EVENT, (event) => {
+  const receive = (change: LibraryChange): void => {
     if (stopped) {
       return;
     }
     if (current === null) {
-      pending.push(event.payload);
+      pending.push(change);
       return;
     }
-    current = mergeLibrary(current, event.payload);
+    current = applyLibraryChange(current, change);
     onItems(current);
-  })
-    .then((stop) => {
-      if (stopped) {
-        stop();
-      } else {
-        unlisten = stop;
-        loadInitial();
-      }
-    })
-    .catch(() => {
-      loadInitial();
-    })
-    .catch(() => undefined);
+  };
+  const rememberListener = (stop: () => void): void => {
+    if (stopped) {
+      stop();
+    } else {
+      unlisten.push(stop);
+    }
+  };
+  const changed = listen<LibraryItem>(LIBRARY_CHANGED_EVENT, (event) => {
+    receive(event.payload);
+  }).then(rememberListener);
+  const removed = listen<string>(LIBRARY_REMOVED_EVENT, (event) => {
+    receive(event.payload);
+  }).then(rememberListener);
+  void Promise.allSettled([changed, removed]).then(loadInitial);
   return () => {
     stopped = true;
     pending = [];
-    unlisten?.();
+    unlisten.forEach((stop) => {
+      stop();
+    });
   };
 }

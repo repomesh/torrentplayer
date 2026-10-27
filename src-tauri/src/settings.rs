@@ -219,6 +219,11 @@ impl SettingsState {
         self.download_dir(&self.startup)
     }
 
+    /// Shares the cache-maintenance lock with explicit library removals.
+    pub(crate) fn maintenance(&self) -> &tokio::sync::Mutex<()> {
+        &self.maintenance
+    }
+
     /// The FFmpeg folder setting, unless it lies inside a download folder: one saved before
     /// 0.3.1 refused that is ignored (FFmpeg there could come from a torrent), and FFmpeg is
     /// looked for as if no folder were set.
@@ -704,7 +709,7 @@ async fn run_cache_cleanup(
     Ok(outcome)
 }
 
-async fn remove_cache_entry(root: PathBuf, info_hash: String) -> Result<(), IpcError> {
+pub(crate) async fn remove_cache_entry(root: PathBuf, info_hash: String) -> Result<(), IpcError> {
     const ATTEMPTS: usize = 20;
     for attempt in 0..ATTEMPTS {
         let remove_root = root.clone();
@@ -722,7 +727,7 @@ async fn remove_cache_entry(root: PathBuf, info_hash: String) -> Result<(), IpcE
     Ok(())
 }
 
-fn protected_hashes(app: &AppHandle) -> Option<HashSet<String>> {
+pub(crate) fn protected_hashes(app: &AppHandle) -> Option<HashSet<String>> {
     let downloads = app.state::<crate::downloads::DownloadsState>();
     let queue = downloads.queue();
     if !crate::cache::queue_hashes_complete(&queue) {

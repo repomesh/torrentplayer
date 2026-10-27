@@ -36,6 +36,7 @@
     preloadStatus,
     queueDownloads,
     queueReadiness,
+    removeLibraryTorrent,
     saveQueue,
     startStream,
     stopStream,
@@ -49,7 +50,13 @@
     type TorrentSummary,
     type ReadinessState,
   } from './lib/ipc';
-  import { followLibrary, libraryKey, resumeStart } from './lib/library';
+  import {
+    followLibrary,
+    libraryKey,
+    queueWithoutLibraryTorrent,
+    resumeStart,
+    withoutLibraryTorrent,
+  } from './lib/library';
   import {
     back,
     canGoBack,
@@ -141,6 +148,7 @@
 
   let queue = $state.raw<Queue>(emptyQueue());
   let library = $state.raw<LibraryItem[]>([]);
+  let removingLibrary = $state<string | null>(null);
   const watchProgress = $derived(new Map(library.map((item) => [libraryKey(item), item] as const)));
   /** The queue as last loaded or saved, so loading it does not save it again. */
   let persisted: Queue | null = null;
@@ -630,6 +638,13 @@
 
   /** Pending work only blocks controls for the torrent it belongs to. */
   function isTorrentBusy(source: string, infoHash: string | null = null): boolean {
+    if (
+      removingLibrary !== null &&
+      (infoHash?.toLowerCase() === removingLibrary ||
+        library.some((item) => item.infoHash === removingLibrary && item.source === source))
+    ) {
+      return true;
+    }
     const keys = torrentLoadKeys(source, infoHash);
     if (keys.some((key) => loadingTorrents.has(key))) {
       return true;
@@ -923,6 +938,71 @@
       }
     } finally {
       finishPlayback(request);
+    }
+  }
+
+  /** Removes a whole torrent because its media share one piece cache. */
+  async function removeLibraryDownload(infoHash: string): Promise<void> {
+    if (removingLibrary !== null) {
+      throw new Error('Another library removal is still running.');
+    }
+    const hash = infoHash.toLowerCase();
+    removingLibrary = hash;
+    try {
+      const known = torrents.filter((torrent) => torrent.infoHash.toLowerCase() === hash);
+      const removedIds = new Set(known.map((torrent) => torrent.id));
+      const links = new Set([
+        ...library
+          .filter((item) => item.infoHash.toLowerCase() === hash)
+          .map((item) => item.source),
+        ...known.map(sourceOf),
+      ]);
+      if (
+        pendingPlayback &&
+        (pendingPlayback.infoHash?.toLowerCase() === hash || links.has(pendingPlayback.source))
+      ) {
+        selection += 1;
+        pendingPlayback = null;
+      }
+      const playing = nowPlaying?.torrent.infoHash.toLowerCase() === hash;
+      if (playing) {
+        await closeStream(false);
+      }
+      const nextQueue = queueWithoutLibraryTorrent(queue, hash, links);
+      queue = nextQueue;
+      persisted = nextQueue;
+      // Drain an earlier autosave before persisting the removal and deleting its data.
+      await saver.flush();
+      await saveQueue(queue);
+      await removeLibraryTorrent(hash);
+      library = withoutLibraryTorrent(library, hash);
+      torrents = torrents.filter((torrent) => !removedIds.has(torrent.id));
+      for (const id of removedIds) {
+        Reflect.deleteProperty(sources, String(id));
+      }
+      if (lastTorrentId !== null && removedIds.has(lastTorrentId)) {
+        lastTorrentId = torrents[0]?.id ?? null;
+      }
+      if (chooser?.infoHash.toLowerCase() === hash) {
+        chooser = null;
+      }
+      if (nextPreload?.infoHash.toLowerCase() === hash) {
+        nextPreload = null;
+        nextPreloadKey = null;
+        clearTimeout(nextPreloadTimer);
+      }
+      history = prune(
+        history,
+        (view) =>
+          !(
+            (view.name === 'torrent' && removedIds.has(view.torrentId)) ||
+            (playing && view.name === 'player')
+          ),
+        { name: 'library' },
+      );
+      showToast('Removed from the library and deleted downloaded files.');
+    } finally {
+      removingLibrary = null;
     }
   }
 
@@ -1470,6 +1550,7 @@
             items={library}
             isBusy={(item: LibraryItem) => isTorrentBusy(item.source, item.infoHash)}
             onPlay={(item: LibraryItem) => void playLibraryItem(item)}
+            onRemove={removeLibraryDownload}
           />
         {:else if view.name === 'torrent' && shownTorrent}
           {@const torrent = shownTorrent}

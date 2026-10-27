@@ -182,6 +182,10 @@ time. Every view stays reachable from the rail.
   Checkpoints carry a process-local revision so blocking writes cannot move the saved playhead
   backward if they finish out of order. An unavailable database disables history for that run,
   never playback. The `library-changed` event updates the Library and queue without polling.
+  Explicit torrent removal stops playback, persists removal of its queue entries, cancels
+  background writers, and deletes its cache and saved files before deleting its history.
+  The `library-removed` event updates the Library; late checkpoints cannot recreate removed
+  entries until the user explicitly opens the torrent again.
   Reopening an unfinished item at least 10 seconds in (and not within the final 10 seconds)
   automatically continues from its saved position when `playback.resumePosition` is on, with a
   "Continuing from…" chip offering **Start over**.
