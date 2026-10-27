@@ -7,7 +7,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.3.1] - 2026-10-23
+## [0.3.1] - 2026-10-27
 
 ### Added
 
@@ -121,6 +121,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- Linux: audio and video no longer play silently on systems without GStreamer's plugins ("GStreamer
+  element autoaudiosink not found"). The `.deb` and `.rpm` packages now depend on them (and
+  recommend `gstreamer1.0-libav` for H.264 and AAC), and the AppImage bundles GStreamer.
 - Play in a queue item's "Choose files…" dialog starts the file again; it closed the dialog
   and played nothing.
 - "Start over" pressed before a video's length is known no longer jumps back to the saved
