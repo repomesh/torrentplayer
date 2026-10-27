@@ -12,6 +12,9 @@ for 14 days. They are for testing, not distribution.
 ## Cutting a release
 
 1. Make sure `main` is green.
+   If the release collects work on a `release/x.y.z` branch, open its PR as a draft as soon as the
+   branch exists: CI (including the sign-off check) runs only on pull requests and `main`, so a
+   branch without a PR can gather failures nobody sees.
 2. Move the `## [Unreleased]` entries in `CHANGELOG.md` under a new `## [x.y.z] - YYYY-MM-DD`
    heading, following [Semantic Versioning](https://semver.org).
 3. Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and `ui/package.json`. The
