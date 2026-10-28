@@ -61,13 +61,19 @@ older version or a build from source, install them:
 sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-gl gstreamer1.0-libav                                          # Debian, Ubuntu
 sudo dnf install gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free \
-  gstreamer1-plugin-libav                                                     # Fedora
+  gstreamer1-plugin-openh264 gstreamer1-plugin-libav                          # Fedora
+sudo zypper install gstreamer-plugins-base gstreamer-plugins-good gstreamer-plugins-bad \
+  gstreamer-plugin-openh264 gstreamer-plugins-libav                           # openSUSE
 sudo pacman -S gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav    # Arch
 ```
 
 The good plugins play the sound, the bad plugins have the H.264 parser that videos with converted
 Dolby or DTS audio need (and WebVTT for subtitles), the GL plugins render video on the GPU, and
-libav decodes H.264 and AAC, which most videos use.
+libav decodes H.264 and AAC, which most videos use. Fedora and openSUSE leave H.264 out of libav;
+there the openh264 plugin decodes it (Fedora enables Cisco's openh264 repository by default).
+
+The AppImage uses the plugins it bundles, not the system's, so installing them does not help it:
+use the AppImage of 0.3.3 or later, or your distribution's package.
 
 ### A video plays without sound
 

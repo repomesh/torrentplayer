@@ -13,6 +13,11 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   GStreamer's bad plugins ("GStreamer element h264parse not found"), and video renders on the GPU.
   The `.deb` and `.rpm` now also depend on the bad and GL plugins, and the AppImage bundles them
   ([#75](https://github.com/torrentplayer/torrentplayer/issues/75)).
+- Linux: the `.rpm` installs on openSUSE as well as Fedora (it required Fedora's package names),
+  and recommends openh264, which decodes H.264 on Fedora and openSUSE, whose libav leaves it out.
+- Linux builds now install the `.deb` and `.rpm` on Ubuntu 22.04 and 24.04, Debian 12 and 13,
+  Fedora, and openSUSE Leap and Tumbleweed, and check the AppImage's plugins on Arch, so a missing
+  GStreamer plugin fails the build instead of reaching users.
 
 ## [0.3.2] - 2026-10-27
 
