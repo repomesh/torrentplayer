@@ -272,7 +272,8 @@ You need:
     ```sh
     sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
       libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
-      gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+      gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+      gstreamer1.0-gl gstreamer1.0-libav
     ```
 
     The GStreamer plugins are needed at run time: without them audio and video play silently or

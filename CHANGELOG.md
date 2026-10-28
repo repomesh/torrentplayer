@@ -7,6 +7,13 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- Linux: videos whose Dolby or DTS audio is converted play their picture again on systems without
+  GStreamer's bad plugins ("GStreamer element h264parse not found"), and video renders on the GPU.
+  The `.deb` and `.rpm` now also depend on the bad and GL plugins, and the AppImage bundles them
+  ([#75](https://github.com/torrentplayer/torrentplayer/issues/75)).
+
 ## [0.3.2] - 2026-10-27
 
 ### Added
