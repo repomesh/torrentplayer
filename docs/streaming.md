@@ -66,10 +66,11 @@ without replacing an existing file. On restart, an existing file is reused only 
 match; conflicts and write failures are reported in the file explorer and retried after a
 minute. Cache removal and shutdown cancel and wait for writers before releasing their data.
 
-The file explorer shows the saved location with a selectable path and **Copy path**, also
-available on each video or audio row. The piece
-cache remains for streaming and sharing. The normal files and cached pieces both count toward
-the configured storage limit and are cleared together.
+The file explorer shows the saved location with a selectable path and **Copy path**. The button
+beside each video or audio row's Play button appears only after its complete file has been
+saved, and updates even when the row is not selected. The piece cache remains for streaming
+and sharing. The normal files and cached pieces both count toward the configured storage limit
+and are cleared together. User instructions are in the [download and library guide](downloads.md).
 
 ## Memory for partial pieces
 

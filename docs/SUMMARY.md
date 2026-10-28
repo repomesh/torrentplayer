@@ -18,6 +18,7 @@
 
 # Guides
 
+- [Downloads, saved files, and library removal](downloads.md)
 - [Building and development](building.md)
 - [Performance and benchmarking](performance.md)
 - [Troubleshooting](troubleshooting.md)

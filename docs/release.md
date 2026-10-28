@@ -23,6 +23,11 @@ for 14 days. They are for testing, not distribution.
    bump also changes `Cargo.lock` (every workspace crate's entry) and `ui/package-lock.json` (its
    two top-level entries); commit both. CI builds with `--locked`, so a stale `Cargo.lock` fails
    it. The app's version comes from `Cargo.toml`; `src-tauri/tauri.conf.json` sets none.
+   Regenerate `THIRD_PARTY_NOTICES.md` too: it includes workspace crate versions, even when no
+   dependencies changed. Commit the generated result:
+   ```sh
+   cargo about generate --workspace --locked -c .cargo/about.toml .cargo/about.hbs -o THIRD_PARTY_NOTICES.md
+   ```
 4. Open a PR titled `chore(release): vx.y.z`, get it reviewed, and merge it.
 5. Tag the merge commit and push the tag:
    ```sh
@@ -47,6 +52,10 @@ for 14 days. They are for testing, not distribution.
    `signtool verify /pa` on `torrentplayer-ffmpeg*.exe` in the installed app's folder; on macOS
    `codesign -dv --verbose=4` and `spctl --assess --type execute -v` on `TorrentPlayer.app`. Then
    paste the changelog section into the notes and publish.
+8. Update the README's latest version and release link, and refresh the user documentation for
+   any changed behavior. Redeploy `torrentplayer.io`: its build reads the latest published
+   release to update installer links, version labels, and structured data. Update its release
+   announcement, feature text, and FAQ when the release changes what users can do.
 
 The SBOM lists the Rust crates of the app (`cargo cyclonedx` on `src-tauri`) only. FFmpeg and
 the npm packages bundled into the webview are listed in

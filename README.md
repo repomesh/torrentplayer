@@ -121,9 +121,8 @@ sources, details, and where other tools are the better fit.
   keeps going if the video's own swarm is the bottleneck. Once you are comfortably ahead,
   everything runs at full speed again.
 - **Live status for every item:** download and upload speed, peers, percent downloaded, and
-  time left, with a bar
-  that is green when it is ready to play, yellow while it downloads, and grey while it
-  waits for peers.
+  time left. Green sections show the downloaded chunks and gaps, matching the player's seek
+  bar; readiness and waiting states are shown separately.
 - **Gives back to the swarm.** The built-in engine uploads every verified piece it has. Queued
   torrents keep sharing, finished or not, until you pause or remove them, with one upload limit
   across both engines.
@@ -162,6 +161,10 @@ sources, details, and where other tools are the better fit.
   text, and subtitles inside a torrent before you play anything.
 - **Resume across restarts.** Watch progress is saved locally and shown in the queue and Library.
   Reopening an unfinished video continues from its last position, with a **Start over** button.
+- **Complete files you can find.** Finished video and audio downloads are saved with their
+  original names and formats. **Copy path** appears beside Play when a file is fully saved.
+  The Library's **Remove torrent** deletes its saved files and cached pieces after confirmation.
+  See [Downloads, saved files, and library removal](docs/downloads.md).
 
 ### Network and privacy controls
 
@@ -228,8 +231,8 @@ the playback library is a user-only local SQLite database and is never sent anyw
 
 ## Get TorrentPlayer
 
-TorrentPlayer is an early preview. The latest version is **0.3.1**; see the
-[changelog](CHANGELOG.md) for what changed. You can:
+TorrentPlayer is an early preview. The latest version is **0.3.2**; see the
+[release notes](https://github.com/torrentplayer/torrentplayer/releases/tag/v0.3.2) for what changed. You can:
 
 - **Download a release** from the [Releases](https://github.com/torrentplayer/torrentplayer/releases)
   page: installers for Windows, macOS, and Linux with SHA-256 checksums, an SBOM, and build
@@ -345,11 +348,13 @@ unqueued downloads (see
 [configuration](docs/configuration.md)).
 
 Completed video and audio downloads are saved with their original filenames and formats under
-`torrentplayer-swarm/<torrent hash>/files/`. Press **Copy path** beside a video or audio file,
-or select it to see its full **Saved file** location. The piece cache is kept for playback and sharing; both the
+`torrentplayer-swarm/<torrent hash>/files/`. **Copy path** appears beside Play once each file
+is fully downloaded and saved. Select it to see its full **Saved file** location. The piece cache is kept for playback and sharing; both the
 saved file and its cache count toward your storage limit and are removed when the torrent is cleared.
 In the Library, **Remove torrent** confirms deletion of its saved files and cache, removes its
 queue entries and history, and stops playback of that torrent.
+See the [download and library guide](docs/downloads.md) for default folders on each system,
+the difference between saved media and cached pieces, and removal instructions.
 
 ## Community
 

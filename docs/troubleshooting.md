@@ -25,6 +25,24 @@ Install the system packages listed in the [README](../README.md#building-from-so
 
 ## Running
 
+### I can only find `pieces.dat` and `pieces.idx`
+
+These are the automatic engine's piece cache. In 0.3.2, each video or audio file is saved as a
+normal media file after all its pieces arrive. Open **Files**, select the media file, and look
+under **Saved file**. **Copy path** appears beside Play once saving has finished. You can start
+watching before the complete file is available. See the [download and library guide](downloads.md).
+
+If the queue shows a fully downloaded file but no saved path appears, check its status in the
+preview panel. It may still be saving, or a disk-space or file conflict error may need attention.
+Save failures are retried automatically.
+
+### Removing a library torrent could not delete its files
+
+Close any other player or program using that torrent's saved files, then try **Remove torrent**
+again in the Library. TorrentPlayer keeps the history entry when file deletion fails so the
+operation can be retried. The app stops its own playback and removes the torrent from the queue
+before deleting its cache and saved files.
+
 ### Enable debug logging
 
 ```sh

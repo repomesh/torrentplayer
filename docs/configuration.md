@@ -9,12 +9,12 @@ made and saved automatically about half a second later.
 
 ## Where settings are stored
 
-| What                    | Where                                                                       |
-| ----------------------- | --------------------------------------------------------------------------- |
-| Settings                | `settings.json` in the app config folder (see below)                        |
-| Passwords and keys      | The OS credential store, never in `settings.json` (see [Secrets](#secrets)) |
-| Downloaded lecture data | `TorrentPlayer` in your Downloads folder, unless you choose another folder  |
-| DHT routing tables      | `dht` in the app data folder (see below), from Direct mode only             |
+| What                       | Where                                                                       |
+| -------------------------- | --------------------------------------------------------------------------- |
+| Settings                   | `settings.json` in the app config folder (see below)                        |
+| Passwords and keys         | The OS credential store, never in `settings.json` (see [Secrets](#secrets)) |
+| Downloaded media and cache | `TorrentPlayer` in your Downloads folder, unless you choose another folder  |
+| DHT routing tables         | `dht` in the app data folder (see below), from Direct mode only             |
 
 The app config folder is `%APPDATA%\io.torrentplayer.desktop` on Windows,
 `~/Library/Application Support/io.torrentplayer.desktop` on macOS, and
@@ -24,9 +24,11 @@ The app config folder is `%APPDATA%\io.torrentplayer.desktop` on Windows,
 one. Earlier versions kept downloads in the local data folder (`%LOCALAPPDATA%\<identifier>\downloads`);
 unless you chose a folder yourself, they are moved to the new default at start-up. Inside it,
 `torrentplayer-swarm` holds TorrentPlayer's engine cache (a folder per torrent, named by its info
-hash, with the downloaded pieces in `pieces.dat` and where each one is in `pieces.idx`; not
-playable files) and `librqbit` holds downloads made with the librqbit engine (the `rqbit` engine
-choice) as their own files. After a restart the engine uses the pieces in its cache again, so
+hash, with the downloaded pieces in `pieces.dat` and where each one is in `pieces.idx`).
+Completed video and audio files are saved alongside them under `<hash>/files/` with their
+original paths. `librqbit` holds downloads made with the librqbit engine (the `rqbit` engine
+choice) as their own files. See the [download and library guide](downloads.md) to find or remove
+them. After a restart the engine uses the pieces in its cache again, so
 nothing is downloaded twice: after a normal quit each piece is checked against the torrent's
 hashes when first read, and after a crash all of them are checked in the background first. A
 piece that fails the check is downloaded again. Deleting a torrent's folder there (with the app closed) is always safe: it
@@ -140,8 +142,7 @@ As each video or audio file finishes downloading, the default engine saves a nor
 its original name and format under `torrentplayer-swarm/<torrent hash>/files/`. The file explorer
 shows the full **Saved file** location with **Copy path**, also available on video or audio
 rows once the complete file has been saved. The button appears automatically as files finish.
-Pieces stay cached for playback and
-sharing, so the completed file uses additional disk space. Both are included in the storage
+Pieces stay cached for playback and sharing, so the completed file uses additional disk space. Both are included in the storage
 limit and removed together when that torrent is cleared.
 
 The Library's **Remove torrent** button asks for confirmation before deleting that torrent's
