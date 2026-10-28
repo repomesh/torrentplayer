@@ -5970,7 +5970,7 @@ checksum = "06bdbd8cfc056b8d2e2e85f29b56a3bdbecb527cef81eb39e3e7b98af4652770"
 
 [[package]]
 name = "torrentplayer-app"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -6002,7 +6002,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-bench"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -6025,11 +6025,11 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-course"
-version = "0.3.2"
+version = "0.3.3"
 
 [[package]]
 name = "torrentplayer-library"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "rusqlite",
  "serde",
@@ -6043,7 +6043,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-media"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "futures-util",
  "proptest",
@@ -6057,7 +6057,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-net"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "base64 0.23.1",
  "boringtun",
@@ -6082,18 +6082,18 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-player"
-version = "0.3.2"
+version = "0.3.3"
 
 [[package]]
 name = "torrentplayer-prioritize"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "proptest",
 ]
 
 [[package]]
 name = "torrentplayer-search"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -6107,7 +6107,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-settings"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "keyring",
  "secrecy",
@@ -6121,7 +6121,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-stream"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "futures-util",
@@ -6140,7 +6140,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-swarm"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "futures-util",
@@ -6165,7 +6165,7 @@ dependencies = [
 
 [[package]]
 name = "torrentplayer-torrent"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "bytes",
  "futures-util",
