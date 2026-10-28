@@ -836,6 +836,19 @@ mod tests {
         options
     }
 
+    /// Ends a test server's side of a tunnel connection after its reply. Dropping a
+    /// tokio-wireguard stream aborts it with a reset, which can reach the other end before the
+    /// reply has been read there and discard it, so wait (a few seconds at most) for the other
+    /// end to close first.
+    async fn finish(mut stream: tokio_wireguard::TcpStream) {
+        let _ = stream.shutdown().await;
+        let mut rest = [0; 256];
+        let _ = tokio::time::timeout(Duration::from_secs(5), async {
+            while matches!(stream.read(&mut rest).await, Ok(n) if n > 0) {}
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn the_tunnel_socket_is_on_every_interface_outside_tests() {
         assert_eq!(interface_options(false).bind_address, None);
@@ -1071,7 +1084,7 @@ mod tests {
                     body.len()
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
-                let _ = stream.shutdown().await;
+                finish(stream).await;
             });
             let net = Network::start(
                 NetworkConfig {
@@ -1132,7 +1145,7 @@ mod tests {
                         let mut bytes = [0; 1024];
                         if let Ok(n) = stream.read(&mut bytes).await {
                             let _ = stream.write_all(&bytes[..n]).await;
-                            let _ = stream.shutdown().await;
+                            finish(stream).await;
                         }
                     });
                 }
@@ -1197,7 +1210,7 @@ mod tests {
                 let mut bytes = [0; 5];
                 stream.read_exact(&mut bytes).await.unwrap();
                 stream.write_all(&bytes).await.unwrap();
-                let _ = stream.shutdown().await;
+                finish(stream).await;
             });
             let tunnel = Tunnel::start(&config, None, true).await.unwrap();
             tunnel
@@ -1240,6 +1253,7 @@ mod tests {
             let mut reply = [0; 5];
             stream.read_exact(&mut reply).await.unwrap();
             assert_eq!(&reply, b"hello");
+            drop(stream);
             echo.await.unwrap();
             dns.abort();
             tunnel.close();
@@ -2059,7 +2073,7 @@ mod tests {
                     .await
                     .unwrap();
                 stream.write_all(&answer).await.unwrap();
-                let _ = stream.shutdown().await;
+                finish(stream).await;
             });
             let tunnel = Tunnel::start(&config, None, true).await.unwrap();
             tunnel
