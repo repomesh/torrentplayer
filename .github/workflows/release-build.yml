@@ -155,6 +155,27 @@ jobs:
             done
           ls -l release-assets
 
+      # WebKitGTK plays media through GStreamer, and the AppImage bundles the build machine's
+      # plugins. Check the ones it cannot play without are in it: an audio sink (good), the H.264
+      # parser that Media Source Extensions need (bad), the GL video sink (gl), and libav's
+      # decoders (issue #75).
+      - name: Check the AppImage bundles GStreamer's plugins
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          appimage=$(ls "$GITHUB_WORKSPACE"/release-assets/*.AppImage)
+          cd "$RUNNER_TEMP"
+          "$appimage" --appimage-extract > /dev/null
+          missing=0
+          for plugin in libgstautodetect libgstvideoparsersbad libgstopengl libgstlibav; do
+            if ! find squashfs-root -name "$plugin.so" | grep -q .; then
+              echo "::error::The AppImage has no $plugin.so"
+              missing=1
+            fi
+          done
+          rm -rf squashfs-root
+          exit "$missing"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: installers-${{ inputs.name }}

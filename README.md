@@ -256,6 +256,35 @@ plays the formats that engine supports: commonly MP4, WebM, and MKV with H.264, 
 video and AAC, Opus, or MP3 audio. Dolby (AC-3, E-AC-3, TrueHD) and DTS audio in MP4 and MKV
 files is converted to AAC as it plays.
 
+### Installing on Linux
+
+On Linux, WebKit plays audio and video through GStreamer, which needs several plugin packages.
+**You don't install them yourself** (since 0.3.3):
+
+| Package  | For                                          | GStreamer's plugins                                           |
+| -------- | -------------------------------------------- | ------------------------------------------------------------- |
+| AppImage | Any distribution, including Arch and Manjaro | Bundled inside the AppImage                                   |
+| `.deb`   | Debian, Ubuntu, Linux Mint, Pop!\_OS         | Installed with TorrentPlayer by `apt` (declared dependencies) |
+| `.rpm`   | Fedora, RHEL and its rebuilds, openSUSE      | Installed with TorrentPlayer by `dnf` or `zypper`             |
+
+Install the `.deb` or `.rpm` with your package manager so it brings them along:
+
+```sh
+sudo apt install ./TorrentPlayer_<version>_amd64.deb         # Debian, Ubuntu, Mint, Pop!_OS
+sudo dnf install ./TorrentPlayer-<version>-1.x86_64.rpm       # Fedora, RHEL, Rocky, Alma
+sudo zypper install ./TorrentPlayer-<version>-1.x86_64.rpm    # openSUSE
+```
+
+Double-clicking the file in your software center works too. A bare `dpkg -i` or `rpm -i` does not
+install dependencies; if you used one, run `sudo apt -f install` (or install the file again with
+`dnf` or `zypper`). The video decoders (libav, and openh264 on Fedora and openSUSE, whose libav
+leaves H.264 out) are recommended packages, which package managers install by default; on Fedora
+openh264 comes from Cisco's repository, which Fedora enables by default. Upgrading to a new
+version installs any new dependencies the same way, and a new AppImage brings its own plugins.
+Every release installs each package on Ubuntu, Debian, Fedora, and openSUSE, and checks the
+AppImage on Arch, before it ships. If audio or video still plays silently or not at all, see
+[Troubleshooting](docs/troubleshooting.md#linux-no-sound-or-no-picture-autoaudiosink-or-h264parse-not-found).
+
 ## Building from source
 
 You need:
@@ -272,7 +301,8 @@ You need:
     ```sh
     sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
       libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev \
-      gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav
+      gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+      gstreamer1.0-gl gstreamer1.0-libav
     ```
 
     The GStreamer plugins are needed at run time: without them audio and video play silently or

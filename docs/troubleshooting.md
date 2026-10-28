@@ -49,19 +49,31 @@ before deleting its cache and saved files.
 RUST_LOG=debug npm run tauri dev   # in ui/
 ```
 
-### Linux: no sound, `autoaudiosink not found`
+### Linux: no sound or no picture (`autoaudiosink` or `h264parse not found`)
 
 On Linux the web engine (WebKitGTK) plays audio and video through GStreamer. If the log says
-`GStreamer element autoaudiosink not found`, or audio and video play silently, the GStreamer
-plugins are missing. The `.deb` and `.rpm` packages depend on them since 0.3.1 and the AppImage
-bundles them; for an older version or a build from source, install them:
+`GStreamer element autoaudiosink not found` or `GStreamer element h264parse not found`, or audio
+and video play silently or not at all, GStreamer plugins are missing. The `.deb` and `.rpm`
+packages depend on them and the AppImage bundles them (the bad and GL plugins since 0.3.3); for an
+older version or a build from source, install them:
 
 ```sh
-sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav   # Debian, Ubuntu
-sudo dnf install gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugin-libav  # Fedora
+sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+  gstreamer1.0-gl gstreamer1.0-libav                                          # Debian, Ubuntu
+sudo dnf install gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free \
+  gstreamer1-plugin-openh264 gstreamer1-plugin-libav                          # Fedora
+sudo zypper install gstreamer-plugins-base gstreamer-plugins-good gstreamer-plugins-bad \
+  gstreamer-plugin-openh264 gstreamer-plugins-libav                           # openSUSE
+sudo pacman -S gst-plugins-base gst-plugins-good gst-plugins-bad gst-libav    # Arch
 ```
 
-`gstreamer1.0-libav` decodes H.264 and AAC, which most videos use.
+The good plugins play the sound, the bad plugins have the H.264 parser that videos with converted
+Dolby or DTS audio need (and WebVTT for subtitles), the GL plugins render video on the GPU, and
+libav decodes H.264 and AAC, which most videos use. Fedora and openSUSE leave H.264 out of libav;
+there the openh264 plugin decodes it (Fedora enables Cisco's openh264 repository by default).
+
+The AppImage uses the plugins it bundles, not the system's, so installing them does not help it:
+use the AppImage of 0.3.3 or later, or your distribution's package.
 
 ### A video plays without sound
 
