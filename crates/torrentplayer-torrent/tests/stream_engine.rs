@@ -834,8 +834,15 @@ async fn a_stopped_thumbnail_download_leaves_nothing_behind() {
         () = tokio::time::sleep(Duration::from_secs(10)) => panic!("no cache at {}", cache.display()),
     }
     assert!(!dir.path().join("thumbnails").exists());
-    tokio::time::sleep(Duration::from_secs(3)).await;
-    assert!(!cache.exists(), "the stopped download's cache is deleted");
+    // The download stops on its own and its cache is removed; on a slow runner (Windows CI) that
+    // takes longer than a fixed wait allowed, so wait for it.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while cache.exists() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .expect("the stopped download's cache is deleted");
     engine.shutdown().await;
 }
 
